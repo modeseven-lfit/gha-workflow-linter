@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-name: "🔍 GitHub Action/WorkflowL inter"
-description: "Linter for validating GitHub action and workflow calls"
+name: "🔍 GitHub Action/Workflow Linter"
+description: "Linter for validating GitHub workflow/action calls"
 author: "The Linux Foundation"
 
 inputs:
@@ -45,13 +45,13 @@ inputs:
 outputs:
   errors-found:
     description: "Number of validation errors found"
-    value: ${{ steps.call-linter.outputs.errors-found }}
+    value: ${{ steps.gha-workflow-linter.outputs.errors-found }}
   total-calls:
     description: "Total number of action calls scanned"
-    value: ${{ steps.call-linter.outputs.total-calls }}
+    value: ${{ steps.gha-workflow-linter.outputs.total-calls }}
   scan-summary:
     description: "JSON summary of scan results"
-    value: ${{ steps.call-linter.outputs.scan-summary }}
+    value: ${{ steps.gha-workflow-linter.outputs.scan-summary }}
 
 runs:
   using: "composite"
@@ -68,22 +68,22 @@ runs:
       with:
         enable-cache: true
 
-    - name: "Install call-linter"
+    - name: "Install gha-workflow-linter"
       shell: bash
       run: |
         if [[ -f "${{ github.action_path }}/pyproject.toml" ]]; then
           # Install from local source when running from the action repository
-          echo "Installing call-linter from local source..."
+          echo "Installing gha-workflow-linter from local source..."
           cd "${{ github.action_path }}"
           uv pip install --system -e .
         else
           # Install from PyPI when used as external action
-          echo "Installing call-linter from PyPI..."
-          uv pip install --system call-linter
+          echo "Installing gha-workflow-linter from PyPI..."
+          uv pip install --system gha-workflow-linter
         fi
 
-    - name: "Run call-linter"
-      id: call-linter
+    - name: "Run gha-workflow-linter"
+      id: gha-workflow-linter
       shell: bash
       run: |
         # Build command arguments
@@ -124,9 +124,9 @@ runs:
           args+=(--no-require-pinned-sha)
         fi
 
-        # Run call-linter and capture output
+        # Run gha-workflow-linter and capture output
         if [[ "${{ inputs.output-format }}" == "json" ]]; then
-          output=$(call-linter "${args[@]}")
+          output=$(gha-workflow-linter "${args[@]}")
           echo "scan-summary<<EOF" >> "$GITHUB_OUTPUT"
           echo "$output" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
@@ -138,14 +138,15 @@ runs:
             jq -r '.scan_summary.total_calls // 0')
         else
           # For text output, run twice, once for display and again for JSON
-          call-linter "${args[@]}"
+          gha-workflow-linter "${args[@]}"
           exit_code=$?
 
           # Get JSON data for outputs
           json_args=("${args[@]}")
           json_args[1]="--format"
           json_args[2]="json"
-          json_output=$(call-linter "${json_args[@]}" 2>/dev/null || echo '{}')
+          json_output=$(gha-workflow-linter "${json_args[@]}"\
+            2>/dev/null || echo '{}')
 
           errors_found=$(echo "$json_output" | \
             jq -r '.validation_summary.total_errors // 0' \

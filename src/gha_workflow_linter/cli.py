@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-"""CLI interface for call-linter using Typer."""
+"""CLI interface for gha-workflow-linter using Typer."""
 
 from __future__ import annotations
 
@@ -33,14 +33,14 @@ def help_callback(ctx: typer.Context, param: Any, value: bool) -> None:
     """Show help with version information."""
     if not value or ctx.resilient_parsing:
         return
-    console.print(f"🏷️ call-linter version {__version__}")
+    console.print(f"🏷️ gha-workflow-linter version {__version__}")
     console.print()
     console.print(ctx.get_help())
     raise typer.Exit()
 
 
 app = typer.Typer(
-    name="call-linter",
+    name="gha-workflow-linter",
     help="GitHub Actions workflow linter for validating action and workflow calls",
     add_completion=False,
     rich_markup_mode="rich",
@@ -52,7 +52,7 @@ console = Console()
 def version_callback(value: bool) -> None:
     """Show version and exit."""
     if value:
-        console.print(f"🏷️ call-linter version {__version__}")
+        console.print(f"🏷️ gha-workflow-linter version {__version__}")
         raise typer.Exit()
 
 
@@ -185,27 +185,27 @@ def main(
 
         # Using environment variable (recommended)
         export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-        call-linter
+        gha-workflow-linter
 
         # Using CLI flag
-        call-linter --github-token ghp_xxxxxxxxxxxxxxxxxxxx
+        gha-workflow-linter --github-token ghp_xxxxxxxxxxxxxxxxxxxx
 
     Examples:
 
         # Scan current directory
-        call-linter
+        gha-workflow-linter
 
         # Scan specific path
-        call-linter /path/to/project
+        gha-workflow-linter /path/to/project
 
         # Use custom config and output JSON
-        call-linter --config config.yaml --format json
+        gha-workflow-linter --config config.yaml --format json
 
         # Verbose output with 8 workers and token
-        call-linter --verbose --workers 8 --github-token ghp_xxx
+        gha-workflow-linter --verbose --workers 8 --github-token ghp_xxx
 
         # Disable SHA pinning requirement
-        call-linter --no-require-pinned-sha
+        gha-workflow-linter --no-require-pinned-sha
     """
     # Handle mutually exclusive options
     if verbose and quiet:
@@ -253,7 +253,7 @@ def main(
             config.parallel_workers = 1
         config.require_pinned_sha = require_pinned_sha
 
-        logger.info(f"Starting call-linter {__version__}")
+        logger.info(f"Starting gha-workflow-linter {__version__}")
         logger.info(f"Scanning path: {path}")
 
         # Check for GitHub token and show warning if missing

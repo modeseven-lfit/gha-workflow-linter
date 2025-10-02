@@ -50,7 +50,7 @@ class GitHubGraphQLClient:
         """Async context manager entry."""
         headers = {
             "Accept": "application/vnd.github.v3+json",
-            "User-Agent": "call-linter/1.0",
+            "User-Agent": "gha-workflow-linter/1.0",
         }
 
         if self._token:

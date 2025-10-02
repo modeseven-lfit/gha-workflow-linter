@@ -6,7 +6,7 @@ requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
-name = "call-linter"
+name = "gha-workflow-linter"
 dynamic = ["version"]
 description = "GitHub Actions workflow linter for validating action and workflow calls"
 readme = "README.md"
@@ -52,23 +52,23 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/lfit/call-linter"
-Documentation = "https://call-linter.readthedocs.io"
-Repository = "https://github.com/lfit/call-linter.git"
-"Bug Tracker" = "https://github.com/lfit/call-linter/issues"
-Changelog = "https://github.com/lfit/call-linter/releases"
+Homepage = "https://github.com/lfit/gha-workflow-linter"
+Documentation = "https://gha-workflow-linter.readthedocs.io"
+Repository = "https://github.com/lfit/gha-workflow-linter.git"
+"Bug Tracker" = "https://github.com/lfit/gha-workflow-linter/issues"
+Changelog = "https://github.com/lfit/gha-workflow-linter/releases"
 
 [project.scripts]
-call-linter = "call_linter.cli:app"
+gha-workflow-linter = "gha_workflow_linter.cli:app"
 
 [tool.hatch.version]
 source = "vcs"
 
 [tool.hatch.build.hooks.vcs]
-version-file = "src/call_linter/_version.py"
+version-file = "src/gha_workflow_linter/_version.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/call_linter"]
+packages = ["src/gha_workflow_linter"]
 
 [tool.ruff]
 target-version = "py39"
@@ -102,7 +102,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["call_linter"]
+known-first-party = ["gha_workflow_linter"]
 force-sort-within-sections = true
 
 [tool.ruff.format]
@@ -142,7 +142,7 @@ python_functions = ["test_*"]
 addopts = [
     "--strict-markers",
     "--strict-config",
-    "--cov=call_linter",
+    "--cov=gha_workflow_linter",
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-report=xml",
@@ -156,7 +156,7 @@ markers = [
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.coverage.run]
-source = ["src/call_linter"]
+source = ["src/gha_workflow_linter"]
 omit = [
     "*/tests/*",
     "*/test_*",

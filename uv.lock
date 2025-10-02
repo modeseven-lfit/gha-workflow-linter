@@ -36,7 +36,7 @@ wheels = [
 ]
 
 [[package]]
-name = "call-linter"
+name = "gha-workflow-linter"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },

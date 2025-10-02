@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-"""Configuration management for call-linter."""
+"""Configuration management for gha-workflow-linter."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ class ConfigManager:
             Path to config file if found, None otherwise
         """
         # Check current directory first
-        for filename in ["call-linter.yaml", "call-linter.yml", ".call-linter.yaml"]:
+        for filename in ["gha-workflow-linter.yaml", "gha-workflow-linter.yml", ".gha-workflow-linter.yaml"]:
             config_path = Path.cwd() / filename
             if config_path.exists():
                 return config_path
@@ -91,12 +91,12 @@ class ConfigManager:
         # Use XDG_CONFIG_HOME if set
         xdg_config = os.environ.get("XDG_CONFIG_HOME")
         if xdg_config:
-            return Path(xdg_config) / "call-linter"
+            return Path(xdg_config) / "gha-workflow-linter"
 
         # Use ~/.config on Unix-like systems
         home = Path.home()
         if home.exists():
-            config_dir = home / ".config" / "call-linter"
+            config_dir = home / ".config" / "gha-workflow-linter"
             return config_dir
 
         return None
@@ -143,7 +143,7 @@ class ConfigManager:
         if output_path is None:
             config_dir = self._get_config_directory()
             if config_dir is None:
-                output_path = Path.cwd() / "call-linter.yaml"
+                output_path = Path.cwd() / "gha-workflow-linter.yaml"
             else:
                 config_dir.mkdir(parents=True, exist_ok=True)
                 output_path = config_dir / "config.yaml"
@@ -174,7 +174,7 @@ class ConfigManager:
         }
 
         # Add comments for clarity
-        yaml_content = f"""# call-linter configuration file
+        yaml_content = f"""# gha-workflow-linter configuration file
 # SPDX-License-Identifier: Apache-2.0
 
 # Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)

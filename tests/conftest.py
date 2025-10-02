@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-"""Pytest configuration and shared fixtures for call-linter tests."""
+"""Pytest configuration and shared fixtures for gha-workflow-linter tests."""
 
 from collections.abc import Generator
 from pathlib import Path
@@ -9,7 +9,12 @@ import tempfile
 
 import pytest
 
-from call_linter.models import Config, GitConfig, LogLevel, NetworkConfig
+from gha_workflow_linter.models import (
+    Config,
+    GitConfig,
+    LogLevel,
+    NetworkConfig,
+)
 
 
 @pytest.fixture  # type: ignore[misc]
@@ -200,7 +205,7 @@ def mock_git_commands(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture  # type: ignore[misc]
 def sample_config_file_content() -> str:
     """Sample configuration file content."""
-    return """# call-linter configuration file
+    return """# gha-workflow-linter configuration file
 # SPDX-License-Identifier: Apache-2.0
 
 log_level: INFO
@@ -231,7 +236,7 @@ def setup_logging() -> None:
     """Setup test logging configuration."""
     import logging
 
-    logging.getLogger("call_linter").setLevel(logging.DEBUG)
+    logging.getLogger("gha_workflow_linter").setLevel(logging.DEBUG)
 
 
 # Markers for test categorization

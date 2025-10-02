@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from call_linter.models import (
+from gha_workflow_linter.models import (
     ActionCall,
     ActionCallType,
     APICallStats,
@@ -18,7 +18,7 @@ from call_linter.models import (
     ReferenceType,
     ValidationResult,
 )
-from call_linter.validator import ActionCallValidator
+from gha_workflow_linter.validator import ActionCallValidator
 
 
 @pytest.fixture  # type: ignore[misc]
@@ -505,7 +505,7 @@ class TestValidatorDeduplication:
         mock_github_client = AsyncMock()
 
         with patch(
-            "call_linter.validator.GitHubGraphQLClient"
+            "gha_workflow_linter.validator.GitHubGraphQLClient"
         ) as mock_client_class:
             mock_client_class.return_value = mock_github_client
 
