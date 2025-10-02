@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 # 🔍 Call Linter
 
-[![GitHub Actions](https://github.com/lfit/call-linter/workflows/CI/badge.svg)](https://github.com/lfit/call-linter/actions)
+[![GitHub Actions](https://github.com/modeseven-lfit/call-linter/workflows/CI/badge.svg)](https://github.com/modeseven-lfit/call-linter/actions)
 [![PyPI version](https://badge.fury.io/py/call-linter.svg)](https://badge.fury.io/py/call-linter)
 [![Python Support](https://img.shields.io/pypi/pyversions/call-linter.svg)](https://pypi.org/project/call-linter/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
