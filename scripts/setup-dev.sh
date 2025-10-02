@@ -93,11 +93,11 @@ else
     warning "gha-workflow-linter command not in PATH, use: python -m gha_workflow_linter.cli"
 fi
 
-# Run self-linting test
-info "Running self-linting test..."
+# Run self-linting test with local development version
+info "Running self-linting test with local development version..."
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     python -m gha_workflow_linter.cli . --quiet
-    success "Self-linting test passed"
+    success "Self-linting test passed (local version)"
 else
     warning "Skipping self-linting test (no GitHub token)"
 fi
@@ -108,15 +108,16 @@ pre-commit run --all-files > /dev/null 2>&1 || {
     warning "Some pre-commit checks failed (this is normal on first run)"
     info "Run 'pre-commit run --all-files' to see details"
 }
-success "Pre-commit setup complete"
+success "Pre-commit setup complete (uses published version for consistency)"
 
 echo ""
 success "Development environment setup complete!"
 echo ""
 echo "Next steps:"
 echo "1. Set GITHUB_TOKEN environment variable (if not done)"
-echo "2. Run tests: pytest"
-echo "3. Run linting: pre-commit run --all-files"
-echo "4. Test CLI: python -m gha_workflow_linter.cli --help"
+echo "2. Run tests: uv run pytest"
+echo "3. Run linting: pre-commit run --all-files (uses published version)"
+echo "4. Test local CLI: python -m gha_workflow_linter.cli --help"
+echo "5. Test local changes: python -m gha_workflow_linter.cli . --quiet"
 echo ""
 echo "Happy coding! 🚀"

@@ -33,7 +33,7 @@ Actions workflows reference valid repositories, branches, tags, and commit SHAs.
 ### From PyPI
 
 ```bash
-pip install gha-workflow-linter
+uv add gha-workflow-linter
 ```
 
 ### From Source
@@ -327,7 +327,7 @@ Valid action call patterns:
 
 ### Reference Validation
 
-GHA Workflow Linter validates that references exist using `git ls-remote`:
+GHA Workflow Linter validates that references exist using GitHub's GraphQL API:
 
 - **Commit SHAs**: 40-character hexadecimal strings
 - **Tags**: Semantic versions (v1.0.0) and other tag formats
@@ -338,9 +338,9 @@ GHA Workflow Linter validates that references exist using `git ls-remote`:
 <!-- markdownlint-disable MD013 -->
 | Type | Example | Validation Method | SHA Pinning |
 |------|---------|-------------------|-------------|
-| Commit SHA | `f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a` | `git ls-remote` | ✅ **Required by default** |
-| Semantic Version | `v1.2.3`, `1.0.0` | `git ls-remote --tags` | ❌ Fails unless `--no-require-pinned-sha` |
-| Branch | `main`, `develop` | `git ls-remote --heads` | ❌ Fails unless `--no-require-pinned-sha` |
+| Commit SHA | `f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a` | GitHub GraphQL API | ✅ **Required by default** |
+| Semantic Version | `v1.2.3`, `1.0.0` | GitHub GraphQL API | ❌ Fails unless `--no-require-pinned-sha` |
+| Branch | `main`, `develop` | GitHub GraphQL API | ❌ Fails unless `--no-require-pinned-sha` |
 <!-- markdownlint-enable MD013 -->
 
 ### SHA Pinning Enforcement
@@ -587,15 +587,15 @@ uv pip install -e ".[dev]"
 
 ```bash
 # Run all tests
-pytest
+uv run pytest
 
 # Run with coverage
-pytest --cov=gha_workflow_linter
+uv run pytest --cov=gha_workflow_linter
 
 # Run specific test categories
-pytest -m unit
-pytest -m integration
-pytest -m "not slow"
+uv run pytest -m unit
+uv run pytest -m integration
+uv run pytest -m "not slow"
 ```
 
 ### Code Quality
@@ -616,13 +616,25 @@ pre-commit run --all-files
 
 ### Building and Publishing
 
-```bash
-# Build package
-uv build
+**Local Builds:**
 
-# Publish to PyPI
-uv publish
+```bash
+uv build
 ```
+
+This project uses automated CI/CD workflows for building and publishing:
+
+**Development/Testing:**
+
+- Pull requests trigger the `build-test.yaml` workflow
+- Automatically runs tests, audits, linting
+- Validates the package builds without errors
+
+**Releases:**
+
+- The `build-test-release.yaml` workflow performs publishing/releasing
+- Triggered by pushing a git tag to the repository
+- Automatically builds, tests and publishes the package
 
 ## Architecture
 
@@ -642,7 +654,7 @@ GHA Workflow Linter performance optimizations:
 - **Parallel Processing**: Multi-threaded validation
 - **Caching**: Repository and reference validation caching
 - **Rate Limiting**: Configurable delays to respect API limits
-- **Efficient Git Operations**: Uses `git ls-remote` vs full clones
+- **Efficient API Operations**: Uses GitHub GraphQL API
 
 Typical performance on a repository with 50 workflows and 200 action calls:
 
