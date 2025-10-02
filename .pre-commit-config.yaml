@@ -98,6 +98,19 @@ repos:
     hooks:
       - id: codespell
 
+  # GitHub Actions workflow linter (self-linting)
+  # - repo: local
+  #   hooks:
+  #     - id: call-linter
+  #       name: call-linter - validate GitHub Actions workflows
+  #       entry: python
+  #       args: [-m, call_linter.cli, ., --quiet]
+  #       language: system
+  #       files: '^\.github/workflows/.*\.ya?ml$'
+  #       pass_filenames: false
+  #       always_run: false
+  #       require_serial: true
+
   - repo: https://github.com/python-jsonschema/check-jsonschema
     rev: 83987cd6ad8943c7f029b500b14aaf82c00a01fa  # frozen: 0.34.0
     hooks:

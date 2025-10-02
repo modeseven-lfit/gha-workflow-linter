@@ -1,0 +1,409 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+"""Validator for GitHub Actions calls using GraphQL API with comprehensive tracking."""
+
+from __future__ import annotations
+
+import asyncio
+from collections import defaultdict
+import logging
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from rich.progress import Progress, TaskID
+    pass
+
+
+from .github_api import GitHubGraphQLClient
+from .models import (
+    ActionCall,
+    APICallStats,
+    Config,
+    ReferenceType,
+    ValidationError,
+    ValidationResult,
+)
+
+
+class ActionCallValidator:
+    """Validator for GitHub Actions and workflow calls using GraphQL API."""
+
+    def __init__(self, config: Config) -> None:
+        """
+        Initialize the validator.
+
+        Args:
+            config: Configuration object
+        """
+        self.config = config
+        self.logger = logging.getLogger(__name__)
+        self._github_client: GitHubGraphQLClient | None = None
+        self.api_stats = APICallStats()
+
+    async def __aenter__(self) -> ActionCallValidator:
+        """Async context manager entry."""
+        self._github_client = GitHubGraphQLClient(self.config.github_api)
+        await self._github_client.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Async context manager exit."""
+        if self._github_client:
+            await self._github_client.__aexit__(exc_type, exc_val, exc_tb)
+
+    async def validate_action_calls_async(
+        self,
+        action_calls: dict[Path, dict[int, ActionCall]],
+        progress: Progress | None = None,
+        task_id: TaskID | None = None,
+    ) -> list[ValidationError]:
+        """
+        Validate all action calls against remote repositories using GraphQL.
+
+        Args:
+            action_calls: Dictionary mapping file paths to action calls
+            progress: Optional progress bar
+            task_id: Optional task ID for progress updates
+
+        Returns:
+            List of validation errors
+        """
+        if not self._github_client:
+            raise RuntimeError("GitHub client not initialized")
+
+        self.logger.info("Starting action call validation using GitHub GraphQL API")
+
+        errors: list[ValidationError] = []
+
+        # Flatten and deduplicate action calls
+        all_calls: list[tuple[Path, ActionCall]] = []
+        unique_calls: dict[str, ActionCall] = {}
+        call_locations: dict[str, list[tuple[Path, ActionCall]]] = defaultdict(list)
+
+        for file_path, calls in action_calls.items():
+            for action_call in calls.values():
+                all_calls.append((file_path, action_call))
+
+                # Create unique key for deduplication
+                call_key = f"{action_call.organization}/{action_call.repository}@{action_call.reference}"
+                unique_calls[call_key] = action_call
+                call_locations[call_key].append((file_path, action_call))
+
+        total_calls = len(all_calls)
+        unique_count = len(unique_calls)
+
+        if total_calls == 0:
+            self.logger.info("No action calls to validate")
+            return errors
+
+        self.logger.info(
+            f"Validating {total_calls} action calls "
+            f"({unique_count} unique calls) using GraphQL API"
+        )
+
+        # Deduplication savings
+        saved_validations = total_calls - unique_count
+        if saved_validations > 0:
+            self.logger.info(
+                f"Deduplication saved {saved_validations} validations "
+                f"({saved_validations/total_calls*100:.1f}% reduction)"
+            )
+
+        # Extract unique repositories and references
+        unique_repos = set()
+        repo_refs: list[tuple[str, str]] = []
+
+        for _call_key, action_call in unique_calls.items():
+            repo_key = f"{action_call.organization}/{action_call.repository}"
+            unique_repos.add(repo_key)
+            repo_refs.append((repo_key, action_call.reference))
+
+        # Update progress
+        if progress and task_id:
+            progress.update(
+                task_id,
+                total=len(unique_repos) + len(repo_refs),
+                description="Validating repositories..."
+            )
+
+        # Step 1: Validate repositories in batch
+        self.logger.debug(f"Validating {len(unique_repos)} unique repositories")
+
+        try:
+            repo_results = await self._github_client.validate_repositories_batch(
+                list(unique_repos)
+            )
+
+            # Merge API stats
+            self._merge_api_stats(self._github_client.get_api_stats())
+
+            self.logger.debug(
+                f"Repository validation complete. API calls so far: "
+                f"{self.api_stats.total_calls} (GraphQL: {self.api_stats.graphql_calls}, "
+                f"Cache hits: {self.api_stats.cache_hits})"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error during repository validation: {e}")
+            repo_results = dict.fromkeys(unique_repos, False)
+
+        # Update progress
+        if progress and task_id:
+            progress.update(
+                task_id,
+                completed=len(unique_repos),
+                description="Validating references..."
+            )
+
+        # Step 2: Validate references for valid repositories only
+        valid_repo_refs = [
+            (repo_key, ref) for repo_key, ref in repo_refs
+            if repo_results.get(repo_key, False)
+        ]
+
+        self.logger.debug(f"Validating {len(valid_repo_refs)} references for valid repositories")
+
+        try:
+            ref_results = await self._github_client.validate_references_batch(
+                valid_repo_refs
+            )
+
+            # Merge API stats again
+            self._merge_api_stats(self._github_client.get_api_stats())
+
+            self.logger.debug(
+                f"Reference validation complete. Total API calls: "
+                f"{self.api_stats.total_calls} (GraphQL: {self.api_stats.graphql_calls}, "
+                f"REST: {self.api_stats.rest_calls}, "
+                f"Cache hits: {self.api_stats.cache_hits})"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error during reference validation: {e}")
+            ref_results = dict.fromkeys(valid_repo_refs, False)
+
+        # Update progress
+        if progress and task_id:
+            progress.update(
+                task_id,
+                completed=len(unique_repos) + len(valid_repo_refs),
+                description="Processing validation results..."
+            )
+
+        # Step 3: Map results back to all occurrences
+        validation_results = self._combine_validation_results(
+            unique_calls, repo_results, ref_results
+        )
+
+        for call_key, result in validation_results.items():
+            if result != ValidationResult.VALID:
+                for file_path, action_call in call_locations[call_key]:
+                    error = ValidationError(
+                        file_path=file_path,
+                        action_call=action_call,
+                        result=result,
+                        error_message=self._get_error_message(result)
+                    )
+                    errors.append(error)
+
+        # Step 4: Check SHA pinning requirements if enabled
+        if self.config.require_pinned_sha:
+            for call_key, action_call in unique_calls.items():
+                # Only check if the call passed other validations
+                if validation_results.get(call_key) == ValidationResult.VALID:
+                    if action_call.reference_type != ReferenceType.COMMIT_SHA:
+                        # Add error for each occurrence of this unpinned call
+                        for file_path, _ in call_locations[call_key]:
+                            error = ValidationError(
+                                file_path=file_path,
+                                action_call=action_call,
+                                result=ValidationResult.NOT_PINNED_TO_SHA,
+                                error_message=self._get_error_message(ValidationResult.NOT_PINNED_TO_SHA)
+                            )
+                            errors.append(error)
+
+        # Log final statistics
+        rate_limit_info = self._github_client.get_rate_limit_info()
+        self.logger.info(
+            f"Validation complete: {len(errors)} errors out of "
+            f"{total_calls} calls ({unique_count} unique calls validated)"
+        )
+        self.logger.info(
+            f"API Statistics: {self.api_stats.total_calls} total calls "
+            f"(GraphQL: {self.api_stats.graphql_calls}, "
+            f"REST: {self.api_stats.rest_calls}, "
+            f"Cache hits: {self.api_stats.cache_hits})"
+        )
+        self.logger.info(
+            f"GitHub Rate Limit: {rate_limit_info.remaining}/"
+            f"{rate_limit_info.limit} remaining"
+        )
+
+        if self.api_stats.rate_limit_delays > 0:
+            self.logger.warning(
+                f"Rate limit delays encountered: {self.api_stats.rate_limit_delays}"
+            )
+
+        return errors
+
+    def validate_action_calls(
+        self,
+        action_calls: dict[Path, dict[int, ActionCall]],
+        progress: Progress | None = None,
+        task_id: TaskID | None = None,
+    ) -> list[ValidationError]:
+        """
+        Synchronous wrapper for async validation.
+
+        Args:
+            action_calls: Dictionary mapping file paths to action calls
+            progress: Optional progress bar
+            task_id: Optional task ID for progress updates
+
+        Returns:
+            List of validation errors
+        """
+        async def _run_validation() -> list[ValidationError]:
+            async with self:
+                return await self.validate_action_calls_async(
+                    action_calls, progress, task_id
+                )
+
+        return asyncio.run(_run_validation())
+
+    def _combine_validation_results(
+        self,
+        unique_calls: dict[str, ActionCall],
+        repo_results: dict[str, bool],
+        ref_results: dict[tuple[str, str], bool]
+    ) -> dict[str, ValidationResult]:
+        """
+        Combine repository and reference validation results.
+
+        Args:
+            unique_calls: Dictionary of unique action calls
+            repo_results: Repository validation results
+            ref_results: Reference validation results
+
+        Returns:
+            Dictionary mapping call keys to validation results
+        """
+        validation_results = {}
+
+        for call_key, action_call in unique_calls.items():
+            repo_key = f"{action_call.organization}/{action_call.repository}"
+
+            # Check repository validity
+            if not repo_results.get(repo_key, False):
+                validation_results[call_key] = ValidationResult.INVALID_REPOSITORY
+                continue
+
+            # Check reference validity
+            ref_key = (repo_key, action_call.reference)
+            if not ref_results.get(ref_key, False):
+                validation_results[call_key] = ValidationResult.INVALID_REFERENCE
+                continue
+
+            # Both repository and reference are valid
+            validation_results[call_key] = ValidationResult.VALID
+
+        return validation_results
+
+    def _merge_api_stats(self, client_stats: APICallStats) -> None:
+        """
+        Merge API statistics from GitHub client.
+
+        Args:
+            client_stats: API statistics from GitHub client
+        """
+        self.api_stats.total_calls = client_stats.total_calls
+        self.api_stats.graphql_calls = client_stats.graphql_calls
+        self.api_stats.rest_calls = client_stats.rest_calls
+        self.api_stats.git_calls = client_stats.git_calls
+        self.api_stats.cache_hits = client_stats.cache_hits
+        self.api_stats.rate_limit_delays = client_stats.rate_limit_delays
+        self.api_stats.failed_calls = client_stats.failed_calls
+
+    def _get_error_message(self, result: ValidationResult) -> str:
+        """
+        Get human-readable error message for validation result.
+
+        Args:
+            result: ValidationResult enum value
+
+        Returns:
+            Error message string
+        """
+        messages = {
+            ValidationResult.INVALID_REPOSITORY: "Repository not found",
+            ValidationResult.INVALID_REFERENCE: "Invalid branch, tag, or commit SHA",
+            ValidationResult.INVALID_SYNTAX: "Invalid action call syntax",
+            ValidationResult.NETWORK_ERROR: "Network error during validation",
+            ValidationResult.TIMEOUT: "Timeout during validation",
+            ValidationResult.NOT_PINNED_TO_SHA: "Action not pinned to commit SHA",
+        }
+
+        return messages.get(result, "Unknown validation error")
+
+    def get_validation_summary(
+        self,
+        errors: list[ValidationError],
+        total_calls: int = 0,
+        unique_calls: int = 0
+    ) -> dict[str, int]:
+        """
+        Generate summary statistics for validation errors.
+
+        Args:
+            errors: List of validation errors
+            total_calls: Total number of action calls processed
+            unique_calls: Number of unique calls validated
+
+        Returns:
+            Dictionary with error statistics and API metrics
+        """
+        summary = {
+            "total_errors": len(errors),
+            "total_calls": total_calls,
+            "unique_calls_validated": unique_calls,
+            "duplicate_calls_avoided": max(0, total_calls - unique_calls),
+            "invalid_repositories": 0,
+            "invalid_references": 0,
+            "syntax_errors": 0,
+            "network_errors": 0,
+            "timeouts": 0,
+            "not_pinned_to_sha": 0,
+
+            # API call statistics
+            "api_calls_total": self.api_stats.total_calls,
+            "api_calls_graphql": self.api_stats.graphql_calls,
+            "api_calls_rest": self.api_stats.rest_calls,
+            "api_calls_git": self.api_stats.git_calls,
+            "cache_hits": self.api_stats.cache_hits,
+            "rate_limit_delays": self.api_stats.rate_limit_delays,
+            "failed_api_calls": self.api_stats.failed_calls,
+        }
+
+        # Count error types
+        for error in errors:
+            if error.result == ValidationResult.INVALID_REPOSITORY:
+                summary["invalid_repositories"] += 1
+            elif error.result == ValidationResult.INVALID_REFERENCE:
+                summary["invalid_references"] += 1
+            elif error.result == ValidationResult.INVALID_SYNTAX:
+                summary["syntax_errors"] += 1
+            elif error.result == ValidationResult.NETWORK_ERROR:
+                summary["network_errors"] += 1
+            elif error.result == ValidationResult.TIMEOUT:
+                summary["timeouts"] += 1
+            elif error.result == ValidationResult.NOT_PINNED_TO_SHA:
+                summary["not_pinned_to_sha"] += 1
+
+        return summary
+
+    def get_api_stats(self) -> APICallStats:
+        """Get current API call statistics."""
+        return self.api_stats.model_copy()  # type: ignore[no-any-return]

@@ -2,36 +2,174 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-# actions-template
-name: "🛠️ Actions Template"
-description: "Description of action"
-# Any relevant notes/observations can go here
+name: "🔍 GitHub Action/WorkflowL inter"
+description: "Linter for validating GitHub action and workflow calls"
+author: "The Linux Foundation"
 
 inputs:
-  input:
-    description: "Description of input"
-    required: true
+  path:
+    description: "Path to scan for workflows (default: current directory)"
+    required: false
+    default: "."
+  config-file:
+    description: "Path to configuration file"
+    required: false
+  log-level:
+    description: "Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)"
+    required: false
+    default: "INFO"
+  output-format:
+    description: "Output format (text, json)"
+    required: false
+    default: "text"
+  fail-on-error:
+    description: "Exit with error code if validation failures found"
+    required: false
+    default: "true"
+  parallel:
+    description: "Enable parallel processing"
+    required: false
+    default: "true"
+  workers:
+    description: "Number of parallel workers (1-32)"
+    required: false
+    default: "4"
+  exclude:
+    description: "Comma-separated patterns to exclude from scanning"
+    required: false
+  require-pinned-sha:
+    description: "Require action calls to be pinned to commit SHAs"
+    required: false
+    default: "true"
 
 outputs:
-  output:
-    description: "Description of output"
-    value: ${{ steps.code.outputs.output }}
+  errors-found:
+    description: "Number of validation errors found"
+    value: ${{ steps.call-linter.outputs.errors-found }}
+  total-calls:
+    description: "Total number of action calls scanned"
+    value: ${{ steps.call-linter.outputs.total-calls }}
+  scan-summary:
+    description: "JSON summary of scan results"
+    value: ${{ steps.call-linter.outputs.scan-summary }}
 
 runs:
   using: "composite"
   steps:
-    - name: "Friendly Name"
-      id: code
+    - name: "Setup Python"
+      # yamllint disable-line rule:line-length
+      uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5.3.0
+      with:
+        python-version: "3.11"
+
+    - name: "Install uv"
+      # yamllint disable-line rule:line-length
+      uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+      with:
+        enable-cache: true
+
+    - name: "Install call-linter"
       shell: bash
       run: |
-        # Friendly Name
-        input="${{ inputs.input }}"
-        if [ -z "$input" ]; then
-          echo "Error: mandatory input was not set/configured ❌"
-          exit 1
+        if [[ -f "${{ github.action_path }}/pyproject.toml" ]]; then
+          # Install from local source when running from the action repository
+          echo "Installing call-linter from local source..."
+          cd "${{ github.action_path }}"
+          uv pip install --system -e .
+        else
+          # Install from PyPI when used as external action
+          echo "Installing call-linter from PyPI..."
+          uv pip install --system call-linter
         fi
 
-        echo "output=$input" >> "$GITHUB_ENV"
-        echo "output=$input" >> "$GITHUB_OUTPUT"
-        echo "Action received: $input ✅"
-        echo "Action received: $input ✅" >> "$GITHUB_STEP_SUMMARY"
+    - name: "Run call-linter"
+      id: call-linter
+      shell: bash
+      run: |
+        # Build command arguments
+        args=("${{ inputs.path }}")
+
+        if [[ -n "${{ inputs.config-file }}" ]]; then
+          args+=(--config "${{ inputs.config-file }}")
+        fi
+
+        if [[ -n "${{ inputs.log-level }}" ]]; then
+          args+=(--log-level "${{ inputs.log-level }}")
+        fi
+
+        if [[ -n "${{ inputs.output-format }}" ]]; then
+          args+=(--format "${{ inputs.output-format }}")
+        fi
+
+        if [[ "${{ inputs.fail-on-error }}" == "false" ]]; then
+          args+=(--no-fail-on-error)
+        fi
+
+        if [[ "${{ inputs.parallel }}" == "false" ]]; then
+          args+=(--no-parallel)
+        fi
+
+        if [[ -n "${{ inputs.workers }}" ]]; then
+          args+=(--workers "${{ inputs.workers }}")
+        fi
+
+        if [[ -n "${{ inputs.exclude }}" ]]; then
+          IFS=',' read -ra EXCLUDES <<< "${{ inputs.exclude }}"
+          for exclude in "${EXCLUDES[@]}"; do
+            args+=(--exclude "$exclude")
+          done
+        fi
+
+        if [[ "${{ inputs.require-pinned-sha }}" == "false" ]]; then
+          args+=(--no-require-pinned-sha)
+        fi
+
+        # Run call-linter and capture output
+        if [[ "${{ inputs.output-format }}" == "json" ]]; then
+          output=$(call-linter "${args[@]}")
+          echo "scan-summary<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$output" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          # Extract error count from JSON
+          errors_found=$(echo "$output" | \
+            jq -r '.validation_summary.total_errors // 0')
+          total_calls=$(echo "$output" | \
+            jq -r '.scan_summary.total_calls // 0')
+        else
+          # For text output, run twice, once for display and again for JSON
+          call-linter "${args[@]}"
+          exit_code=$?
+
+          # Get JSON data for outputs
+          json_args=("${args[@]}")
+          json_args[1]="--format"
+          json_args[2]="json"
+          json_output=$(call-linter "${json_args[@]}" 2>/dev/null || echo '{}')
+
+          errors_found=$(echo "$json_output" | \
+            jq -r '.validation_summary.total_errors // 0' \
+              2>/dev/null || echo "0")
+          total_calls=$(echo "$json_output" | \
+            jq -r '.scan_summary.total_calls // 0' 2>/dev/null || echo "0")
+
+          echo "scan-summary<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$json_output" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+        fi
+
+        echo "errors-found=$errors_found" >> "$GITHUB_OUTPUT"
+        echo "total-calls=$total_calls" >> "$GITHUB_OUTPUT"
+
+        # Set step summary
+        if [[ "$errors_found" -eq 0 ]]; then
+          echo "✅ All $total_calls action calls are valid!" \
+            >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "❌ Found $errors_found validation errors out of $total_calls" \
+          >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+branding:
+  icon: "shield"
+  color: "blue"
