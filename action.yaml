@@ -126,7 +126,7 @@ runs:
 
         # Run gha-workflow-linter and capture output
         if [[ "${{ inputs.output-format }}" == "json" ]]; then
-          output=$(gha-workflow-linter "${args[@]}")
+          output=$(gha-workflow-linter lint "${args[@]}" --no-cache)
           echo "scan-summary<<EOF" >> "$GITHUB_OUTPUT"
           echo "$output" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
@@ -138,14 +138,21 @@ runs:
             jq -r '.scan_summary.total_calls // 0')
         else
           # For text output, run twice, once for display and again for JSON
-          gha-workflow-linter "${args[@]}"
+          gha-workflow-linter lint "${args[@]}" --no-cache
           exit_code=$?
 
-          # Get JSON data for outputs
-          json_args=("${args[@]}")
-          json_args[1]="--format"
-          json_args[2]="json"
-          json_output=$(gha-workflow-linter "${json_args[@]}"\
+          # Get JSON data for outputs - rebuild args with --format json
+          json_args=("${args[0]}")  # Keep the path
+          json_args+=(--format json)
+
+          # Add all other args except format-related ones
+          for arg in "${args[@]:1}"; do
+            if [[ "$arg" != "--format" && "$arg" != "text" ]]; then
+              json_args+=("$arg")
+            fi
+          done
+
+          json_output=$(gha-workflow-linter lint "${json_args[@]}" --no-cache \
             2>/dev/null || echo '{}')
 
           errors_found=$(echo "$json_output" | \

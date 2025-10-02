@@ -24,6 +24,7 @@ import typer
 from typer.core import TyperGroup
 
 from . import __version__
+from .cache import ValidationCache
 from .config import ConfigManager
 from .models import CLIOptions, Config, LogLevel
 from .scanner import WorkflowScanner
@@ -39,12 +40,50 @@ def help_callback(ctx: typer.Context, param: Any, value: bool) -> None:
     raise typer.Exit()
 
 
+def main_app_help_callback(ctx: typer.Context, param: Any, value: bool) -> None:
+    """Show main app help with version information."""
+    if not value or ctx.resilient_parsing:
+        return
+    console.print(f"🏷️ gha-workflow-linter version {__version__}")
+    console.print()
+    console.print(ctx.get_help())
+    raise typer.Exit()
+
+
+def cache_help_callback(ctx: typer.Context, param: Any, value: bool) -> None:
+    """Show cache command help with version information."""
+    if not value or ctx.resilient_parsing:
+        return
+    console.print(f"🏷️ gha-workflow-linter version {__version__}")
+    console.print()
+    console.print(ctx.get_help())
+    raise typer.Exit()
+
+
 app = typer.Typer(
     name="gha-workflow-linter",
     help="GitHub Actions workflow linter for validating action and workflow calls",
     add_completion=False,
     rich_markup_mode="rich",
 )
+
+# Add custom help option to main app
+@app.callback(invoke_without_command=True)  # type: ignore[misc]
+def main_callback(
+    ctx: typer.Context,
+    help: bool = typer.Option(
+        False,
+        "--help",
+        callback=main_app_help_callback,
+        is_eager=True,
+        help="Show this message and exit",
+        expose_value=False,
+    ),
+) -> None:
+    """GitHub Actions workflow linter for validating action and workflow calls"""
+    if ctx.invoked_subcommand is None:
+        # Only show help if no subcommand was invoked
+        pass
 
 console = Console()
 
@@ -88,7 +127,7 @@ def setup_logging(log_level: LogLevel, quiet: bool = False) -> None:
 
 
 @app.command()  # type: ignore[misc]
-def main(
+def lint(
     path: Path | None = typer.Argument(
         None,
         help="Path to scan for workflows (default: current directory)",
@@ -160,6 +199,22 @@ def main(
         "--require-pinned-sha/--no-require-pinned-sha",
         help="Require action calls to be pinned to commit SHAs (default: enabled)",
     ),
+    no_cache: bool = typer.Option(
+        False,
+        "--no-cache",
+        help="Bypass local cache and always validate against remote repositories",
+    ),
+    purge_cache: bool = typer.Option(
+        False,
+        "--purge-cache",
+        help="Clear all cached validation results and exit",
+    ),
+    cache_ttl: int | None = typer.Option(
+        None,
+        "--cache-ttl",
+        help="Override default cache TTL in seconds",
+        min=60,  # minimum 1 minute
+    ),
     _help: bool = typer.Option(
         None,
         "--help",
@@ -181,31 +236,36 @@ def main(
     This tool scans for .github/workflows directories and validates that all
     'uses' statements reference valid repositories, branches, tags, or commit SHAs.
 
+    Cache Options:
+        --no-cache: Bypass cache and always validate against remote repositories
+        --purge-cache: Clear all cached validation results and exit
+        --cache-ttl: Override default cache TTL (7 days) in seconds
+
     GitHub API Authentication:
 
         # Using environment variable (recommended)
         export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-        gha-workflow-linter
+        gha-workflow-linter lint
 
         # Using CLI flag
-        gha-workflow-linter --github-token ghp_xxxxxxxxxxxxxxxxxxxx
+        gha-workflow-linter lint --github-token ghp_xxxxxxxxxxxxxxxxxxxx
 
     Examples:
 
         # Scan current directory
-        gha-workflow-linter
+        gha-workflow-linter lint
 
         # Scan specific path
-        gha-workflow-linter /path/to/project
+        gha-workflow-linter lint /path/to/project
 
         # Use custom config and output JSON
-        gha-workflow-linter --config config.yaml --format json
+        gha-workflow-linter lint --config config.yaml --format json
 
         # Verbose output with 8 workers and token
-        gha-workflow-linter --verbose --workers 8 --github-token ghp_xxx
+        gha-workflow-linter lint --verbose --workers 8 --github-token ghp_xxx
 
         # Disable SHA pinning requirement
-        gha-workflow-linter --no-require-pinned-sha
+        gha-workflow-linter lint --no-require-pinned-sha
     """
     # Handle mutually exclusive options
     if verbose and quiet:
@@ -238,6 +298,9 @@ def main(
             fail_on_error=fail_on_error,
             parallel=parallel,
             require_pinned_sha=require_pinned_sha,
+            no_cache=no_cache,
+            purge_cache=purge_cache,
+            cache_ttl=cache_ttl,
         )
 
         # Apply GitHub token from CLI if provided
@@ -253,6 +316,23 @@ def main(
             config.parallel_workers = 1
         config.require_pinned_sha = require_pinned_sha
 
+        # Handle cache options
+        if no_cache:
+            config.cache.enabled = False
+            logger.debug("Cache disabled via --no-cache")
+
+        if cache_ttl is not None:
+            config.cache.default_ttl_seconds = cache_ttl
+            logger.debug(f"Cache TTL overridden to {cache_ttl} seconds")
+
+        # Handle cache purge option
+        if purge_cache:
+            cache = ValidationCache(config.cache)
+            removed_count = cache.purge()
+            if not quiet:
+                console.print(f"[green]✅ Purged {removed_count} cache entries[/green]")
+            raise typer.Exit(0)
+
         logger.info(f"Starting gha-workflow-linter {__version__}")
         logger.info(f"Scanning path: {path}")
 
@@ -264,6 +344,9 @@ def main(
         # Run the linting process
         exit_code = run_linter(config, cli_options)
 
+    except typer.Exit:
+        # Re-raise typer.Exit to avoid catching it as a general exception
+        raise
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         if verbose:
@@ -271,6 +354,109 @@ def main(
         raise typer.Exit(1) from None
 
     raise typer.Exit(exit_code)
+
+
+@app.command()  # type: ignore[misc]
+def cache(
+    info: bool = typer.Option(
+        False,
+        "--info",
+        help="Show cache information"
+    ),
+    cleanup: bool = typer.Option(
+        False,
+        "--cleanup",
+        help="Remove expired cache entries"
+    ),
+    purge: bool = typer.Option(
+        False,
+        "--purge",
+        help="Clear all cache entries"
+    ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config", "-c",
+        help="Configuration file path",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    help: bool = typer.Option(
+        False,
+        "--help",
+        callback=cache_help_callback,
+        is_eager=True,
+        help="Show this message and exit",
+        expose_value=False,
+    ),
+) -> None:
+    """Manage local validation cache."""
+    # Load configuration
+    from .config import ConfigManager
+
+    config_manager = ConfigManager()
+    config = config_manager.load_config(config_file)
+
+    cache_instance = ValidationCache(config.cache)
+
+    if purge:
+        removed_count = cache_instance.purge()
+        console.print(f"[green]✅ Purged {removed_count} cache entries[/green]")
+        return
+
+    if cleanup:
+        removed_count = cache_instance.cleanup()
+        console.print(f"[green]✅ Removed {removed_count} expired cache entries[/green]")
+        return
+
+    if info:
+        cache_info = cache_instance.get_cache_info()
+
+        table = Table(title="Cache Information")
+        table.add_column("Property", style="cyan")
+        table.add_column("Value", style="green")
+
+        table.add_row("Enabled", str(cache_info["enabled"]))
+        table.add_row("Cache File", cache_info["cache_file"])
+        table.add_row("File Exists", str(cache_info.get("cache_file_exists", False)))
+        table.add_row("Total Entries", str(cache_info["entries"]))
+
+        if cache_info["entries"] > 0:
+            table.add_row("Expired Entries", str(cache_info.get("expired_entries", 0)))
+            if cache_info.get("oldest_entry_age"):
+                table.add_row("Oldest Entry Age", f"{cache_info['oldest_entry_age']:.1f} seconds")
+            if cache_info.get("newest_entry_age"):
+                table.add_row("Newest Entry Age", f"{cache_info['newest_entry_age']:.1f} seconds")
+
+        table.add_row("Max Cache Size", str(cache_info["max_cache_size"]))
+        table.add_row("TTL (seconds)", str(cache_info["ttl_seconds"]))
+
+        console.print(table)
+
+        # Show stats if available
+        stats = cache_info["stats"]
+        if stats["hits"] > 0 or stats["misses"] > 0:
+            console.print()
+            stats_table = Table(title="Cache Statistics")
+            stats_table.add_column("Metric", style="cyan")
+            stats_table.add_column("Value", style="green")
+
+            stats_table.add_row("Cache Hits", str(stats["hits"]))
+            stats_table.add_row("Cache Misses", str(stats["misses"]))
+            stats_table.add_row("Hit Rate", f"{cache_instance.stats.hit_rate:.1f}%")
+            stats_table.add_row("Cache Writes", str(stats["writes"]))
+            stats_table.add_row("Purges", str(stats["purges"]))
+            stats_table.add_row("Cleanup Removed", str(stats["cleanup_removed"]))
+
+            console.print(stats_table)
+        return
+
+    # Default: show basic cache info
+    cache_info = cache_instance.get_cache_info()
+    console.print(f"Cache enabled: {cache_info['enabled']}")
+    console.print(f"Cache entries: {cache_info['entries']}")
+    console.print(f"Cache file: {cache_info['cache_file']}")
 
 
 def run_linter(config: Config, options: CLIOptions) -> int:

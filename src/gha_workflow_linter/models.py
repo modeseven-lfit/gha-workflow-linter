@@ -121,7 +121,7 @@ class ValidationError(BaseModel):  # type: ignore[misc]
         """String representation of the validation error."""
         return (
             f"❌ Invalid action call in workflow: {self.file_path}\n"
-            f"- {self.action_call.raw_line.strip()} [{self.result.value}]"
+            f"{self.action_call.raw_line.strip()} [{self.result.value}]"
         )
 
 
@@ -235,6 +235,28 @@ class GitHubRateLimitInfo(BaseModel):  # type: ignore[misc]
     used: int = Field(0, description="Used requests")
 
 
+class CacheConfig(BaseModel):  # type: ignore[misc]
+    """Local cache configuration."""
+
+    enabled: bool = Field(True, description="Enable local caching")
+    cache_dir: Path = Field(
+        Path.home() / ".cache" / "gha-workflow-linter",
+        description="Directory to store cache files"
+    )
+    cache_file: str = Field("validation_cache.json", description="Cache file name")
+    default_ttl_seconds: int = Field(
+        7 * 24 * 60 * 60,  # 7 days
+        description="Default TTL for cache entries in seconds"
+    )
+    max_cache_size: int = Field(10000, description="Maximum number of cache entries")
+    cleanup_on_startup: bool = Field(True, description="Clean expired entries on startup")
+
+    @property
+    def cache_file_path(self) -> Path:
+        """Get the full path to the cache file."""
+        return self.cache_dir / self.cache_file
+
+
 class Config(BaseModel):  # type: ignore[misc]
     """Main configuration model."""
 
@@ -263,6 +285,9 @@ class Config(BaseModel):  # type: ignore[misc]
     )
     github_api: GitHubAPIConfig = Field(
         default_factory=lambda: GitHubAPIConfig(), description="GitHub API configuration"
+    )
+    cache: CacheConfig = Field(
+        default_factory=lambda: CacheConfig(), description="Cache configuration"
     )
 
     @property
@@ -293,6 +318,9 @@ class CLIOptions(BaseModel):  # type: ignore[misc]
     fail_on_error: bool = Field(True, description="Exit with error on failures")
     parallel: bool = Field(True, description="Enable parallel processing")
     require_pinned_sha: bool = Field(True, description="Require SHA pinning")
+    no_cache: bool = Field(False, description="Bypass local cache")
+    purge_cache: bool = Field(False, description="Purge cache and exit")
+    cache_ttl: int | None = Field(None, description="Override cache TTL in seconds")
 
     @field_validator("path")  # type: ignore[misc]
     @classmethod

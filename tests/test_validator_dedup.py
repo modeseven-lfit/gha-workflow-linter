@@ -3,7 +3,10 @@
 
 """Tests for validator deduplication functionality."""
 
+from __future__ import annotations
+
 from pathlib import Path
+import tempfile
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -12,6 +15,7 @@ from gha_workflow_linter.models import (
     ActionCall,
     ActionCallType,
     APICallStats,
+    CacheConfig,
     Config,
     GitHubRateLimitInfo,
     LogLevel,
@@ -24,12 +28,20 @@ from gha_workflow_linter.validator import ActionCallValidator
 @pytest.fixture  # type: ignore[misc]
 def test_config_no_sha_pinning() -> Config:
     """Test configuration with SHA pinning disabled for deduplication tests."""
+    # Use a temporary cache directory to avoid interference between tests
+    temp_dir = Path(tempfile.mkdtemp())
+    cache_config = CacheConfig(
+        enabled=False,  # Disable cache for these tests
+        cache_dir=temp_dir,
+        cache_file="test_cache.json",
+    )
     return Config(
         log_level=LogLevel.DEBUG,
         parallel_workers=2,
         scan_extensions=[".yml", ".yaml"],
         exclude_patterns=["**/node_modules/**", "**/test/**"],
         require_pinned_sha=False,  # Disable SHA pinning for these tests
+        cache=cache_config,
     )
 
 

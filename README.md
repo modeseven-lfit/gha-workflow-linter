@@ -18,6 +18,7 @@ Actions workflows reference valid repositories, branches, tags, and commit SHAs.
 
 <!-- markdownlint-disable MD013 -->
 - **🔒 SHA Pinning Enforcement**: Requires actions using commit SHAs for security (configurable)
+- **📦 Local Caching**: Stores validation results locally to improve performance and reduce API calls
 - **Multi-format Support**: Works as CLI tool, pre-commit hook, and GitHub Action
 - **Comprehensive Validation**: Validates repositories, references, and syntax
 - **Parallel Processing**: Multi-threaded validation for faster execution
@@ -75,7 +76,7 @@ is **optional** but **highly recommended** to avoid rate limiting.
 3. **Or pass the token via CLI flag:**
 
    ```bash
-   gha-workflow-linter --github-token ghp_xxxxxxxxxxxxxxxxxxxx
+   gha-workflow-linter lint --github-token ghp_xxxxxxxxxxxxxxxxxxxx
    ```
 
 ### Rate Limits
@@ -97,28 +98,28 @@ gha-workflow-linter --help
 
 # Scan current directory (with environment token)
 export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-gha-workflow-linter
+gha-workflow-linter lint
 
 # Scan specific path with CLI token
-gha-workflow-linter /path/to/project --github-token ghp_xxxxxxxxxxxxxxxxxxxx
+gha-workflow-linter lint /path/to/project --github-token ghp_xxxxxxxxxxxxxxxxxxxx
 
 # Use custom configuration
-gha-workflow-linter --config config.yaml
+gha-workflow-linter lint --config config.yaml
 
 # JSON output format
-gha-workflow-linter --format json
+gha-workflow-linter lint --format json
 
 # Verbose output with 8 parallel workers
-gha-workflow-linter --verbose --workers 8
+gha-workflow-linter lint --verbose --workers 8
 
 # Exclude patterns
-gha-workflow-linter --exclude "**/test/**" --exclude "**/docs/**"
+gha-workflow-linter lint --exclude "**/test/**" --exclude "**/docs/**"
 
 # Disable SHA pinning policy (allow tags/branches)
-gha-workflow-linter --no-require-pinned-sha
+gha-workflow-linter lint --no-require-pinned-sha
 
 # Run without token (limited to 60 requests/hour)
-gha-workflow-linter  # Shows: ⚠️ No GitHub token provided; risk of rate-limiting
+gha-workflow-linter lint  # Shows: ⚠️ No GitHub token provided; risk of rate-limiting
 ```
 
 ### As a Pre-commit Hook
@@ -212,6 +213,15 @@ network:
   max_retries: 3
   retry_delay_seconds: 1.0
   rate_limit_delay_seconds: 0.1
+
+# Local caching configuration
+cache:
+  enabled: true
+  cache_dir: ~/.cache/gha-workflow-linter
+  cache_file: validation_cache.json
+  default_ttl_seconds: 604800  # 7 days
+  max_cache_size: 10000
+  cleanup_on_startup: true
 ```
 
 ### Environment Variables
@@ -221,7 +231,68 @@ export GHA_WORKFLOW_LINTER_LOG_LEVEL=DEBUG
 export GHA_WORKFLOW_LINTER_PARALLEL_WORKERS=8
 export GHA_WORKFLOW_LINTER_REQUIRE_PINNED_SHA=false
 export GHA_WORKFLOW_LINTER_GIT__TIMEOUT_SECONDS=60
+export GHA_WORKFLOW_LINTER_CACHE__ENABLED=true
+export GHA_WORKFLOW_LINTER_CACHE__DEFAULT_TTL_SECONDS=86400
 ```
+
+## Local Caching
+
+GHA Workflow Linter includes a local caching system that stores validation
+results to improve performance and reduce API calls for later runs.
+
+### Cache Features
+
+- **Automatic Caching**: Validation results are automatically cached locally
+- **Configurable TTL**: Cache entries expire after seven days by default
+- **Size Limits**: Cache size limits prevent excessive disk usage
+- **Persistence**: Cache survives between CLI invocations and system restarts
+- **Smart Cleanup**: Expired entries are automatically removed
+
+### Cache Commands
+
+```bash
+# Show cache information
+gha-workflow-linter cache --info
+
+# Remove expired cache entries
+gha-workflow-linter cache --cleanup
+
+# Clear all cache entries
+gha-workflow-linter cache --purge
+```
+
+### Cache Options
+
+```bash
+# Bypass cache for a single run
+gha-workflow-linter lint --no-cache
+
+# Clear cache and exit
+gha-workflow-linter lint --purge-cache
+
+# Override default cache TTL (in seconds)
+gha-workflow-linter lint --cache-ttl 3600  # 1 hour
+```
+
+### Cache Benefits
+
+- **Performance**: Later runs are faster for validated actions
+- **API Efficiency**: Reduces GitHub API calls and respects rate limits better
+- **Offline Support**: Validated actions work without network access
+- **Bandwidth Savings**: Useful in CI/CD environments with repeated workflows
+
+### Cache Location
+
+By default, cache files go in:
+
+- **Linux/macOS**: `~/.cache/gha-workflow-linter/validation_cache.json`
+- **Windows**: `%LOCALAPPDATA%\gha-workflow-linter\validation_cache.json`
+
+You can customize the cache location via configuration file or environment variables.
+
+**Note**: Caching works for CLI and pre-commit hook usage. GitHub Actions
+runners use ephemeral containers, so caching provides no benefit in that
+environment.
 
 ## Validation Rules
 
@@ -280,10 +351,10 @@ reproducible builds.
 
 ```bash
 # Default behavior - fails on non-SHA references
-gha-workflow-linter  # Fails on @v4, @main, etc.
+gha-workflow-linter lint  # Fails on @v4, @main, etc.
 
 # Disable SHA pinning policy
-gha-workflow-linter --no-require-pinned-sha  # Allows @v4, @main, etc.
+gha-workflow-linter lint --no-require-pinned-sha  # Allows @v4, @main, etc.
 ```
 
 **Security Recommendation**: Keep SHA pinning enabled in production environments
@@ -303,11 +374,11 @@ compromised action versions
 
 ```bash
 # Step 1: Identify unpinned actions
-gha-workflow-linter --format json | jq '.errors[] | \
+gha-workflow-linter lint --format json | jq '.errors[] | \
   select(.validation_result == "not_pinned_to_sha")'
 
 # Step 2: Temporarily allow unpinned actions during migration
-gha-workflow-linter --no-require-pinned-sha
+gha-workflow-linter lint --no-require-pinned-sha
 
 # Step 3: Use tools like Dependabot to pin and update SHA references automatically
 ```
@@ -363,7 +434,7 @@ Validation Errors:
 ### JSON Output
 
 ```bash
-gha-workflow-linter --format json
+gha-workflow-linter lint --format json
 ```
 
 ```json
@@ -429,7 +500,7 @@ gha-workflow-linter --format json
 ## CLI Options
 
 ```text
-Usage: gha-workflow-linter [OPTIONS] [PATH]
+Usage: gha-workflow-linter lint [OPTIONS] [PATH]
 
   Scan GitHub Actions workflows for invalid action and workflow calls.
 
@@ -466,7 +537,7 @@ pipeline {
         stage('Check Actions') {
             steps {
                 sh 'pip install gha-workflow-linter'
-                sh 'gha-workflow-linter --format json > results.json'
+                sh 'gha-workflow-linter lint --format json > results.json'
                 archiveArtifacts artifacts: 'results.json'
             }
         }
@@ -480,13 +551,13 @@ pipeline {
 # Using published image
 docker run --rm -v "$(pwd):/workspace" \
   -e GITHUB_TOKEN=$GITHUB_TOKEN \
-  ghcr.io/lfit/gha-workflow-linter:latest /workspace
+  ghcr.io/lfit/gha-workflow-linter:latest lint /workspace
 
 # Build local image
 docker build -t gha-workflow-linter .
 docker run --rm -v "$(pwd):/workspace" \
   -e GITHUB_TOKEN=$GITHUB_TOKEN \
-  gha-workflow-linter /workspace
+  gha-workflow-linter lint /workspace
 ```
 
 ## Error Types
