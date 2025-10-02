@@ -1,0 +1,14 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+- id: gha-workflow-linter
+  name: GitHub Actions Workflow Linter
+  description: Validate GitHub Actions workflows and action calls
+  entry: gha-workflow-linter
+  language: python
+  files: '^\.github/workflows/.*\.ya?ml$'
+  pass_filenames: false
+  args: [., --quiet]
+  always_run: false
+  require_serial: true
