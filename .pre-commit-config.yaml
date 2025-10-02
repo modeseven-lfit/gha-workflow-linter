@@ -113,16 +113,8 @@ repos:
           - yaml
       - id: check-readthedocs
 
-  # GitHub Actions workflow linter (self-linting)
-  - repo: local
+  # GitHub Actions workflow linter
+  - repo: https://github.com/modeseven-lfit/gha-workflow-linter
+    rev: d86993e21bbcddcfa9dac63cd43213b6a58fa6fb  # frozen: v0.1.1
     hooks:
       - id: gha-workflow-linter
-        name: gha-workflow-linter
-        entry: gha-workflow-linter
-        language: python
-        args: [lint, ., --quiet]
-        files: '^\.github/workflows/.*\.ya?ml$'
-        pass_filenames: false
-        additional_dependencies: ['gha-workflow-linter==0.1.0']
-        always_run: false
-        require_serial: true
