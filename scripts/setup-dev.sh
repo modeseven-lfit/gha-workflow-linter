@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-# Development setup script for call-linter
+# Development setup script for gha-workflow-linter
 set -euo pipefail
 
 # Colors for output
@@ -32,10 +32,10 @@ error() {
 
 # Check if we're in the right directory
 if [[ ! -f "pyproject.toml" ]] || [[ ! -f "action.yaml" ]]; then
-    error "This script must be run from the call-linter repository root"
+    error "This script must be run from the gha-workflow-linter repository root"
 fi
 
-info "Setting up call-linter development environment..."
+info "Setting up gha-workflow-linter development environment..."
 
 # Check Python version
 python_version=$(python3 --version 2>&1 | awk '{print $2}' | cut -d. -f1,2)
@@ -56,7 +56,7 @@ else
 fi
 
 # Install development dependencies
-info "Installing call-linter in development mode..."
+info "Installing gha-workflow-linter in development mode..."
 uv pip install -e ".[dev]"
 success "Development dependencies installed"
 
@@ -84,19 +84,19 @@ else
 fi
 
 # Test the installation
-info "Testing call-linter installation..."
-if command -v call-linter &> /dev/null; then
+info "Testing gha-workflow-linter installation..."
+if command -v gha-workflow-linter &> /dev/null; then
     # Test CLI command
-    python -m call_linter.cli --help > /dev/null
-    success "call-linter CLI working"
+    python -m gha_workflow_linter.cli --help > /dev/null
+    success "gha-workflow-linter CLI working"
 else
-    warning "call-linter command not in PATH, use: python -m call_linter.cli"
+    warning "gha-workflow-linter command not in PATH, use: python -m gha_workflow_linter.cli"
 fi
 
 # Run self-linting test
 info "Running self-linting test..."
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    python -m call_linter.cli . --quiet
+    python -m gha_workflow_linter.cli . --quiet
     success "Self-linting test passed"
 else
     warning "Skipping self-linting test (no GitHub token)"
@@ -117,6 +117,6 @@ echo "Next steps:"
 echo "1. Set GITHUB_TOKEN environment variable (if not done)"
 echo "2. Run tests: pytest"
 echo "3. Run linting: pre-commit run --all-files"
-echo "4. Test CLI: python -m call_linter.cli --help"
+echo "4. Test CLI: python -m gha_workflow_linter.cli --help"
 echo ""
 echo "Happy coding! 🚀"

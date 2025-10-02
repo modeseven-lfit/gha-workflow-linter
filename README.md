@@ -3,15 +3,15 @@ SPDX-License-Identifier: Apache-2.0
 SPDX-FileCopyrightText: 2025 The Linux Foundation
 -->
 
-# 🔍 Call Linter
+# 🔍 GHA Workflow Linter
 
-[![GitHub Actions](https://github.com/modeseven-lfit/call-linter/workflows/CI/badge.svg)](https://github.com/modeseven-lfit/call-linter/actions)
-[![PyPI version](https://badge.fury.io/py/call-linter.svg)](https://badge.fury.io/py/call-linter)
-[![Python Support](https://img.shields.io/pypi/pyversions/call-linter.svg)](https://pypi.org/project/call-linter/)
+[![GitHub Actions](https://github.com/modeseven-lfit/gha-workflow-linter/workflows/CI/badge.svg)](https://github.com/modeseven-lfit/gha-workflow-linter/actions)
+[![PyPI version](https://badge.fury.io/py/gha-workflow-linter.svg)](https://badge.fury.io/py/gha-workflow-linter)
+[![Python Support](https://img.shields.io/pypi/pyversions/gha-workflow-linter.svg)](https://pypi.org/project/gha-workflow-linter/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 A comprehensive GitHub Actions workflow linter that validates action and
-workflow calls against remote repositories. Call Linter ensures your GitHub
+workflow calls against remote repositories. GHA Workflow Linter ensures your GitHub
 Actions workflows reference valid repositories, branches, tags, and commit SHAs.
 
 ## Features
@@ -32,28 +32,28 @@ Actions workflows reference valid repositories, branches, tags, and commit SHAs.
 ### From PyPI
 
 ```bash
-pip install call-linter
+pip install gha-workflow-linter
 ```
 
 ### From Source
 
 ```bash
-git clone https://github.com/lfit/call-linter.git
-cd call-linter
+git clone https://github.com/lfit/gha-workflow-linter.git
+cd gha-workflow-linter
 uv pip install -e .
 ```
 
 ### Development Installation
 
 ```bash
-git clone https://github.com/lfit/call-linter.git
-cd call-linter
+git clone https://github.com/lfit/gha-workflow-linter.git
+cd gha-workflow-linter
 uv pip install -e ".[dev]"
 ```
 
 ## Authentication
 
-Call Linter uses the GitHub GraphQL API for efficient validation. Authentication
+GHA Workflow Linter uses the GitHub GraphQL API for efficient validation. Authentication
 is **optional** but **highly recommended** to avoid rate limiting.
 
 ### Setting up GitHub Token
@@ -69,13 +69,13 @@ is **optional** but **highly recommended** to avoid rate limiting.
 
    ```bash
    export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-   call-linter
+   gha-workflow-linter
    ```
 
 3. **Or pass the token via CLI flag:**
 
    ```bash
-   call-linter --github-token ghp_xxxxxxxxxxxxxxxxxxxx
+   gha-workflow-linter --github-token ghp_xxxxxxxxxxxxxxxxxxxx
    ```
 
 ### Rate Limits
@@ -93,32 +93,32 @@ is **optional** but **highly recommended** to avoid rate limiting.
 
 ```bash
 # Show help with version
-call-linter --help
+gha-workflow-linter --help
 
 # Scan current directory (with environment token)
 export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-call-linter
+gha-workflow-linter
 
 # Scan specific path with CLI token
-call-linter /path/to/project --github-token ghp_xxxxxxxxxxxxxxxxxxxx
+gha-workflow-linter /path/to/project --github-token ghp_xxxxxxxxxxxxxxxxxxxx
 
 # Use custom configuration
-call-linter --config config.yaml
+gha-workflow-linter --config config.yaml
 
 # JSON output format
-call-linter --format json
+gha-workflow-linter --format json
 
 # Verbose output with 8 parallel workers
-call-linter --verbose --workers 8
+gha-workflow-linter --verbose --workers 8
 
 # Exclude patterns
-call-linter --exclude "**/test/**" --exclude "**/docs/**"
+gha-workflow-linter --exclude "**/test/**" --exclude "**/docs/**"
 
 # Disable SHA pinning policy (allow tags/branches)
-call-linter --no-require-pinned-sha
+gha-workflow-linter --no-require-pinned-sha
 
 # Run without token (limited to 60 requests/hour)
-call-linter  # Shows: ⚠️ No GitHub token provided; risk of rate-limiting
+gha-workflow-linter  # Shows: ⚠️ No GitHub token provided; risk of rate-limiting
 ```
 
 ### As a Pre-commit Hook
@@ -127,10 +127,10 @@ Add to your `.pre-commit-config.yaml`:
 
 ```yaml
 repos:
-  - repo: https://github.com/lfit/call-linter
+  - repo: https://github.com/lfit/gha-workflow-linter
     rev: v1.0.0  # Use the ref you want
     hooks:
-      - id: call-linter
+      - id: gha-workflow-linter
 ```
 
 ### As a GitHub Action
@@ -145,7 +145,7 @@ jobs:
     steps:
       - uses: actions/checkout@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a
       - name: Check action calls (strict SHA pinning)
-        uses: lfit/call-linter@v1.0.0
+        uses: lfit/gha-workflow-linter@v1.0.0
         with:
           path: .
           fail-on-error: true
@@ -160,7 +160,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4  # This would fail in strict mode above
       - name: Check action calls (allow tags/branches)
-        uses: lfit/call-linter@v1.0.0
+        uses: lfit/gha-workflow-linter@v1.0.0
         with:
           path: .
           require-pinned-sha: false  # Allow @v4, @main, etc.
@@ -170,16 +170,16 @@ jobs:
 
 ## Configuration
 
-Call Linter is configurable via YAML files, environment variables, or
+GHA Workflow Linter is configurable via YAML files, environment variables, or
 command-line arguments. Configuration loads in this order:
 
 1. Command-line arguments (highest priority)
-2. Environment variables with `CALL_LINTER_` prefix
+2. Environment variables with `GHA_WORKFLOW_LINTER_` prefix
 3. Configuration file (lowest priority)
 
 ### Configuration File
 
-Create `~/.config/call-linter/config.yaml` or use `--config`:
+Create `~/.config/gha-workflow-linter/config.yaml` or use `--config`:
 
 ```yaml
 # Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
@@ -217,15 +217,15 @@ network:
 ### Environment Variables
 
 ```bash
-export CALL_LINTER_LOG_LEVEL=DEBUG
-export CALL_LINTER_PARALLEL_WORKERS=8
-export CALL_LINTER_REQUIRE_PINNED_SHA=false
-export CALL_LINTER_GIT__TIMEOUT_SECONDS=60
+export GHA_WORKFLOW_LINTER_LOG_LEVEL=DEBUG
+export GHA_WORKFLOW_LINTER_PARALLEL_WORKERS=8
+export GHA_WORKFLOW_LINTER_REQUIRE_PINNED_SHA=false
+export GHA_WORKFLOW_LINTER_GIT__TIMEOUT_SECONDS=60
 ```
 
 ## Validation Rules
 
-Call Linter validates GitHub Actions workflow calls using these rules:
+GHA Workflow Linter validates GitHub Actions workflow calls using these rules:
 
 ### Action Call Format
 
@@ -256,7 +256,7 @@ Valid action call patterns:
 
 ### Reference Validation
 
-Call Linter validates that references exist using `git ls-remote`:
+GHA Workflow Linter validates that references exist using `git ls-remote`:
 
 - **Commit SHAs**: 40-character hexadecimal strings
 - **Tags**: Semantic versions (v1.0.0) and other tag formats
@@ -274,16 +274,16 @@ Call Linter validates that references exist using `git ls-remote`:
 
 ### SHA Pinning Enforcement
 
-By default, call-linter **requires all action calls use commit SHAs** for
+By default, gha-workflow-linter **requires all action calls use commit SHAs** for
 security best practices. This helps prevent supply chain attacks and ensures
 reproducible builds.
 
 ```bash
 # Default behavior - fails on non-SHA references
-call-linter  # Fails on @v4, @main, etc.
+gha-workflow-linter  # Fails on @v4, @main, etc.
 
 # Disable SHA pinning policy
-call-linter --no-require-pinned-sha  # Allows @v4, @main, etc.
+gha-workflow-linter --no-require-pinned-sha  # Allows @v4, @main, etc.
 ```
 
 **Security Recommendation**: Keep SHA pinning enabled in production environments
@@ -303,10 +303,11 @@ compromised action versions
 
 ```bash
 # Step 1: Identify unpinned actions
-call-linter --format json | jq '.errors[] | select(.validation_result == "not_pinned_to_sha")'
+gha-workflow-linter --format json | jq '.errors[] | \
+  select(.validation_result == "not_pinned_to_sha")'
 
 # Step 2: Temporarily allow unpinned actions during migration
-call-linter --no-require-pinned-sha
+gha-workflow-linter --no-require-pinned-sha
 
 # Step 3: Use tools like Dependabot to pin and update SHA references automatically
 ```
@@ -332,7 +333,7 @@ updates:
 ### Text Output (Default)
 
 ```text
-🏷️ call-linter version 1.0.0
+🏷️ gha-workflow-linter version 1.0.0
 
                                      Scan Summary
 ┏━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┓
@@ -362,7 +363,7 @@ Validation Errors:
 ### JSON Output
 
 ```bash
-call-linter --format json
+gha-workflow-linter --format json
 ```
 
 ```json
@@ -428,7 +429,7 @@ call-linter --format json
 ## CLI Options
 
 ```text
-Usage: call-linter [OPTIONS] [PATH]
+Usage: gha-workflow-linter [OPTIONS] [PATH]
 
   Scan GitHub Actions workflows for invalid action and workflow calls.
 
@@ -464,8 +465,8 @@ pipeline {
     stages {
         stage('Check Actions') {
             steps {
-                sh 'pip install call-linter'
-                sh 'call-linter --format json > results.json'
+                sh 'pip install gha-workflow-linter'
+                sh 'gha-workflow-linter --format json > results.json'
                 archiveArtifacts artifacts: 'results.json'
             }
         }
@@ -479,13 +480,13 @@ pipeline {
 # Using published image
 docker run --rm -v "$(pwd):/workspace" \
   -e GITHUB_TOKEN=$GITHUB_TOKEN \
-  ghcr.io/lfit/call-linter:latest /workspace
+  ghcr.io/lfit/gha-workflow-linter:latest /workspace
 
 # Build local image
-docker build -t call-linter .
+docker build -t gha-workflow-linter .
 docker run --rm -v "$(pwd):/workspace" \
   -e GITHUB_TOKEN=$GITHUB_TOKEN \
-  call-linter /workspace
+  gha-workflow-linter /workspace
 ```
 
 ## Error Types
@@ -506,8 +507,8 @@ docker run --rm -v "$(pwd):/workspace" \
 ### Setup Development Environment
 
 ```bash
-git clone https://github.com/lfit/call-linter.git
-cd call-linter
+git clone https://github.com/lfit/gha-workflow-linter.git
+cd gha-workflow-linter
 uv pip install -e ".[dev]"
 ```
 
@@ -518,7 +519,7 @@ uv pip install -e ".[dev]"
 pytest
 
 # Run with coverage
-pytest --cov=call_linter
+pytest --cov=gha_workflow_linter
 
 # Run specific test categories
 pytest -m unit
@@ -536,7 +537,7 @@ ruff format .
 ruff check .
 
 # Type checking
-mypy src/call_linter
+mypy src/gha_workflow_linter
 
 # Pre-commit hooks
 pre-commit run --all-files
@@ -554,7 +555,7 @@ uv publish
 
 ## Architecture
 
-Call Linter follows a modular architecture with clear separation of concerns:
+GHA Workflow Linter follows a modular architecture with clear separation of concerns:
 
 - **CLI Interface**: Typer-based command-line interface
 - **Configuration**: Pydantic models with YAML/env support
@@ -565,7 +566,7 @@ Call Linter follows a modular architecture with clear separation of concerns:
 
 ## Performance
 
-Call Linter performance optimizations:
+GHA Workflow Linter performance optimizations:
 
 - **Parallel Processing**: Multi-threaded validation
 - **Caching**: Repository and reference validation caching
@@ -588,16 +589,17 @@ Typical performance on a repository with 50 workflows and 200 action calls:
 
 ### Pre-commit Hook
 
-The repository includes a pre-commit hook that runs call-linter on its own workflows:
+The repository includes a pre-commit hook that runs gha-workflow-linter
+on its own workflows:
 
 ```yaml
 # .pre-commit-config.yaml
 - repo: local
   hooks:
-    - id: call-linter
-      name: call-linter - Check GitHub Actions/workflows
+    - id: gha-workflow-linter
+      name: gha-workflow-linter - Check GitHub Actions/workflows
       entry: python
-      args: [-m, call_linter.cli, ., --quiet]
+      args: [-m, gha_workflow_linter.cli, ., --quiet]
       language: system
       files: '^\.github/workflows/.*\.ya?ml$'
 ```
@@ -612,7 +614,7 @@ For contributors, use the development setup script:
 
 # This sets up:
 # - Development dependencies
-# - Pre-commit hooks (including call-linter)
+# - Pre-commit hooks (including gha-workflow-linter)
 # - GitHub token configuration
 # - Self-linting test
 ```
@@ -633,9 +635,9 @@ Licensed under the Apache License 2.0. See the LICENSE file for details.
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/lfit/call-linter/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/lfit/call-linter/discussions)
-- **Documentation**: [Read the Docs](https://call-linter.readthedocs.io)
+- **Issues**: [GitHub Issues](https://github.com/lfit/gha-workflow-linter/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/lfit/gha-workflow-linter/discussions)
+- **Documentation**: [Read the Docs](https://gha-workflow-linter.readthedocs.io)
 
 ## Acknowledgments
 

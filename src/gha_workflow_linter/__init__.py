@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-"""GitHub Actions workflow call linter."""
+"""GitHub Actions workflow linter."""
 
 try:
     from ._version import __version__

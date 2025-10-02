@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-"""Pydantic models for call-linter configuration and data structures."""
+"""Pydantic models for gha-workflow-linter configuration and data structures."""
 
 from __future__ import annotations
 

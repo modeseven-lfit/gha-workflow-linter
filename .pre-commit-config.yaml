@@ -101,10 +101,10 @@ repos:
   # GitHub Actions workflow linter (self-linting)
   # - repo: local
   #   hooks:
-  #     - id: call-linter
-  #       name: call-linter - validate GitHub Actions workflows
+  #     - id: gha-workflow-linter
+  #       name: gha-workflow-linter - validate GitHub Actions workflows
   #       entry: python
-  #       args: [-m, call_linter.cli, ., --quiet]
+  #       args: [-m, gha_workflow_linter.cli, ., --quiet]
   #       language: system
   #       files: '^\.github/workflows/.*\.ya?ml$'
   #       pass_filenames: false
