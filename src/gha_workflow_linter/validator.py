@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     pass
 
 
+from .cache import ValidationCache
 from .github_api import GitHubGraphQLClient
 from .models import (
     ActionCall,
@@ -42,6 +43,7 @@ class ActionCallValidator:
         self.logger = logging.getLogger(__name__)
         self._github_client: GitHubGraphQLClient | None = None
         self.api_stats = APICallStats()
+        self._cache = ValidationCache(config.cache)
 
     async def __aenter__(self) -> ActionCallValidator:
         """Async context manager entry."""
@@ -53,6 +55,10 @@ class ActionCallValidator:
         """Async context manager exit."""
         if self._github_client:
             await self._github_client.__aexit__(exc_type, exc_val, exc_tb)
+        # Merge cache stats into API stats
+        self.api_stats.cache_hits += self._cache.stats.hits
+        # Save cache before exiting
+        self._cache.save()
 
     async def validate_action_calls_async(
         self,
@@ -121,34 +127,59 @@ class ActionCallValidator:
             unique_repos.add(repo_key)
             repo_refs.append((repo_key, action_call.reference))
 
+        # Check cache for existing validation results
+        cached_results, cache_misses = self._cache.get_batch(repo_refs)
+
+        if cached_results:
+            self.logger.debug(f"Found {len(cached_results)} cached validation results")
+
+        # Filter out cached results from what needs to be validated
+        repos_to_validate = set()
+        refs_to_validate = []
+
+        for repo, ref in cache_misses:
+            repos_to_validate.add(repo)
+            refs_to_validate.append((repo, ref))
+
         # Update progress
         if progress and task_id:
             progress.update(
                 task_id,
-                total=len(unique_repos) + len(repo_refs),
+                total=len(repos_to_validate) + len(refs_to_validate),
                 description="Validating repositories..."
             )
 
-        # Step 1: Validate repositories in batch
-        self.logger.debug(f"Validating {len(unique_repos)} unique repositories")
+        # Step 1: Validate repositories in batch (only for cache misses)
+        self.logger.debug(f"Validating {len(repos_to_validate)} unique repositories (after cache)")
 
-        try:
-            repo_results = await self._github_client.validate_repositories_batch(
-                list(unique_repos)
-            )
+        repo_results = {}
 
-            # Merge API stats
-            self._merge_api_stats(self._github_client.get_api_stats())
+        if repos_to_validate:
+            try:
+                repo_results = await self._github_client.validate_repositories_batch(
+                    list(repos_to_validate)
+                )
 
-            self.logger.debug(
-                f"Repository validation complete. API calls so far: "
-                f"{self.api_stats.total_calls} (GraphQL: {self.api_stats.graphql_calls}, "
-                f"Cache hits: {self.api_stats.cache_hits})"
-            )
+                # Merge API stats
+                self._merge_api_stats(self._github_client.get_api_stats())
 
-        except Exception as e:
-            self.logger.error(f"Error during repository validation: {e}")
-            repo_results = dict.fromkeys(unique_repos, False)
+                self.logger.debug(
+                    f"Repository validation complete. API calls so far: "
+                    f"{self.api_stats.total_calls} (GraphQL: {self.api_stats.graphql_calls}, "
+                    f"Cache hits: {self.api_stats.cache_hits})"
+                )
+
+            except Exception as e:
+                self.logger.error(f"Error during repository validation: {e}")
+                repo_results = dict.fromkeys(repos_to_validate, False)
+
+        # Merge cached repository results
+        for repo, ref in cached_results:
+            if repo not in repo_results:
+                # Assume cached results are for valid repositories if they were cached
+                repo_results[repo] = cached_results[(repo, ref)].result not in [
+                    ValidationResult.INVALID_REPOSITORY
+                ]
 
         # Update progress
         if progress and task_id:
@@ -158,45 +189,87 @@ class ActionCallValidator:
                 description="Validating references..."
             )
 
-        # Step 2: Validate references for valid repositories only
-        valid_repo_refs = [
-            (repo_key, ref) for repo_key, ref in repo_refs
+        # Step 2: Validate references for valid repositories only (excluding cached results)
+        valid_repo_refs_to_validate = [
+            (repo_key, ref) for repo_key, ref in refs_to_validate
             if repo_results.get(repo_key, False)
         ]
 
-        self.logger.debug(f"Validating {len(valid_repo_refs)} references for valid repositories")
+        self.logger.debug(f"Validating {len(valid_repo_refs_to_validate)} references for valid repositories (after cache)")
 
-        try:
-            ref_results = await self._github_client.validate_references_batch(
-                valid_repo_refs
-            )
+        ref_results = {}
 
-            # Merge API stats again
-            self._merge_api_stats(self._github_client.get_api_stats())
+        if valid_repo_refs_to_validate:
+            try:
+                ref_results = await self._github_client.validate_references_batch(
+                    valid_repo_refs_to_validate
+                )
 
-            self.logger.debug(
-                f"Reference validation complete. Total API calls: "
-                f"{self.api_stats.total_calls} (GraphQL: {self.api_stats.graphql_calls}, "
-                f"REST: {self.api_stats.rest_calls}, "
-                f"Cache hits: {self.api_stats.cache_hits})"
-            )
+                # Merge API stats again
+                self._merge_api_stats(self._github_client.get_api_stats())
 
-        except Exception as e:
-            self.logger.error(f"Error during reference validation: {e}")
-            ref_results = dict.fromkeys(valid_repo_refs, False)
+                self.logger.debug(
+                    f"Reference validation complete. Total API calls: "
+                    f"{self.api_stats.total_calls} (GraphQL: {self.api_stats.graphql_calls}, "
+                    f"REST: {self.api_stats.rest_calls}, "
+                    f"Cache hits: {self.api_stats.cache_hits})"
+                )
+
+            except Exception as e:
+                self.logger.error(f"Error during reference validation: {e}")
+                ref_results = dict.fromkeys(valid_repo_refs_to_validate, False)
+
+        # Merge cached reference results
+        for (repo, ref), cached_entry in cached_results.items():
+            ref_results[(repo, ref)] = cached_entry.result == ValidationResult.VALID
 
         # Update progress
         if progress and task_id:
             progress.update(
                 task_id,
-                completed=len(unique_repos) + len(valid_repo_refs),
+                completed=len(repos_to_validate) + len(valid_repo_refs_to_validate),
                 description="Processing validation results..."
             )
 
-        # Step 3: Map results back to all occurrences
+        # Cache new validation results
+        cache_entries_to_store = []
+        for repo, ref in refs_to_validate:
+            repo_valid = repo_results.get(repo, False)
+            ref_valid = ref_results.get((repo, ref), False)
+
+            if repo_valid and ref_valid:
+                result = ValidationResult.VALID
+                api_call_type = "graphql"
+                error_message = None
+            elif not repo_valid:
+                result = ValidationResult.INVALID_REPOSITORY
+                api_call_type = "graphql"
+                error_message = f"Repository {repo} not found or not accessible"
+            else:
+                result = ValidationResult.INVALID_REFERENCE
+                api_call_type = "graphql"
+                error_message = f"Reference {ref} not found in repository {repo}"
+
+            cache_entries_to_store.append((repo, ref, result, api_call_type, error_message))
+
+        if cache_entries_to_store:
+            self._cache.put_batch(cache_entries_to_store)
+
+        # Step 3: Map results back to all occurrences (including cached results)
+        # Reconstruct full repo_refs list for _combine_validation_results
+        all_repo_refs = repo_refs
+        all_repo_results = repo_results.copy()
+        all_ref_results = ref_results.copy()
+
+        # Add cached results to the full results dictionaries
+        for (repo, ref), cached_entry in cached_results.items():
+            all_repo_results[repo] = cached_entry.result not in [ValidationResult.INVALID_REPOSITORY]
+            all_ref_results[(repo, ref)] = cached_entry.result == ValidationResult.VALID
+
         validation_results = self._combine_validation_results(
-            unique_calls, repo_results, ref_results
+            unique_calls, all_repo_results, all_ref_results
         )
+
 
         for call_key, result in validation_results.items():
             if result != ValidationResult.VALID:

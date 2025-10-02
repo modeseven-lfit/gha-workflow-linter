@@ -55,4 +55,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 ENTRYPOINT ["gha-workflow-linter"]
 
 # Default command (scan current directory)
-CMD ["."]
+CMD ["lint", "."]

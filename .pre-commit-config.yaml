@@ -120,7 +120,7 @@ repos:
         name: gha-workflow-linter
         entry: gha-workflow-linter
         language: python
-        args: [., --quiet]
+        args: [lint, ., --quiet]
         files: '^\.github/workflows/.*\.ya?ml$'
         pass_filenames: false
         additional_dependencies: ['gha-workflow-linter==0.1.0']
