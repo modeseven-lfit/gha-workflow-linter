@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 # 🔍 GHA Workflow Linter
 
-[![GitHub Actions](https://github.com/lfit/gha-workflow-linter/workflows/CI/badge.svg)](https://github.com/lfit/gha-workflow-linter/actions)
+[![GitHub Actions](https://github.com/modeseven-lfit/gha-workflow-linter/workflows/CI/badge.svg)](https://github.com/modeseven-lfit/gha-workflow-linter/actions)
 [![PyPI version](https://badge.fury.io/py/gha-workflow-linter.svg)](https://badge.fury.io/py/gha-workflow-linter)
 [![Python Support](https://img.shields.io/pypi/pyversions/gha-workflow-linter.svg)](https://pypi.org/project/gha-workflow-linter/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
