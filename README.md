@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 # 🔍 GHA Workflow Linter
 
-[![GitHub Actions](https://github.com/modeseven-lfit/gha-workflow-linter/workflows/CI/badge.svg)](https://github.com/modeseven-lfit/gha-workflow-linter/actions)
+[![GitHub Actions](https://github.com/modeseven-lfit/gha-workflow-linter/actions/workflows/build-test.yaml/badge.svg)](https://github.com/modeseven-lfit/gha-workflow-linter/actions)
 [![PyPI version](https://badge.fury.io/py/gha-workflow-linter.svg)](https://badge.fury.io/py/gha-workflow-linter)
 [![Python Support](https://img.shields.io/pypi/pyversions/gha-workflow-linter.svg)](https://pypi.org/project/gha-workflow-linter/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -39,7 +39,7 @@ pip install gha-workflow-linter
 ### From Source
 
 ```bash
-git clone https://github.com/lfit/gha-workflow-linter.git
+git clone https://github.com/modeseven-lfit/gha-workflow-linter.git
 cd gha-workflow-linter
 uv pip install -e .
 ```
@@ -47,7 +47,7 @@ uv pip install -e .
 ### Development Installation
 
 ```bash
-git clone https://github.com/lfit/gha-workflow-linter.git
+git clone https://github.com/modeseven-lfit/gha-workflow-linter.git
 cd gha-workflow-linter
 uv pip install -e ".[dev]"
 ```
@@ -128,8 +128,8 @@ Add to your `.pre-commit-config.yaml`:
 
 ```yaml
 repos:
-  - repo: https://github.com/lfit/gha-workflow-linter
-    rev: v1.0.0  # Use the ref you want
+  - repo: https://github.com/modeseven-lfit/gha-workflow-linter
+    rev: d86993e21bbcddcfa9dac63cd43213b6a58fa6fb  # frozen: v0.1.1
     hooks:
       - id: gha-workflow-linter
 ```
@@ -146,7 +146,7 @@ jobs:
     steps:
       - uses: actions/checkout@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a
       - name: Check action calls (strict SHA pinning)
-        uses: lfit/gha-workflow-linter@v1.0.0
+        uses: modeseven-lfit/gha-workflow-linter@d86993e21bbcddcfa9dac63cd43213b6a58fa6fb
         with:
           path: .
           fail-on-error: true
@@ -161,7 +161,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4  # This would fail in strict mode above
       - name: Check action calls (allow tags/branches)
-        uses: lfit/gha-workflow-linter@v1.0.0
+        uses: modeseven-lfit/gha-workflow-linter@d86993e21bbcddcfa9dac63cd43213b6a58fa6fb
         with:
           path: .
           require-pinned-sha: false  # Allow @v4, @main, etc.
@@ -551,7 +551,7 @@ pipeline {
 # Using published image
 docker run --rm -v "$(pwd):/workspace" \
   -e GITHUB_TOKEN=$GITHUB_TOKEN \
-  ghcr.io/lfit/gha-workflow-linter:latest lint /workspace
+  ghcr.io/modeseven-lfit/gha-workflow-linter:latest lint /workspace
 
 # Build local image
 docker build -t gha-workflow-linter .
@@ -578,7 +578,7 @@ docker run --rm -v "$(pwd):/workspace" \
 ### Setup Development Environment
 
 ```bash
-git clone https://github.com/lfit/gha-workflow-linter.git
+git clone https://github.com/modeseven-lfit/gha-workflow-linter.git
 cd gha-workflow-linter
 uv pip install -e ".[dev]"
 ```
@@ -665,14 +665,11 @@ on its own workflows:
 
 ```yaml
 # .pre-commit-config.yaml
-- repo: local
-  hooks:
-    - id: gha-workflow-linter
-      name: gha-workflow-linter - Check GitHub Actions/workflows
-      entry: python
-      args: [-m, gha_workflow_linter.cli, ., --quiet]
-      language: system
-      files: '^\.github/workflows/.*\.ya?ml$'
+repos:
+  - repo: https://github.com/modeseven-lfit/gha-workflow-linter
+    rev: d86993e21bbcddcfa9dac63cd43213b6a58fa6fb  # frozen: v0.1.1
+    hooks:
+      - id: gha-workflow-linter
 ```
 
 ### Development Setup
@@ -706,8 +703,8 @@ Licensed under the Apache License 2.0. See the LICENSE file for details.
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/lfit/gha-workflow-linter/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/lfit/gha-workflow-linter/discussions)
+- **Issues**: [GitHub Issues](https://github.com/modeseven-lfit/gha-workflow-linter/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/modeseven-lfit/gha-workflow-linter/discussions)
 - **Documentation**: [Read the Docs](https://gha-workflow-linter.readthedocs.io)
 
 ## Acknowledgments
