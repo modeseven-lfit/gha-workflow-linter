@@ -370,12 +370,25 @@ def lint(
             raise typer.Exit(0)
 
         logger.info(f"Starting gha-workflow-linter {__version__}")
-        logger.info(f"Scanning path: {path}")
 
-        # Check for GitHub token and show warning if missing
+        # Check for GitHub token and rate limits before proceeding
         effective_token = github_token or config.effective_github_token
-        if not effective_token and not quiet:
-            logger.info("⚠️ No GitHub token; risk of rate-limiting")
+
+        # Early rate limit check before showing progress bars
+        from .github_api import GitHubGraphQLClient
+        github_client = GitHubGraphQLClient(config.github_api)
+
+        try:
+            github_client.check_rate_limit_and_exit_if_needed()
+            # If we get here, we're not rate limited
+            if not effective_token and not quiet:
+                logger.info("⚠️ No GitHub token; risk of rate-limiting")
+        except SystemExit:
+            # Rate limit check triggered exit, re-raise to exit cleanly
+            raise
+
+        # Only show scanning path if we're actually going to proceed
+        logger.info(f"Scanning path: {path}")
 
         # Run the linting process
         exit_code = run_linter(config, cli_options)

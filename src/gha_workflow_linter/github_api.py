@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 import time
 from typing import Any
 
@@ -682,3 +683,69 @@ class GitHubGraphQLClient:
     def get_rate_limit_info(self) -> GitHubRateLimitInfo:
         """Get current rate limit information."""
         return self._rate_limit_info.model_copy()  # type: ignore[no-any-return]
+
+    def _is_rate_limited(self) -> bool:
+        """Check if we are currently rate-limited."""
+        # Consider rate-limited if we have 0 remaining requests
+        if self._rate_limit_info.remaining == 0:
+            return True
+
+        # Also check if we're very close to being rate-limited (1 request or less remaining)
+        # and the reset time is in the future
+        current_time = time.time()
+        if (self._rate_limit_info.remaining <= 1 and
+            self._rate_limit_info.reset_at > current_time):
+            return True
+
+        return False
+
+    def check_rate_limit_and_exit_if_needed(self) -> None:
+        """
+        Synchronously check rate limits and exit if rate limited.
+
+        This method performs a synchronous HTTP request to check rate limits
+        and exits the program if rate limited. Should be called early in the
+        application flow before showing progress bars.
+        """
+        # We can check rate limits even without a token for unauthenticated requests
+
+        import httpx
+
+        try:
+            # Create a temporary synchronous client for the rate limit check
+            with httpx.Client(
+                headers={
+                    "Accept": "application/vnd.github.v3+json",
+                    "User-Agent": "gha-workflow-linter/1.0",
+                    **({"Authorization": f"Bearer {self._token}"} if self._token else {}),
+                },
+                timeout=30.0,
+            ) as client:
+
+                response = client.get(f"{self.config.base_url}/rate_limit")
+
+                if response.status_code == 200:
+                    data = response.json()
+                    graphql_limits = data.get("resources", {}).get("graphql", {})
+
+                    remaining = graphql_limits.get("remaining", 5000)
+                    limit = graphql_limits.get("limit", 5000)
+                    reset_at = graphql_limits.get("reset", 0)
+
+                    # Update our rate limit info
+                    self._rate_limit_info = GitHubRateLimitInfo(
+                        limit=limit,
+                        remaining=remaining,
+                        reset_at=reset_at,
+                        used=graphql_limits.get("used", 0),
+                    )
+
+                    # Check if we're rate limited and exit if so
+                    if self._is_rate_limited():
+                        self.logger.warning("⚠️ GitHub API Rate-limited; Skipping Checks")
+                        sys.exit(0)
+
+        except Exception as e:
+            # If we can't check rate limits, log it but don't exit
+            # The async flow will handle errors later
+            self.logger.debug(f"Could not check rate limits synchronously: {e}")
