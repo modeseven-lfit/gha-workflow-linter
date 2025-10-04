@@ -11,9 +11,9 @@ This script demonstrates how the local caching feature works by:
 3. Showing cache statistics and performance benefits
 """
 
+from pathlib import Path
 import tempfile
 import time
-from pathlib import Path
 from typing import Optional
 
 from gha_workflow_linter.cache import CacheConfig, ValidationCache
@@ -31,7 +31,7 @@ def demo_basic_cache_operations() -> None:
             cache_dir=Path(temp_dir),
             cache_file="demo_cache.json",
             default_ttl_seconds=300,  # 5 minutes
-            max_cache_size=1000
+            max_cache_size=1000,
         )
 
         cache = ValidationCache(config)
@@ -42,7 +42,11 @@ def demo_basic_cache_operations() -> None:
             ("actions/setup-python", "v5", ValidationResult.VALID),
             ("actions/setup-node", "v4", ValidationResult.VALID),
             ("invalid/repo", "v1", ValidationResult.INVALID_REPOSITORY),
-            ("actions/checkout", "invalid-ref", ValidationResult.INVALID_REFERENCE),
+            (
+                "actions/checkout",
+                "invalid-ref",
+                ValidationResult.INVALID_REFERENCE,
+            ),
         ]
 
         print("Storing validation results in cache...")
@@ -51,16 +55,18 @@ def demo_basic_cache_operations() -> None:
             print(f"  Cached: {repo}@{ref} -> {result.value}")
 
         print("\nRetrieving cached results...")
-        for repo, ref, expected_result in test_repos:
+        for repo, ref, _expected_result in test_repos:
             cached_entry = cache.get(repo, ref)
             if cached_entry:
-                print(f"  Retrieved: {repo}@{ref} -> {cached_entry.result.value} "
-                      f"(age: {cached_entry.age_seconds:.1f}s)")
+                print(
+                    f"  Retrieved: {repo}@{ref} -> {cached_entry.result.value} "
+                    f"(age: {cached_entry.age_seconds:.1f}s)"
+                )
             else:
                 print(f"  Cache miss: {repo}@{ref}")
 
         # Show cache statistics
-        print(f"\nCache Stats:")
+        print("\nCache Stats:")
         print(f"  Hits: {cache.stats.hits}")
         print(f"  Misses: {cache.stats.misses}")
         print(f"  Writes: {cache.stats.writes}")
@@ -75,18 +81,44 @@ def demo_batch_operations() -> None:
         config = CacheConfig(
             enabled=True,
             cache_dir=Path(temp_dir),
-            cache_file="batch_demo_cache.json"
+            cache_file="batch_demo_cache.json",
         )
 
         cache = ValidationCache(config)
 
         # Batch put operations
-        batch_data: list[tuple[str, str, ValidationResult, str, Optional[str]]] = [
+        batch_data: list[
+            tuple[str, str, ValidationResult, str, Optional[str]]
+        ] = [
             ("actions/checkout", "v4", ValidationResult.VALID, "graphql", None),
-            ("actions/setup-python", "v5", ValidationResult.VALID, "graphql", None),
-            ("actions/setup-node", "v4", ValidationResult.VALID, "graphql", None),
-            ("actions/upload-artifact", "v4", ValidationResult.VALID, "graphql", None),
-            ("actions/download-artifact", "v4", ValidationResult.VALID, "graphql", None),
+            (
+                "actions/setup-python",
+                "v5",
+                ValidationResult.VALID,
+                "graphql",
+                None,
+            ),
+            (
+                "actions/setup-node",
+                "v4",
+                ValidationResult.VALID,
+                "graphql",
+                None,
+            ),
+            (
+                "actions/upload-artifact",
+                "v4",
+                ValidationResult.VALID,
+                "graphql",
+                None,
+            ),
+            (
+                "actions/download-artifact",
+                "v4",
+                ValidationResult.VALID,
+                "graphql",
+                None,
+            ),
         ]
 
         print("Storing batch validation results...")
@@ -124,7 +156,7 @@ def demo_cache_expiration() -> None:
             enabled=True,
             cache_dir=Path(temp_dir),
             cache_file="expiration_demo_cache.json",
-            default_ttl_seconds=2  # 2 seconds for demo
+            default_ttl_seconds=2,  # 2 seconds for demo
         )
 
         cache = ValidationCache(config)
@@ -136,7 +168,9 @@ def demo_cache_expiration() -> None:
         # Retrieve immediately
         entry = cache.get("actions/checkout", "v4")
         if entry:
-            print(f"Immediate retrieval: Success (age: {entry.age_seconds:.1f}s)")
+            print(
+                f"Immediate retrieval: Success (age: {entry.age_seconds:.1f}s)"
+            )
 
         # Wait for expiration
         print("Waiting 3 seconds for expiration...")
@@ -162,7 +196,7 @@ def demo_cache_size_limits() -> None:
             enabled=True,
             cache_dir=Path(temp_dir),
             cache_file="size_limit_demo_cache.json",
-            max_cache_size=3  # Only 3 entries allowed
+            max_cache_size=3,  # Only 3 entries allowed
         )
 
         cache = ValidationCache(config)
@@ -180,7 +214,7 @@ def demo_cache_size_limits() -> None:
 
         for i, (repo, ref) in enumerate(entries):
             cache.put(repo, ref, ValidationResult.VALID, "graphql")
-            print(f"  Added entry {i+1}: {repo}@{ref}")
+            print(f"  Added entry {i + 1}: {repo}@{ref}")
             # Small delay to ensure different timestamps
             time.sleep(0.01)
 
@@ -204,14 +238,16 @@ def demo_cache_persistence() -> None:
         config = CacheConfig(
             enabled=True,
             cache_dir=Path(temp_dir),
-            cache_file="persistence_demo_cache.json"
+            cache_file="persistence_demo_cache.json",
         )
 
         # First cache instance
         print("Creating first cache instance and storing data...")
         cache1 = ValidationCache(config)
         cache1.put("actions/checkout", "v4", ValidationResult.VALID, "graphql")
-        cache1.put("actions/setup-python", "v5", ValidationResult.VALID, "graphql")
+        cache1.put(
+            "actions/setup-python", "v5", ValidationResult.VALID, "graphql"
+        )
         cache1.save()
         print("Data saved to disk")
 
@@ -226,7 +262,9 @@ def demo_cache_persistence() -> None:
         if entry1 and entry2:
             print("✅ Cache persistence working correctly!")
             print(f"  Retrieved: actions/checkout@v4 -> {entry1.result.value}")
-            print(f"  Retrieved: actions/setup-python@v5 -> {entry2.result.value}")
+            print(
+                f"  Retrieved: actions/setup-python@v5 -> {entry2.result.value}"
+            )
         else:
             print("❌ Cache persistence failed")
 
@@ -241,7 +279,7 @@ def demo_cache_info() -> None:
             cache_dir=Path(temp_dir),
             cache_file="info_demo_cache.json",
             default_ttl_seconds=3600,
-            max_cache_size=1000
+            max_cache_size=1000,
         )
 
         cache = ValidationCache(config)
@@ -249,11 +287,17 @@ def demo_cache_info() -> None:
         # Add some test data
         cache.put("actions/checkout", "v4", ValidationResult.VALID, "graphql")
         cache.put("actions/setup-node", "v4", ValidationResult.VALID, "graphql")
-        cache.put("invalid/repo", "v1", ValidationResult.INVALID_REPOSITORY, "graphql", "Repository not found")
+        cache.put(
+            "invalid/repo",
+            "v1",
+            ValidationResult.INVALID_REPOSITORY,
+            "graphql",
+            "Repository not found",
+        )
 
         # Generate some stats
         cache.get("actions/checkout", "v4")  # hit
-        cache.get("actions/missing", "v1")   # miss
+        cache.get("actions/missing", "v1")  # miss
 
         info = cache.get_cache_info()
 
@@ -265,7 +309,7 @@ def demo_cache_info() -> None:
         print(f"  TTL (seconds): {info['ttl_seconds']}")
 
         print("\nCache Statistics:")
-        stats = info['stats']
+        stats = info["stats"]
         print(f"  Hits: {stats['hits']}")
         print(f"  Misses: {stats['misses']}")
         print(f"  Writes: {stats['writes']}")

@@ -9,11 +9,11 @@ import json
 import logging
 from pathlib import Path
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .models import ValidationResult
+from .models import ValidationResult  # noqa: TC001
 
 
 class CachedValidationEntry(BaseModel):  # type: ignore[misc]
@@ -25,8 +25,12 @@ class CachedValidationEntry(BaseModel):  # type: ignore[misc]
     reference: str = Field(..., description="Git reference (tag/branch/sha)")
     result: ValidationResult = Field(..., description="Validation result")
     timestamp: float = Field(..., description="Unix timestamp when cached")
-    api_call_type: str = Field(..., description="Type of API call that generated this result")
-    error_message: Optional[str] = Field(None, description="Error message if validation failed")
+    api_call_type: str = Field(
+        ..., description="Type of API call that generated this result"
+    )
+    error_message: str | None = Field(
+        None, description="Error message if validation failed"
+    )
 
     def is_expired(self, ttl_seconds: int) -> bool:
         """Check if the cache entry has expired."""
@@ -46,15 +50,21 @@ class CacheConfig(BaseModel):  # type: ignore[misc]
     enabled: bool = Field(True, description="Enable local caching")
     cache_dir: Path = Field(
         Path.home() / ".cache" / "gha-workflow-linter",
-        description="Directory to store cache files"
+        description="Directory to store cache files",
     )
-    cache_file: str = Field("validation_cache.json", description="Cache file name")
+    cache_file: str = Field(
+        "validation_cache.json", description="Cache file name"
+    )
     default_ttl_seconds: int = Field(
         7 * 24 * 60 * 60,  # 7 days
-        description="Default TTL for cache entries in seconds"
+        description="Default TTL for cache entries in seconds",
     )
-    max_cache_size: int = Field(10000, description="Maximum number of cache entries")
-    cleanup_on_startup: bool = Field(True, description="Clean expired entries on startup")
+    max_cache_size: int = Field(
+        10000, description="Maximum number of cache entries"
+    )
+    cleanup_on_startup: bool = Field(
+        True, description="Clean expired entries on startup"
+    )
 
     @property
     def cache_file_path(self) -> Path:
@@ -70,7 +80,9 @@ class CacheStats(BaseModel):  # type: ignore[misc]
     expired: int = Field(0, description="Number of expired entries encountered")
     writes: int = Field(0, description="Number of cache writes")
     purges: int = Field(0, description="Number of cache purges")
-    cleanup_removed: int = Field(0, description="Number of entries removed during cleanup")
+    cleanup_removed: int = Field(
+        0, description="Number of entries removed during cleanup"
+    )
 
     @property
     def total_requests(self) -> int:
@@ -98,7 +110,7 @@ class ValidationCache:
         self.config = config
         self.logger = logging.getLogger(__name__)
         self.stats = CacheStats()
-        self._cache: Dict[str, CachedValidationEntry] = {}
+        self._cache: dict[str, CachedValidationEntry] = {}
         self._loaded = False
 
     def _generate_cache_key(self, repository: str, reference: str) -> str:
@@ -112,13 +124,17 @@ class ValidationCache:
 
         try:
             if not self.config.cache_file_path.exists():
-                self.logger.debug("Cache file does not exist, starting with empty cache")
+                self.logger.debug(
+                    "Cache file does not exist, starting with empty cache"
+                )
                 self._loaded = True
                 return
 
-            self.logger.debug(f"Loading cache from {self.config.cache_file_path}")
+            self.logger.debug(
+                f"Loading cache from {self.config.cache_file_path}"
+            )
 
-            with open(self.config.cache_file_path, 'r', encoding='utf-8') as f:
+            with open(self.config.cache_file_path, encoding="utf-8") as f:
                 cache_data = json.load(f)
 
             # Convert JSON data back to CachedValidationEntry objects
@@ -127,7 +143,9 @@ class ValidationCache:
                     entry = CachedValidationEntry(**entry_data)
                     self._cache[key] = entry
                 except Exception as e:
-                    self.logger.warning(f"Invalid cache entry for key {key}: {e}")
+                    self.logger.warning(
+                        f"Invalid cache entry for key {key}: {e}"
+                    )
 
             self.logger.info(f"Loaded {len(self._cache)} entries from cache")
 
@@ -156,8 +174,8 @@ class ValidationCache:
                 cache_data[key] = entry.model_dump()
 
             # Write to temporary file first, then rename for atomicity
-            temp_file = self.config.cache_file_path.with_suffix('.tmp')
-            with open(temp_file, 'w', encoding='utf-8') as f:
+            temp_file = self.config.cache_file_path.with_suffix(".tmp")
+            with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(cache_data, f, indent=2, ensure_ascii=False)
 
             temp_file.replace(self.config.cache_file_path)
@@ -171,7 +189,6 @@ class ValidationCache:
         if not self.config.enabled:
             return
 
-        before_count = len(self._cache)
         expired_keys = []
 
         for key, entry in self._cache.items():
@@ -193,8 +210,7 @@ class ValidationCache:
 
         # Remove oldest entries first
         sorted_entries = sorted(
-            self._cache.items(),
-            key=lambda x: x[1].timestamp
+            self._cache.items(), key=lambda x: x[1].timestamp
         )
 
         entries_to_remove = len(self._cache) - self.config.max_cache_size
@@ -202,9 +218,13 @@ class ValidationCache:
             key = sorted_entries[i][0]
             del self._cache[key]
 
-        self.logger.debug(f"Removed {entries_to_remove} entries to enforce cache size limit")
+        self.logger.debug(
+            f"Removed {entries_to_remove} entries to enforce cache size limit"
+        )
 
-    def get(self, repository: str, reference: str) -> Optional[CachedValidationEntry]:
+    def get(
+        self, repository: str, reference: str
+    ) -> CachedValidationEntry | None:
         """
         Get a cached validation result.
 
@@ -243,7 +263,7 @@ class ValidationCache:
         reference: str,
         result: ValidationResult,
         api_call_type: str,
-        error_message: Optional[str] = None
+        error_message: str | None = None,
     ) -> None:
         """
         Store a validation result in the cache.
@@ -267,7 +287,7 @@ class ValidationCache:
             result=result,
             timestamp=time.time(),
             api_call_type=api_call_type,
-            error_message=error_message
+            error_message=error_message,
         )
 
         self._cache[cache_key] = entry
@@ -276,12 +296,15 @@ class ValidationCache:
         # Enforce size limit
         self._enforce_cache_size_limit()
 
-        self.logger.debug(f"Cached validation result for {repository}@{reference}: {result}")
+        self.logger.debug(
+            f"Cached validation result for {repository}@{reference}: {result}"
+        )
 
     def get_batch(
-        self,
-        repo_refs: List[Tuple[str, str]]
-    ) -> Tuple[Dict[Tuple[str, str], CachedValidationEntry], List[Tuple[str, str]]]:
+        self, repo_refs: list[tuple[str, str]]
+    ) -> tuple[
+        dict[tuple[str, str], CachedValidationEntry], list[tuple[str, str]]
+    ]:
         """
         Get multiple cached validation results.
 
@@ -307,8 +330,7 @@ class ValidationCache:
         return cached_results, cache_misses
 
     def put_batch(
-        self,
-        results: List[Tuple[str, str, ValidationResult, str, Optional[str]]]
+        self, results: list[tuple[str, str, ValidationResult, str, str | None]]
     ) -> None:
         """
         Store multiple validation results in the cache.
@@ -373,7 +395,7 @@ class ValidationCache:
 
         return removed_count
 
-    def get_cache_info(self) -> Dict[str, Any]:
+    def get_cache_info(self) -> dict[str, Any]:
         """
         Get information about the cache state.
 
@@ -391,7 +413,7 @@ class ValidationCache:
                 "newest_entry_age": None,
                 "max_cache_size": self.config.max_cache_size,
                 "ttl_seconds": self.config.default_ttl_seconds,
-                "stats": self.stats.model_dump()
+                "stats": self.stats.model_dump(),
             }
 
         self._load_cache()
@@ -417,11 +439,15 @@ class ValidationCache:
             "cache_file_exists": self.config.cache_file_path.exists(),
             "entries": len(self._cache),
             "expired_entries": expired_count,
-            "oldest_entry_age": time.time() - oldest_timestamp if oldest_timestamp else None,
-            "newest_entry_age": time.time() - newest_timestamp if newest_timestamp else None,
+            "oldest_entry_age": time.time() - oldest_timestamp
+            if oldest_timestamp
+            else None,
+            "newest_entry_age": time.time() - newest_timestamp
+            if newest_timestamp
+            else None,
             "max_cache_size": self.config.max_cache_size,
             "ttl_seconds": self.config.default_ttl_seconds,
-            "stats": self.stats.model_dump()
+            "stats": self.stats.model_dump(),
         }
 
     def save(self) -> None:

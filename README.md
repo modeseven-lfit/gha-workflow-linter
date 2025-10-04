@@ -7,7 +7,7 @@ SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 [![GitHub Actions](https://github.com/modeseven-lfit/gha-workflow-linter/actions/workflows/build-test.yaml/badge.svg)](https://github.com/modeseven-lfit/gha-workflow-linter/actions)
 [![PyPI version](https://img.shields.io/pypi/v/gha-workflow-linter.svg)](https://pypi.org/project/gha-workflow-linter/)
-[![Python Support](https://img.shields.io/pypi/pyversions/gha-workflow-linter.svg)](https://pypi.org/project/gha-workflow-linter/)
+[![Python Support](https://img.shields.io/pypi/pyversions/gha-workflow-linter.svg)](https://devguide.python.org/versions/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 A comprehensive GitHub Actions workflow linter that validates action and

@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from rich.progress import Progress, TaskID
 
     from .models import ActionCall, Config
+
     pass
 
 import yaml
@@ -76,7 +77,7 @@ class WorkflowScanner:
                     if progress and task_id:
                         progress.update(
                             task_id,
-                            description=f"Scanning {workflow_file.name}..."
+                            description=f"Scanning {workflow_file.name}...",
                         )
 
                     self.logger.debug(f"Found workflow file: {workflow_file}")
@@ -200,7 +201,6 @@ class WorkflowScanner:
             Dictionary mapping file paths to their action calls
         """
 
-
         results: dict[Path, dict[int, ActionCall]] = {}
 
         for workflow_file in self.find_workflow_files(
@@ -224,8 +224,7 @@ class WorkflowScanner:
         return results
 
     def get_scan_summary(
-        self,
-        results: dict[Path, dict[int, ActionCall]]
+        self, results: dict[Path, dict[int, ActionCall]]
     ) -> dict[str, int]:
         """
         Generate summary statistics for scan results.

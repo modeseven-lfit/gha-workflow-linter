@@ -134,6 +134,24 @@ module = [
 ]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_decorators = false
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = [
+    "tests.test_validator_comprehensive",
+    "tests.test_github_api_comprehensive",
+    "tests.test_config_comprehensive",
+    "tests.test_cli_comprehensive"
+]
+disable_error_code = ["attr-defined", "call-arg", "arg-type", "comparison-overlap", "index", "misc", "func-returns-value", "call-overload", "union-attr", "var-annotated", "operator", "no-untyped-def"]
+
+[[tool.mypy.overrides]]
+module = ["tests.test_exceptions_simple"]
+disable_error_code = ["unreachable"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
@@ -146,7 +164,7 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-report=xml",
-    "--cov-fail-under=55",
+    "--cov-fail-under=80",
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",

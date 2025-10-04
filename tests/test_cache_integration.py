@@ -19,7 +19,7 @@ from gha_workflow_linter.models import ValidationResult
 class TestCacheIntegration:
     """Integration tests for cache functionality."""
 
-    @pytest.fixture  # type: ignore[misc]
+    @pytest.fixture
     def temp_workflow_dir(self) -> Generator[Path, None, None]:
         """Create a temporary directory with test workflow files."""
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -48,7 +48,7 @@ jobs:
 
             yield temp_path
 
-    @pytest.fixture  # type: ignore[misc]
+    @pytest.fixture
     def temp_cache_dir(self) -> Generator[Path, None, None]:
         """Create a temporary cache directory."""
         with tempfile.TemporaryDirectory() as temp_dir:

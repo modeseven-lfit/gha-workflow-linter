@@ -66,7 +66,11 @@ class ConfigManager:
             Path to config file if found, None otherwise
         """
         # Check current directory first
-        for filename in ["gha-workflow-linter.yaml", "gha-workflow-linter.yml", ".gha-workflow-linter.yaml"]:
+        for filename in [
+            "gha-workflow-linter.yaml",
+            "gha-workflow-linter.yml",
+            ".gha-workflow-linter.yaml",
+        ]:
             config_path = Path.cwd() / filename
             if config_path.exists():
                 return config_path
@@ -119,7 +123,9 @@ class ConfigManager:
                 data = yaml.safe_load(f)
 
             if not isinstance(data, dict):
-                raise ValueError("Configuration file must contain a YAML object")
+                raise ValueError(
+                    "Configuration file must contain a YAML object"
+                )
 
             return data
 
@@ -178,14 +184,14 @@ class ConfigManager:
 # SPDX-License-Identifier: Apache-2.0
 
 # Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-log_level: {config_dict['log_level']}
+log_level: {config_dict["log_level"]}
 
 # Number of parallel workers for validation (1-32)
-parallel_workers: {config_dict['parallel_workers']}
+parallel_workers: {config_dict["parallel_workers"]}
 
 # File extensions to scan for workflows
 scan_extensions:
-{chr(10).join(f'  - "{ext}"' for ext in (config_dict['scan_extensions'] if isinstance(config_dict['scan_extensions'], list) else []))}
+{chr(10).join(f'  - "{ext}"' for ext in (config_dict["scan_extensions"] if isinstance(config_dict["scan_extensions"], list) else []))}
 
 # Patterns to exclude from scanning (can be empty)
 exclude_patterns: []
@@ -193,36 +199,36 @@ exclude_patterns: []
 # Network configuration
 network:
   # Timeout for network requests (seconds)
-  timeout_seconds: {config_dict['network']['timeout_seconds'] if isinstance(config_dict['network'], dict) else 30}
+  timeout_seconds: {config_dict["network"]["timeout_seconds"] if isinstance(config_dict["network"], dict) else 30}
 
   # Maximum retry attempts for failed requests
-  max_retries: {config_dict['network']['max_retries'] if isinstance(config_dict['network'], dict) else 3}
+  max_retries: {config_dict["network"]["max_retries"] if isinstance(config_dict["network"], dict) else 3}
 
   # Delay between retry attempts (seconds)
-  retry_delay_seconds: {config_dict['network']['retry_delay_seconds'] if isinstance(config_dict['network'], dict) else 1.0}
+  retry_delay_seconds: {config_dict["network"]["retry_delay_seconds"] if isinstance(config_dict["network"], dict) else 1.0}
 
   # Delay between requests for rate limiting (seconds)
-  rate_limit_delay_seconds: {config_dict['network']['rate_limit_delay_seconds'] if isinstance(config_dict['network'], dict) else 0.1}
+  rate_limit_delay_seconds: {config_dict["network"]["rate_limit_delay_seconds"] if isinstance(config_dict["network"], dict) else 0.1}
 
 # GitHub API configuration
 github_api:
   # GitHub API base URL
-  base_url: {config_dict['github_api']['base_url'] if isinstance(config_dict['github_api'], dict) else 'https://api.github.com'}
+  base_url: {config_dict["github_api"]["base_url"] if isinstance(config_dict["github_api"], dict) else "https://api.github.com"}
 
   # GitHub GraphQL API URL
-  graphql_url: {config_dict['github_api']['graphql_url'] if isinstance(config_dict['github_api'], dict) else 'https://api.github.com/graphql'}
+  graphql_url: {config_dict["github_api"]["graphql_url"] if isinstance(config_dict["github_api"], dict) else "https://api.github.com/graphql"}
 
   # Maximum repositories per GraphQL query
-  max_repositories_per_query: {config_dict['github_api']['max_repositories_per_query'] if isinstance(config_dict['github_api'], dict) else 100}
+  max_repositories_per_query: {config_dict["github_api"]["max_repositories_per_query"] if isinstance(config_dict["github_api"], dict) else 100}
 
   # Maximum references per GraphQL query
-  max_references_per_query: {config_dict['github_api']['max_references_per_query'] if isinstance(config_dict['github_api'], dict) else 100}
+  max_references_per_query: {config_dict["github_api"]["max_references_per_query"] if isinstance(config_dict["github_api"], dict) else 100}
 
   # Rate limit threshold for delays
-  rate_limit_threshold: {config_dict['github_api']['rate_limit_threshold'] if isinstance(config_dict['github_api'], dict) else 1000}
+  rate_limit_threshold: {config_dict["github_api"]["rate_limit_threshold"] if isinstance(config_dict["github_api"], dict) else 1000}
 
   # Buffer seconds before rate limit reset
-  rate_limit_reset_buffer: {config_dict['github_api']['rate_limit_reset_buffer'] if isinstance(config_dict['github_api'], dict) else 60}
+  rate_limit_reset_buffer: {config_dict["github_api"]["rate_limit_reset_buffer"] if isinstance(config_dict["github_api"], dict) else 60}
 
   # GitHub API token (can also be set via GITHUB_TOKEN environment variable)
   # token: your_github_token_here

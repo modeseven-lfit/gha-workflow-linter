@@ -118,7 +118,7 @@ class TestCachedValidationEntry:
 class TestValidationCache:
     """Test ValidationCache functionality."""
 
-    @pytest.fixture  # type: ignore[misc]
+    @pytest.fixture
     def temp_cache_config(self) -> Generator[CacheConfig, None, None]:
         """Create a temporary cache configuration."""
         with tempfile.TemporaryDirectory() as temp_dir:

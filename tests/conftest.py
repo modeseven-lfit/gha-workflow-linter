@@ -17,14 +17,14 @@ from gha_workflow_linter.models import (
 )
 
 
-@pytest.fixture  # type: ignore[misc]
+@pytest.fixture
 def temp_dir() -> Generator[Path, None, None]:
     """Create a temporary directory for tests."""
     with tempfile.TemporaryDirectory() as tmpdir:
         yield Path(tmpdir)
 
 
-@pytest.fixture  # type: ignore[misc]
+@pytest.fixture
 def sample_workflow_content() -> str:
     """Sample GitHub workflow content for testing."""
     return """---
@@ -59,7 +59,7 @@ jobs:
 """
 
 
-@pytest.fixture  # type: ignore[misc]
+@pytest.fixture
 def invalid_workflow_content() -> str:
     """Sample workflow with invalid action calls."""
     return """---
@@ -78,7 +78,7 @@ jobs:
 """
 
 
-@pytest.fixture  # type: ignore[misc]
+@pytest.fixture
 def workflow_with_syntax_errors() -> str:
     """Sample workflow with YAML syntax errors."""
     return """---
@@ -93,7 +93,7 @@ jobs:
 """
 
 
-@pytest.fixture  # type: ignore[misc]
+@pytest.fixture
 def test_config() -> Config:
     """Test configuration with reduced timeouts and workers."""
     return Config(
@@ -101,6 +101,7 @@ def test_config() -> Config:
         parallel_workers=2,
         scan_extensions=[".yml", ".yaml"],
         exclude_patterns=["**/node_modules/**", "**/test/**"],
+        require_pinned_sha=True,
         git=GitConfig(timeout_seconds=10, use_ssh_agent=True),
         network=NetworkConfig(
             timeout_seconds=10,
@@ -111,7 +112,7 @@ def test_config() -> Config:
     )
 
 
-@pytest.fixture  # type: ignore[misc]
+@pytest.fixture
 def workflow_directory_structure(temp_dir: Path) -> dict[str, Path]:
     """Create a temporary directory structure with workflow files."""
     # Create main project structure
@@ -148,7 +149,7 @@ def workflow_directory_structure(temp_dir: Path) -> dict[str, Path]:
     }
 
 
-@pytest.fixture  # type: ignore[misc]
+@pytest.fixture
 def mock_git_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     """Mock git commands for testing without network calls."""
     import subprocess
@@ -202,7 +203,7 @@ def mock_git_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(subprocess, "run", mock_run)
 
 
-@pytest.fixture  # type: ignore[misc]
+@pytest.fixture
 def sample_config_file_content() -> str:
     """Sample configuration file content."""
     return """# gha-workflow-linter configuration file
@@ -231,7 +232,7 @@ network:
 """
 
 
-@pytest.fixture(autouse=True)  # type: ignore[misc]
+@pytest.fixture(autouse=True)
 def setup_logging() -> None:
     """Setup test logging configuration."""
     import logging

@@ -21,16 +21,25 @@ from rich.progress import (
 )
 from rich.table import Table
 import typer
-from typer.core import TyperGroup
 
 from . import __version__
 from .cache import ValidationCache
 from .config import ConfigManager
+from .exceptions import (
+    AuthenticationError,
+    ConfigurationError,
+    GitHubAPIError,
+    NetworkError,
+    RateLimitError,
+    TemporaryAPIError,
+    ValidationAbortedError,
+)
 from .models import CLIOptions, Config, LogLevel
 from .scanner import WorkflowScanner
 from .validator import ActionCallValidator
 
-def help_callback(ctx: typer.Context, param: Any, value: bool) -> None:
+
+def help_callback(ctx: typer.Context, _param: Any, value: bool) -> None:
     """Show help with version information."""
     if not value or ctx.resilient_parsing:
         return
@@ -40,7 +49,9 @@ def help_callback(ctx: typer.Context, param: Any, value: bool) -> None:
     raise typer.Exit()
 
 
-def main_app_help_callback(ctx: typer.Context, param: Any, value: bool) -> None:
+def main_app_help_callback(
+    ctx: typer.Context, _param: Any, value: bool
+) -> None:
     """Show main app help with version information."""
     if not value or ctx.resilient_parsing:
         return
@@ -50,7 +61,7 @@ def main_app_help_callback(ctx: typer.Context, param: Any, value: bool) -> None:
     raise typer.Exit()
 
 
-def cache_help_callback(ctx: typer.Context, param: Any, value: bool) -> None:
+def cache_help_callback(ctx: typer.Context, _param: Any, value: bool) -> None:
     """Show cache command help with version information."""
     if not value or ctx.resilient_parsing:
         return
@@ -60,31 +71,6 @@ def cache_help_callback(ctx: typer.Context, param: Any, value: bool) -> None:
     raise typer.Exit()
 
 
-app = typer.Typer(
-    name="gha-workflow-linter",
-    help="GitHub Actions workflow linter for validating action and workflow calls",
-    add_completion=False,
-    rich_markup_mode="rich",
-)
-
-# Add custom help option to main app
-@app.callback(invoke_without_command=True)  # type: ignore[misc]
-def main_callback(
-    ctx: typer.Context,
-    help: bool = typer.Option(
-        False,
-        "--help",
-        callback=main_app_help_callback,
-        is_eager=True,
-        help="Show this message and exit",
-        expose_value=False,
-    ),
-) -> None:
-    """GitHub Actions workflow linter for validating action and workflow calls"""
-    if ctx.invoked_subcommand is None:
-        # Only show help if no subcommand was invoked
-        pass
-
 console = Console()
 
 
@@ -93,6 +79,41 @@ def version_callback(value: bool) -> None:
     if value:
         console.print(f"🏷️ gha-workflow-linter version {__version__}")
         raise typer.Exit()
+
+
+app = typer.Typer(
+    name="gha-workflow-linter",
+    help="GitHub Actions workflow linter for validating action and workflow calls",
+    add_completion=False,
+    rich_markup_mode="rich",
+)
+
+
+# Add custom help option to main app
+@app.callback(invoke_without_command=True)  # type: ignore[misc]
+def main_callback(
+    ctx: typer.Context,
+    _help: bool = typer.Option(
+        False,
+        "--help",
+        callback=main_app_help_callback,
+        is_eager=True,
+        help="Show this message and exit",
+        expose_value=False,
+    ),
+    _version: bool = typer.Option(
+        False,
+        "--version",
+        callback=version_callback,
+        is_eager=True,
+        help="Show version and exit",
+        expose_value=False,
+    ),
+) -> None:
+    """GitHub Actions workflow linter for validating action and workflow calls"""
+    if ctx.invoked_subcommand is None:
+        # Only show help if no subcommand was invoked
+        pass
 
 
 def setup_logging(log_level: LogLevel, quiet: bool = False) -> None:
@@ -105,19 +126,24 @@ def setup_logging(log_level: LogLevel, quiet: bool = False) -> None:
     """
     level = logging.ERROR if quiet else getattr(logging, log_level.value)
 
-    logging.basicConfig(
-        level=level,
-        format="%(message)s",
-        datefmt="[%X]",
-        handlers=[
-            RichHandler(
-                console=console,
-                show_time=False,
-                show_path=False,
-                markup=True,
-            )
-        ],
+    # Get root logger and set its level explicitly
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+
+    # Clear existing handlers to avoid duplicates in tests
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # Add our handler
+    rich_handler = RichHandler(
+        console=console,
+        show_time=False,
+        show_path=False,
+        markup=True,
     )
+    rich_handler.setLevel(level)
+    rich_handler.setFormatter(logging.Formatter("%(message)s"))
+    root_logger.addHandler(rich_handler)
 
     # Set httpx logging to WARNING to suppress verbose HTTP request logs
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -139,7 +165,8 @@ def lint(
     ),
     config_file: Path | None = typer.Option(
         None,
-        "--config", "-c",
+        "--config",
+        "-c",
         help="Configuration file path",
         exists=True,
         file_okay=True,
@@ -154,12 +181,14 @@ def lint(
     ),
     verbose: bool = typer.Option(
         False,
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         help="Enable verbose output",
     ),
     quiet: bool = typer.Option(
         False,
-        "--quiet", "-q",
+        "--quiet",
+        "-q",
         help="Suppress all output except errors",
     ),
     log_level: LogLevel = typer.Option(
@@ -169,7 +198,8 @@ def lint(
     ),
     output_format: str = typer.Option(
         "text",
-        "--format", "-f",
+        "--format",
+        "-f",
         help="Output format (text, json)",
     ),
     fail_on_error: bool = typer.Option(
@@ -184,14 +214,16 @@ def lint(
     ),
     workers: int | None = typer.Option(
         None,
-        "--workers", "-j",
+        "--workers",
+        "-j",
         help="Number of parallel workers (default: 4)",
         min=1,
         max=32,
     ),
     exclude: list[str] | None = typer.Option(
         None,
-        "--exclude", "-e",
+        "--exclude",
+        "-e",
         help="Patterns to exclude (multiples accepted)",
     ),
     require_pinned_sha: bool = typer.Option(
@@ -216,14 +248,14 @@ def lint(
         min=60,  # minimum 1 minute
     ),
     _help: bool = typer.Option(
-        None,
+        False,
         "--help",
         callback=help_callback,
         is_eager=True,
         help="Show this message and exit",
     ),
-    _version: bool | None = typer.Option(
-        None,
+    _version: bool = typer.Option(
+        False,
         "--version",
         callback=version_callback,
         is_eager=True,
@@ -269,7 +301,9 @@ def lint(
     """
     # Handle mutually exclusive options
     if verbose and quiet:
-        console.print("[red]Error: --verbose and --quiet cannot be used together[/red]")
+        console.print(
+            "[red]Error: --verbose and --quiet cannot be used together[/red]"
+        )
         raise typer.Exit(1)
 
     if verbose:
@@ -330,7 +364,9 @@ def lint(
             cache = ValidationCache(config.cache)
             removed_count = cache.purge()
             if not quiet:
-                console.print(f"[green]✅ Purged {removed_count} cache entries[/green]")
+                console.print(
+                    f"[green]✅ Purged {removed_count} cache entries[/green]"
+                )
             raise typer.Exit(0)
 
         logger.info(f"Starting gha-workflow-linter {__version__}")
@@ -347,6 +383,15 @@ def lint(
     except typer.Exit:
         # Re-raise typer.Exit to avoid catching it as a general exception
         raise
+    except ValidationAbortedError as e:
+        # These errors should already be handled in run_linter, but catch here as fallback
+        logger.error(f"Validation aborted: {e.message}")
+        raise typer.Exit(1) from None
+    except (ValueError, ConfigurationError) as e:
+        logger.error(f"Configuration error: {e}")
+        if verbose:
+            logger.exception("Full traceback:")
+        raise typer.Exit(1) from None
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         if verbose:
@@ -358,31 +403,24 @@ def lint(
 
 @app.command()  # type: ignore[misc]
 def cache(
-    info: bool = typer.Option(
-        False,
-        "--info",
-        help="Show cache information"
-    ),
+    info: bool = typer.Option(False, "--info", help="Show cache information"),
     cleanup: bool = typer.Option(
-        False,
-        "--cleanup",
-        help="Remove expired cache entries"
+        False, "--cleanup", help="Remove expired cache entries"
     ),
     purge: bool = typer.Option(
-        False,
-        "--purge",
-        help="Clear all cache entries"
+        False, "--purge", help="Clear all cache entries"
     ),
     config_file: Path | None = typer.Option(
         None,
-        "--config", "-c",
+        "--config",
+        "-c",
         help="Configuration file path",
         exists=True,
         file_okay=True,
         dir_okay=False,
         readable=True,
     ),
-    help: bool = typer.Option(
+    _help: bool = typer.Option(
         False,
         "--help",
         callback=cache_help_callback,
@@ -407,7 +445,9 @@ def cache(
 
     if cleanup:
         removed_count = cache_instance.cleanup()
-        console.print(f"[green]✅ Removed {removed_count} expired cache entries[/green]")
+        console.print(
+            f"[green]✅ Removed {removed_count} expired cache entries[/green]"
+        )
         return
 
     if info:
@@ -419,15 +459,25 @@ def cache(
 
         table.add_row("Enabled", str(cache_info["enabled"]))
         table.add_row("Cache File", cache_info["cache_file"])
-        table.add_row("File Exists", str(cache_info.get("cache_file_exists", False)))
+        table.add_row(
+            "File Exists", str(cache_info.get("cache_file_exists", False))
+        )
         table.add_row("Total Entries", str(cache_info["entries"]))
 
         if cache_info["entries"] > 0:
-            table.add_row("Expired Entries", str(cache_info.get("expired_entries", 0)))
+            table.add_row(
+                "Expired Entries", str(cache_info.get("expired_entries", 0))
+            )
             if cache_info.get("oldest_entry_age"):
-                table.add_row("Oldest Entry Age", f"{cache_info['oldest_entry_age']:.1f} seconds")
+                table.add_row(
+                    "Oldest Entry Age",
+                    f"{cache_info['oldest_entry_age']:.1f} seconds",
+                )
             if cache_info.get("newest_entry_age"):
-                table.add_row("Newest Entry Age", f"{cache_info['newest_entry_age']:.1f} seconds")
+                table.add_row(
+                    "Newest Entry Age",
+                    f"{cache_info['newest_entry_age']:.1f} seconds",
+                )
 
         table.add_row("Max Cache Size", str(cache_info["max_cache_size"]))
         table.add_row("TTL (seconds)", str(cache_info["ttl_seconds"]))
@@ -444,10 +494,14 @@ def cache(
 
             stats_table.add_row("Cache Hits", str(stats["hits"]))
             stats_table.add_row("Cache Misses", str(stats["misses"]))
-            stats_table.add_row("Hit Rate", f"{cache_instance.stats.hit_rate:.1f}%")
+            stats_table.add_row(
+                "Hit Rate", f"{cache_instance.stats.hit_rate:.1f}%"
+            )
             stats_table.add_row("Cache Writes", str(stats["writes"]))
             stats_table.add_row("Purges", str(stats["purges"]))
-            stats_table.add_row("Cleanup Removed", str(stats["cleanup_removed"]))
+            stats_table.add_row(
+                "Cleanup Removed", str(stats["cleanup_removed"])
+            )
 
             console.print(stats_table)
         return
@@ -483,7 +537,6 @@ def run_linter(config: Config, options: CLIOptions) -> int:
         console=console,
         disable=options.quiet,
     ) as progress:
-
         # Scan for workflows
         scan_task = progress.add_task("Scanning workflows...", total=None)
 
@@ -505,8 +558,7 @@ def run_linter(config: Config, options: CLIOptions) -> int:
 
         # Validate action calls
         validate_task = progress.add_task(
-            "Validating action calls...",
-            total=total_calls
+            "Validating action calls...", total=total_calls
         )
 
         try:
@@ -514,8 +566,61 @@ def run_linter(config: Config, options: CLIOptions) -> int:
             validation_errors = validator.validate_action_calls(
                 workflow_calls, progress, validate_task
             )
+        except ValidationAbortedError as e:
+            logger.error(f"Validation aborted: {e.message}")
+
+            # Provide specific guidance based on the error type
+            if isinstance(e.original_error, NetworkError):
+                console.print(
+                    "\n[yellow]❌ Network connectivity issue detected[/yellow]"
+                )
+                console.print("[dim]• Check your internet connection")
+                console.print("[dim]• Verify DNS resolution is working")
+                console.print("[dim]• Try again in a few moments[/dim]")
+            elif isinstance(e.original_error, AuthenticationError):
+                console.print(
+                    "\n[yellow]❌ GitHub API authentication failed[/yellow]"
+                )
+                console.print(
+                    "[dim]• Set a valid GitHub token: export GITHUB_TOKEN=ghp_xxx"
+                )
+                console.print("[dim]• Or use: --github-token ghp_xxx")
+                console.print(
+                    "[dim]• Ensure token has 'public_repo' scope[/dim]"
+                )
+            elif isinstance(e.original_error, RateLimitError):
+                console.print(
+                    "\n[yellow]❌ GitHub API rate limit exceeded[/yellow]"
+                )
+                console.print("[dim]• Wait for rate limit to reset")
+                console.print("[dim]• Use a GitHub token to increase limits")
+                console.print("[dim]• Try again later[/dim]")
+            elif isinstance(
+                e.original_error, (GitHubAPIError, TemporaryAPIError)
+            ):
+                console.print("\n[yellow]❌ GitHub API error[/yellow]")
+                console.print(
+                    "[dim]• This may be a temporary GitHub service issue"
+                )
+                console.print("[dim]• Try again in a few minutes")
+                console.print(
+                    "[dim]• Check GitHub status at https://status.github.com/[/dim]"
+                )
+            else:
+                console.print(
+                    "\n[yellow]❌ Validation could not be completed[/yellow]"
+                )
+                console.print(f"[dim]• {e.reason}[/dim]")
+
+            console.print(
+                "\n[red]Cannot determine if action calls are valid or invalid.[/red]"
+            )
+            console.print(
+                "[red]Validation was not performed due to the above issue.[/red]"
+            )
+            return 1
         except Exception as e:
-            logger.error(f"Error validating action calls: {e}")
+            logger.error(f"Unexpected error validating action calls: {e}")
             return 1
 
     # Generate and display results
@@ -529,15 +634,11 @@ def run_linter(config: Config, options: CLIOptions) -> int:
             unique_calls.add(call_key)
 
     validation_summary = validator.get_validation_summary(
-        validation_errors,
-        total_calls,
-        len(unique_calls)
+        validation_errors, total_calls, len(unique_calls)
     )
 
     if options.output_format == "json":
-        output_json_results(
-            scan_summary, validation_summary, validation_errors
-        )
+        output_json_results(scan_summary, validation_summary, validation_errors)
     else:
         output_text_results(
             scan_summary, validation_summary, validation_errors, options.quiet
@@ -550,7 +651,9 @@ def run_linter(config: Config, options: CLIOptions) -> int:
     return 0
 
 
-def _create_scan_summary_table(scan_summary: dict[str, Any], validation_summary: dict[str, Any]) -> Table:
+def _create_scan_summary_table(
+    scan_summary: dict[str, Any], validation_summary: dict[str, Any]
+) -> Table:
     """Create the scan summary table."""
     table = Table(title="Scan Summary")
     table.add_column("Metric", style="cyan")
@@ -566,9 +669,19 @@ def _create_scan_summary_table(scan_summary: dict[str, Any], validation_summary:
 
     # Add validation efficiency metrics
     if validation_summary.get("unique_calls_validated", 0) > 0:
-        table.add_row("Unique calls validated", str(validation_summary["unique_calls_validated"]))
-        table.add_row("Duplicate calls avoided", str(validation_summary["duplicate_calls_avoided"]))
-        efficiency = (1 - validation_summary["unique_calls_validated"] / validation_summary["total_calls"]) * 100
+        table.add_row(
+            "Unique calls validated",
+            str(validation_summary["unique_calls_validated"]),
+        )
+        table.add_row(
+            "Duplicate calls avoided",
+            str(validation_summary["duplicate_calls_avoided"]),
+        )
+        efficiency = (
+            1
+            - validation_summary["unique_calls_validated"]
+            / validation_summary["total_calls"]
+        ) * 100
         table.add_row("Validation efficiency", f"{efficiency:.1f}%")
 
     return table
@@ -583,16 +696,28 @@ def _create_api_stats_table(validation_summary: dict[str, Any]) -> Table | None:
     api_table.add_column("Metric", style="cyan")
     api_table.add_column("Count", justify="right", style="magenta")
 
-    api_table.add_row("Total API calls", str(validation_summary["api_calls_total"]))
-    api_table.add_row("GraphQL calls", str(validation_summary["api_calls_graphql"]))
-    api_table.add_row("REST API calls", str(validation_summary["api_calls_rest"]))
-    api_table.add_row("Git operations", str(validation_summary["api_calls_git"]))
+    api_table.add_row(
+        "Total API calls", str(validation_summary["api_calls_total"])
+    )
+    api_table.add_row(
+        "GraphQL calls", str(validation_summary["api_calls_graphql"])
+    )
+    api_table.add_row(
+        "REST API calls", str(validation_summary["api_calls_rest"])
+    )
+    api_table.add_row(
+        "Git operations", str(validation_summary["api_calls_git"])
+    )
     api_table.add_row("Cache hits", str(validation_summary["cache_hits"]))
 
     if validation_summary.get("rate_limit_delays", 0) > 0:
-        api_table.add_row("Rate limit delays", str(validation_summary["rate_limit_delays"]))
+        api_table.add_row(
+            "Rate limit delays", str(validation_summary["rate_limit_delays"])
+        )
     if validation_summary.get("failed_api_calls", 0) > 0:
-        api_table.add_row("Failed API calls", str(validation_summary["failed_api_calls"]))
+        api_table.add_row(
+            "Failed API calls", str(validation_summary["failed_api_calls"])
+        )
 
     return api_table
 
@@ -603,31 +728,47 @@ def _display_validation_summary(validation_summary: dict[str, Any]) -> None:
         console.print("[green]✅ All action calls are valid![/green]")
         return
 
-    console.print(f"[red]❌ Found {validation_summary['total_errors']} validation errors[/red]")
+    console.print(
+        f"[red]❌ Found {validation_summary['total_errors']} validation errors[/red]"
+    )
 
     if validation_summary["invalid_repositories"] > 0:
-        console.print(f"  - {validation_summary['invalid_repositories']} invalid repositories")
+        console.print(
+            f"  - {validation_summary['invalid_repositories']} invalid repositories"
+        )
     if validation_summary["invalid_references"] > 0:
-        console.print(f"  - {validation_summary['invalid_references']} invalid references")
+        console.print(
+            f"  - {validation_summary['invalid_references']} invalid references"
+        )
     if validation_summary["network_errors"] > 0:
-        console.print(f"  - {validation_summary['network_errors']} network errors")
+        console.print(
+            f"  - {validation_summary['network_errors']} network errors"
+        )
     if validation_summary["timeouts"] > 0:
         console.print(f"  - {validation_summary['timeouts']} timeouts")
     if validation_summary["not_pinned_to_sha"] > 0:
-        console.print(f"  - {validation_summary['not_pinned_to_sha']} actions not pinned to SHA")
+        console.print(
+            f"  - {validation_summary['not_pinned_to_sha']} actions not pinned to SHA"
+        )
 
     # Show deduplication and API efficiency
     if validation_summary.get("duplicate_calls_avoided", 0) > 0:
-        console.print(f"[dim]Deduplication avoided {validation_summary['duplicate_calls_avoided']} redundant validations[/dim]")
+        console.print(
+            f"[dim]Deduplication avoided {validation_summary['duplicate_calls_avoided']} redundant validations[/dim]"
+        )
 
     # Show API efficiency metrics
     if validation_summary.get("api_calls_total", 0) > 0:
-        console.print(f"[dim]Made {validation_summary['api_calls_total']} API calls "
-                    f"({validation_summary['api_calls_graphql']} GraphQL, "
-                    f"{validation_summary['cache_hits']} cache hits)[/dim]")
+        console.print(
+            f"[dim]Made {validation_summary['api_calls_total']} API calls "
+            f"({validation_summary['api_calls_graphql']} GraphQL, "
+            f"{validation_summary['cache_hits']} cache hits)[/dim]"
+        )
 
     if validation_summary.get("rate_limit_delays", 0) > 0:
-        console.print(f"[yellow]Rate limiting encountered {validation_summary['rate_limit_delays']} times[/yellow]")
+        console.print(
+            f"[yellow]Rate limiting encountered {validation_summary['rate_limit_delays']} times[/yellow]"
+        )
 
 
 def output_text_results(
@@ -697,7 +838,7 @@ def output_json_results(
                 "error_message": error.error_message,
             }
             for error in errors
-        ]
+        ],
     }
 
     console.print(json.dumps(result, indent=2))

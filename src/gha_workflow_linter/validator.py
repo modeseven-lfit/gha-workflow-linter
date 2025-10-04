@@ -14,10 +14,19 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from rich.progress import Progress, TaskID
+
     pass
 
 
 from .cache import ValidationCache
+from .exceptions import (
+    AuthenticationError,
+    GitHubAPIError,
+    NetworkError,
+    RateLimitError,
+    TemporaryAPIError,
+    ValidationAbortedError,
+)
 from .github_api import GitHubGraphQLClient
 from .models import (
     ActionCall,
@@ -80,14 +89,18 @@ class ActionCallValidator:
         if not self._github_client:
             raise RuntimeError("GitHub client not initialized")
 
-        self.logger.info("Starting action call validation using GitHub GraphQL API")
+        self.logger.info(
+            "Starting action call validation using GitHub GraphQL API"
+        )
 
         errors: list[ValidationError] = []
 
         # Flatten and deduplicate action calls
         all_calls: list[tuple[Path, ActionCall]] = []
         unique_calls: dict[str, ActionCall] = {}
-        call_locations: dict[str, list[tuple[Path, ActionCall]]] = defaultdict(list)
+        call_locations: dict[str, list[tuple[Path, ActionCall]]] = defaultdict(
+            list
+        )
 
         for file_path, calls in action_calls.items():
             for action_call in calls.values():
@@ -115,7 +128,7 @@ class ActionCallValidator:
         if saved_validations > 0:
             self.logger.info(
                 f"Deduplication saved {saved_validations} validations "
-                f"({saved_validations/total_calls*100:.1f}% reduction)"
+                f"({saved_validations / total_calls * 100:.1f}% reduction)"
             )
 
         # Extract unique repositories and references
@@ -131,7 +144,9 @@ class ActionCallValidator:
         cached_results, cache_misses = self._cache.get_batch(repo_refs)
 
         if cached_results:
-            self.logger.debug(f"Found {len(cached_results)} cached validation results")
+            self.logger.debug(
+                f"Found {len(cached_results)} cached validation results"
+            )
 
         # Filter out cached results from what needs to be validated
         repos_to_validate = set()
@@ -146,18 +161,22 @@ class ActionCallValidator:
             progress.update(
                 task_id,
                 total=len(repos_to_validate) + len(refs_to_validate),
-                description="Validating repositories..."
+                description="Validating repositories...",
             )
 
         # Step 1: Validate repositories in batch (only for cache misses)
-        self.logger.debug(f"Validating {len(repos_to_validate)} unique repositories (after cache)")
+        self.logger.debug(
+            f"Validating {len(repos_to_validate)} unique repositories (after cache)"
+        )
 
         repo_results = {}
 
         if repos_to_validate:
             try:
-                repo_results = await self._github_client.validate_repositories_batch(
-                    list(repos_to_validate)
+                repo_results = (
+                    await self._github_client.validate_repositories_batch(
+                        list(repos_to_validate)
+                    )
                 )
 
                 # Merge API stats
@@ -169,9 +188,30 @@ class ActionCallValidator:
                     f"Cache hits: {self.api_stats.cache_hits})"
                 )
 
+            except (
+                NetworkError,
+                GitHubAPIError,
+                AuthenticationError,
+                RateLimitError,
+                TemporaryAPIError,
+            ) as e:
+                self.logger.error(
+                    f"GitHub API/Network error during repository validation: {e}"
+                )
+                raise ValidationAbortedError(
+                    "Unable to validate GitHub Actions due to API/network issues",
+                    reason=str(e),
+                    original_error=e,
+                ) from e
             except Exception as e:
-                self.logger.error(f"Error during repository validation: {e}")
-                repo_results = dict.fromkeys(repos_to_validate, False)
+                self.logger.error(
+                    f"Unexpected error during repository validation: {e}"
+                )
+                raise ValidationAbortedError(
+                    "Validation failed due to unexpected error",
+                    reason=str(e),
+                    original_error=e,
+                ) from e
 
         # Merge cached repository results
         for repo, ref in cached_results:
@@ -186,23 +226,28 @@ class ActionCallValidator:
             progress.update(
                 task_id,
                 completed=len(unique_repos),
-                description="Validating references..."
+                description="Validating references...",
             )
 
         # Step 2: Validate references for valid repositories only (excluding cached results)
         valid_repo_refs_to_validate = [
-            (repo_key, ref) for repo_key, ref in refs_to_validate
+            (repo_key, ref)
+            for repo_key, ref in refs_to_validate
             if repo_results.get(repo_key, False)
         ]
 
-        self.logger.debug(f"Validating {len(valid_repo_refs_to_validate)} references for valid repositories (after cache)")
+        self.logger.debug(
+            f"Validating {len(valid_repo_refs_to_validate)} references for valid repositories (after cache)"
+        )
 
         ref_results = {}
 
         if valid_repo_refs_to_validate:
             try:
-                ref_results = await self._github_client.validate_references_batch(
-                    valid_repo_refs_to_validate
+                ref_results = (
+                    await self._github_client.validate_references_batch(
+                        valid_repo_refs_to_validate
+                    )
                 )
 
                 # Merge API stats again
@@ -215,20 +260,44 @@ class ActionCallValidator:
                     f"Cache hits: {self.api_stats.cache_hits})"
                 )
 
+            except (
+                NetworkError,
+                GitHubAPIError,
+                AuthenticationError,
+                RateLimitError,
+                TemporaryAPIError,
+            ) as e:
+                self.logger.error(
+                    f"GitHub API/Network error during reference validation: {e}"
+                )
+                raise ValidationAbortedError(
+                    "Unable to validate GitHub Actions due to API/network issues",
+                    reason=str(e),
+                    original_error=e,
+                ) from e
             except Exception as e:
-                self.logger.error(f"Error during reference validation: {e}")
-                ref_results = dict.fromkeys(valid_repo_refs_to_validate, False)
+                self.logger.error(
+                    f"Unexpected error during reference validation: {e}"
+                )
+                raise ValidationAbortedError(
+                    "Validation failed due to unexpected error",
+                    reason=str(e),
+                    original_error=e,
+                ) from e
 
         # Merge cached reference results
         for (repo, ref), cached_entry in cached_results.items():
-            ref_results[(repo, ref)] = cached_entry.result == ValidationResult.VALID
+            ref_results[(repo, ref)] = (
+                cached_entry.result == ValidationResult.VALID
+            )
 
         # Update progress
         if progress and task_id:
             progress.update(
                 task_id,
-                completed=len(repos_to_validate) + len(valid_repo_refs_to_validate),
-                description="Processing validation results..."
+                completed=len(repos_to_validate)
+                + len(valid_repo_refs_to_validate),
+                description="Processing validation results...",
             )
 
         # Cache new validation results
@@ -248,28 +317,35 @@ class ActionCallValidator:
             else:
                 result = ValidationResult.INVALID_REFERENCE
                 api_call_type = "graphql"
-                error_message = f"Reference {ref} not found in repository {repo}"
+                error_message = (
+                    f"Reference {ref} not found in repository {repo}"
+                )
 
-            cache_entries_to_store.append((repo, ref, result, api_call_type, error_message))
+            cache_entries_to_store.append(
+                (repo, ref, result, api_call_type, error_message)
+            )
 
         if cache_entries_to_store:
             self._cache.put_batch(cache_entries_to_store)
 
         # Step 3: Map results back to all occurrences (including cached results)
         # Reconstruct full repo_refs list for _combine_validation_results
-        all_repo_refs = repo_refs
+        # all_repo_refs = repo_refs  # Not needed since we use repo_refs directly
         all_repo_results = repo_results.copy()
         all_ref_results = ref_results.copy()
 
         # Add cached results to the full results dictionaries
         for (repo, ref), cached_entry in cached_results.items():
-            all_repo_results[repo] = cached_entry.result not in [ValidationResult.INVALID_REPOSITORY]
-            all_ref_results[(repo, ref)] = cached_entry.result == ValidationResult.VALID
+            all_repo_results[repo] = cached_entry.result not in [
+                ValidationResult.INVALID_REPOSITORY
+            ]
+            all_ref_results[(repo, ref)] = (
+                cached_entry.result == ValidationResult.VALID
+            )
 
         validation_results = self._combine_validation_results(
             unique_calls, all_repo_results, all_ref_results
         )
-
 
         for call_key, result in validation_results.items():
             if result != ValidationResult.VALID:
@@ -278,7 +354,7 @@ class ActionCallValidator:
                         file_path=file_path,
                         action_call=action_call,
                         result=result,
-                        error_message=self._get_error_message(result)
+                        error_message=self._get_error_message(result),
                     )
                     errors.append(error)
 
@@ -286,17 +362,21 @@ class ActionCallValidator:
         if self.config.require_pinned_sha:
             for call_key, action_call in unique_calls.items():
                 # Only check if the call passed other validations
-                if validation_results.get(call_key) == ValidationResult.VALID:
-                    if action_call.reference_type != ReferenceType.COMMIT_SHA:
-                        # Add error for each occurrence of this unpinned call
-                        for file_path, _ in call_locations[call_key]:
-                            error = ValidationError(
-                                file_path=file_path,
-                                action_call=action_call,
-                                result=ValidationResult.NOT_PINNED_TO_SHA,
-                                error_message=self._get_error_message(ValidationResult.NOT_PINNED_TO_SHA)
-                            )
-                            errors.append(error)
+                if (
+                    validation_results.get(call_key) == ValidationResult.VALID
+                    and action_call.reference_type != ReferenceType.COMMIT_SHA
+                ):
+                    # Add error for each occurrence of this unpinned call
+                    for file_path, _ in call_locations[call_key]:
+                        error = ValidationError(
+                            file_path=file_path,
+                            action_call=action_call,
+                            result=ValidationResult.NOT_PINNED_TO_SHA,
+                            error_message=self._get_error_message(
+                                ValidationResult.NOT_PINNED_TO_SHA
+                            ),
+                        )
+                        errors.append(error)
 
         # Log final statistics
         rate_limit_info = self._github_client.get_rate_limit_info()
@@ -339,6 +419,7 @@ class ActionCallValidator:
         Returns:
             List of validation errors
         """
+
         async def _run_validation() -> list[ValidationError]:
             async with self:
                 return await self.validate_action_calls_async(
@@ -351,7 +432,7 @@ class ActionCallValidator:
         self,
         unique_calls: dict[str, ActionCall],
         repo_results: dict[str, bool],
-        ref_results: dict[tuple[str, str], bool]
+        ref_results: dict[tuple[str, str], bool],
     ) -> dict[str, ValidationResult]:
         """
         Combine repository and reference validation results.
@@ -371,13 +452,17 @@ class ActionCallValidator:
 
             # Check repository validity
             if not repo_results.get(repo_key, False):
-                validation_results[call_key] = ValidationResult.INVALID_REPOSITORY
+                validation_results[call_key] = (
+                    ValidationResult.INVALID_REPOSITORY
+                )
                 continue
 
             # Check reference validity
             ref_key = (repo_key, action_call.reference)
             if not ref_results.get(ref_key, False):
-                validation_results[call_key] = ValidationResult.INVALID_REFERENCE
+                validation_results[call_key] = (
+                    ValidationResult.INVALID_REFERENCE
+                )
                 continue
 
             # Both repository and reference are valid
@@ -425,7 +510,7 @@ class ActionCallValidator:
         self,
         errors: list[ValidationError],
         total_calls: int = 0,
-        unique_calls: int = 0
+        unique_calls: int = 0,
     ) -> dict[str, int]:
         """
         Generate summary statistics for validation errors.
@@ -449,7 +534,6 @@ class ActionCallValidator:
             "network_errors": 0,
             "timeouts": 0,
             "not_pinned_to_sha": 0,
-
             # API call statistics
             "api_calls_total": self.api_stats.total_calls,
             "api_calls_graphql": self.api_stats.graphql_calls,

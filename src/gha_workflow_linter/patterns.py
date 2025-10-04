@@ -30,14 +30,14 @@ class ActionCallPatterns:
     # Main action call pattern with optional leading dash and spaces
     ACTION_CALL_PATTERN = re.compile(
         rf"^(?P<indent>\s*)"  # Leading whitespace
-        rf"(?P<dash>-\s*)?"   # Optional dash and space(s)
-        rf"uses:\s+"          # 'uses:' keyword with space(s)
+        rf"(?P<dash>-\s*)?"  # Optional dash and space(s)
+        rf"uses:\s+"  # 'uses:' keyword with space(s)
         rf"(?P<org>{ORG_PATTERN})/"  # Organization name
         rf"(?P<repo>{REPO_PATTERN})"  # Repository (may include paths for workflows)
-        rf"@(?P<ref>{REF_PATTERN})"   # @ symbol and reference
+        rf"@(?P<ref>{REF_PATTERN})"  # @ symbol and reference
         rf"(?:\s*(?P<comment>{COMMENT_PATTERN}))?"  # Optional trailing comment
         rf"(?P<trailing>\s*)$",  # Optional trailing whitespace
-        re.MULTILINE
+        re.MULTILINE,
     )
 
     # Pattern to detect if this is a workflow call vs action call
@@ -58,9 +58,7 @@ class ActionCallPatterns:
 
     @classmethod
     def parse_action_call(
-        cls,
-        line: str,
-        line_number: int
+        cls, line: str, line_number: int
     ) -> ActionCall | None:
         """
         Parse a single line to extract action call information.
