@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 import time
 from typing import Any
 
@@ -73,6 +74,11 @@ class GitHubGraphQLClient:
 
         # Get initial rate limit info
         await self._update_rate_limit_info()
+
+        # Check if we're rate-limited and exit early if so
+        if self._is_rate_limited():
+            print("⚠️ GitHub API Rate-limited; Skipping Checks")
+            sys.exit(0)
 
         return self
 
@@ -682,3 +688,19 @@ class GitHubGraphQLClient:
     def get_rate_limit_info(self) -> GitHubRateLimitInfo:
         """Get current rate limit information."""
         return self._rate_limit_info.model_copy()  # type: ignore[no-any-return]
+
+    def _is_rate_limited(self) -> bool:
+        """Check if we are currently rate-limited."""
+        # Consider rate-limited if we have 0 remaining requests
+        # or if we're very close to the reset time with very few requests left
+        if self._rate_limit_info.remaining == 0:
+            return True
+
+        # Also check if we're very close to being rate-limited (1 request or less remaining)
+        # and the reset time is in the future
+        current_time = time.time()
+        if (self._rate_limit_info.remaining <= 1 and
+            self._rate_limit_info.reset_at > current_time):
+            return True
+
+        return False
