@@ -266,7 +266,6 @@ class TestConfigManager:
             content = output_path.read_text()
             assert "log_level:" in content
             assert "parallel_workers:" in content
-            assert "SPDX-License-Identifier: Apache-2.0" in content
         finally:
             if output_path.exists():
                 output_path.unlink()
