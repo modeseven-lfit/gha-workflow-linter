@@ -34,9 +34,28 @@ from .exceptions import (
     TemporaryAPIError,
     ValidationAbortedError,
 )
-from .models import CLIOptions, Config, LogLevel
+from .github_auth import get_github_token_with_fallback
+from .models import CLIOptions, Config, LogLevel, ValidationMethod
 from .scanner import WorkflowScanner
 from .validator import ActionCallValidator
+
+
+def _get_relative_path(file_path: Path, base_path: Path) -> Path:
+    """
+    Safely compute relative path from base_path to file_path.
+
+    Args:
+        file_path: The file path to make relative
+        base_path: The base path to compute relative to
+
+    Returns:
+        Relative path if possible, otherwise the original file_path
+    """
+    try:
+        return file_path.relative_to(base_path)
+    except ValueError:
+        # If relative path can't be computed, use the original path
+        return file_path
 
 
 def help_callback(ctx: typer.Context, _param: Any, value: bool) -> None:
@@ -247,6 +266,11 @@ def lint(
         help="Override default cache TTL in seconds",
         min=60,  # minimum 1 minute
     ),
+    validation_method: ValidationMethod | None = typer.Option(
+        None,
+        "--validation-method",
+        help="Validation method: github-api or git (auto-detected if not specified)",
+    ),
     _help: bool = typer.Option(
         False,
         "--help",
@@ -268,12 +292,20 @@ def lint(
     This tool scans for .github/workflows directories and validates that all
     'uses' statements reference valid repositories, branches, tags, or commit SHAs.
 
+    Validation Methods:
+        github-api: Uses GitHub GraphQL API (requires token, faster)
+        git: Uses Git operations (no token required, works with SSH keys)
+
+        If --validation-method is not specified, the tool automatically selects:
+        - 'github-api' if a GitHub token is available
+        - 'git' if no token is found (automatic fallback)
+
     Cache Options:
         --no-cache: Bypass cache and always validate against remote repositories
         --purge-cache: Clear all cached validation results and exit
         --cache-ttl: Override default cache TTL (7 days) in seconds
 
-    GitHub API Authentication:
+    GitHub API Authentication (for github-api method):
 
         # Using environment variable (recommended)
         export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
@@ -282,13 +314,28 @@ def lint(
         # Using CLI flag
         gha-workflow-linter lint --github-token ghp_xxxxxxxxxxxxxxxxxxxx
 
-    Examples:
-
-        # Scan current directory
+        # Using GitHub CLI (automatic fallback)
+        gh auth login
         gha-workflow-linter lint
 
-        # Scan specific path
-        gha-workflow-linter lint /path/to/project
+    Git Authentication (for git method):
+
+        # Uses your existing Git configuration, SSH keys, or ssh-agent
+        # No additional setup required if you can already clone GitHub repos
+
+    Examples:
+
+        # Scan current directory (auto-detects validation method)
+        gha-workflow-linter lint
+
+        # Force Git validation method
+        gha-workflow-linter lint --validation-method git
+
+        # Force GitHub API method
+        gha-workflow-linter lint --validation-method github-api
+
+        # Scan specific path with custom workers
+        gha-workflow-linter lint /path/to/project --workers 8
 
         # Use custom config and output JSON
         gha-workflow-linter lint --config config.yaml --format json
@@ -335,11 +382,8 @@ def lint(
             no_cache=no_cache,
             purge_cache=purge_cache,
             cache_ttl=cache_ttl,
+            validation_method=validation_method,
         )
-
-        # Apply GitHub token from CLI if provided
-        if github_token:
-            config.github_api.token = github_token
 
         # Apply CLI overrides to config
         if workers is not None:
@@ -349,6 +393,10 @@ def lint(
         if not parallel:
             config.parallel_workers = 1
         config.require_pinned_sha = require_pinned_sha
+
+        # Apply validation method override if specified
+        if validation_method is not None:
+            config.validation_method = validation_method
 
         # Handle cache options
         if no_cache:
@@ -371,21 +419,47 @@ def lint(
 
         logger.info(f"Starting gha-workflow-linter {__version__}")
 
-        # Check for GitHub token and rate limits before proceeding
-        effective_token = github_token or config.effective_github_token
+        # Skip GitHub token operations if Git method is explicitly chosen
+        effective_token = None
+        if config.validation_method != ValidationMethod.GIT:
+            # Resolve GitHub token with CLI fallback
+            effective_token = get_github_token_with_fallback(
+                explicit_token=github_token or config.github_api.token,
+                console=console,
+                quiet=quiet,
+            )
 
-        # Early rate limit check before showing progress bars
-        from .github_api import GitHubGraphQLClient
-        github_client = GitHubGraphQLClient(config.github_api)
+            # Update config with resolved token
+            if effective_token:
+                config.github_api.token = effective_token
 
-        try:
-            github_client.check_rate_limit_and_exit_if_needed()
-            # If we get here, we're not rate limited
-            if not effective_token and not quiet:
-                logger.info("⚠️ No GitHub token; risk of rate-limiting")
-        except SystemExit:
-            # Rate limit check triggered exit, re-raise to exit cleanly
-            raise
+        # Determine validation method based on token availability and user preference
+        if not config.validation_method:
+            if effective_token:
+                config.validation_method = ValidationMethod.GITHUB_API
+            else:
+                config.validation_method = ValidationMethod.GIT
+                if not quiet:
+                    console.print(
+                        "[yellow]ℹ️  No GitHub token available, using Git validation method[/yellow]"
+                    )
+
+        # Only check rate limits if using GitHub API
+        if config.validation_method == ValidationMethod.GITHUB_API:
+            from .github_api import GitHubGraphQLClient
+
+            github_client = GitHubGraphQLClient(config.github_api)
+
+            try:
+                github_client.check_rate_limit_and_exit_if_needed()
+                # If we get here, we're not rate limited
+                if not effective_token and not quiet:
+                    logger.warning(
+                        "⚠️ No GitHub token available; API requests may be rate-limited"
+                    )
+            except SystemExit:
+                # Rate limit check triggered exit, re-raise to exit cleanly
+                raise
 
         # Only show scanning path if we're actually going to proceed
         logger.info(f"Scanning path: {path}")
@@ -594,10 +668,11 @@ def run_linter(config: Config, options: CLIOptions) -> int:
                 console.print(
                     "\n[yellow]❌ GitHub API authentication failed[/yellow]"
                 )
-                console.print(
-                    "[dim]• Set a valid GitHub token: export GITHUB_TOKEN=ghp_xxx"
-                )
-                console.print("[dim]• Or use: --github-token ghp_xxx")
+                from .github_auth import get_github_cli_suggestions
+
+                suggestions = get_github_cli_suggestions()
+                for suggestion in suggestions:
+                    console.print(f"[dim]• {suggestion}")
                 console.print(
                     "[dim]• Ensure token has 'public_repo' scope[/dim]"
                 )
@@ -606,7 +681,11 @@ def run_linter(config: Config, options: CLIOptions) -> int:
                     "\n[yellow]❌ GitHub API rate limit exceeded[/yellow]"
                 )
                 console.print("[dim]• Wait for rate limit to reset")
-                console.print("[dim]• Use a GitHub token to increase limits")
+                from .github_auth import get_github_cli_suggestions
+
+                suggestions = get_github_cli_suggestions()
+                for suggestion in suggestions:
+                    console.print(f"[dim]• {suggestion}")
                 console.print("[dim]• Try again later[/dim]")
             elif isinstance(
                 e.original_error, (GitHubAPIError, TemporaryAPIError)
@@ -651,10 +730,16 @@ def run_linter(config: Config, options: CLIOptions) -> int:
     )
 
     if options.output_format == "json":
-        output_json_results(scan_summary, validation_summary, validation_errors)
+        output_json_results(
+            scan_summary, validation_summary, validation_errors, options.path
+        )
     else:
         output_text_results(
-            scan_summary, validation_summary, validation_errors, options.quiet
+            scan_summary,
+            validation_summary,
+            validation_errors,
+            options.path,
+            options.quiet,
         )
 
     # Determine exit code
@@ -788,6 +873,7 @@ def output_text_results(
     scan_summary: dict[str, Any],
     validation_summary: dict[str, Any],
     errors: list[Any],
+    scan_path: Path,
     quiet: bool = False,
 ) -> None:
     """
@@ -795,9 +881,10 @@ def output_text_results(
 
     Args:
         scan_summary: Scan statistics
-        validation_summary: Validation statistics
+        validation_summary: Validation statistics summary
         errors: List of validation errors
-        quiet: Suppress non-error output
+        scan_path: Base path for computing relative paths
+        quiet: Whether to suppress non-error output
     """
     if not quiet:
         # Display scan summary
@@ -818,13 +905,25 @@ def output_text_results(
     if errors:
         console.print("\n[red]Validation Errors:[/red]")
         for error in errors:
-            console.print(str(error))
+            # Compute relative path for better readability
+            relative_path = _get_relative_path(error.file_path, scan_path)
+
+            # Format action reference without 'uses:'
+            action_ref = f"{error.action_call.organization}/{error.action_call.repository}@{error.action_call.reference}"
+            if error.action_call.comment:
+                action_ref += f"  {error.action_call.comment}"
+
+            console.print(
+                f"❌ Invalid action call in workflow: {relative_path}\n"
+                f"line {error.action_call.line_number}:\n{action_ref}"
+            )
 
 
 def output_json_results(
     scan_summary: dict[str, Any],
     validation_summary: dict[str, Any],
     errors: list[Any],
+    scan_path: Path,
 ) -> None:
     """
     Output results in JSON format.
@@ -833,13 +932,16 @@ def output_json_results(
         scan_summary: Scan statistics
         validation_summary: Validation statistics
         errors: List of validation errors
+        scan_path: Base path for computing relative paths
     """
     result = {
         "scan_summary": scan_summary,
         "validation_summary": validation_summary,
         "errors": [
             {
-                "file_path": str(error.file_path),
+                "file_path": str(
+                    _get_relative_path(error.file_path, scan_path)
+                ),
                 "line_number": error.action_call.line_number,
                 "raw_line": error.action_call.raw_line.strip(),
                 "organization": error.action_call.organization,

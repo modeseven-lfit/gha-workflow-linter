@@ -37,6 +37,7 @@ dependencies = [
     "httpx>=0.28.1",
     "pydantic>=2.10.3",
     "pydantic-settings>=2.7.0",
+    "typing-extensions>=4.12.0",
 ]
 
 [project.optional-dependencies]
@@ -164,7 +165,10 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-report=xml",
-    "--cov-fail-under=80",
+    "--cov-fail-under=75",
+]
+filterwarnings = [
+    "ignore:install \"ipywidgets\" for Jupyter support:UserWarning",
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",

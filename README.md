@@ -18,6 +18,7 @@ Actions workflows reference valid repositories, branches, tags, and commit SHAs.
 
 <!-- markdownlint-disable MD013 -->
 - **🔒 SHA Pinning Enforcement**: Requires actions using commit SHAs for security (configurable)
+- **🔑 Automatic Authentication**: Auto-detects GitHub tokens from GitHub CLI when available
 - **📦 Local Caching**: Stores validation results locally to improve performance and reduce API calls
 - **Multi-format Support**: Works as CLI tool, pre-commit hook, and GitHub Action
 - **Comprehensive Validation**: Validates repositories, references, and syntax
@@ -57,7 +58,26 @@ uv pip install -e ".[dev]"
 GHA Workflow Linter uses the GitHub GraphQL API for efficient validation. Authentication
 is **optional** but **highly recommended** to avoid rate limiting.
 
-### Setting up GitHub Token
+### Automatic Authentication (Recommended)
+
+If you have [GitHub CLI](https://cli.github.com/) installed and authenticated,
+the linter will **automatically** get a token when needed:
+
+```bash
+# No token setup required if GitHub CLI has authentication!
+gha-workflow-linter lint
+```
+
+When no token exists, you'll see:
+
+```text
+⚠️  No GitHub token found; attempting to get using GitHub CLI
+✅ GitHub token retrieved from GitHub CLI
+```
+
+### Manual Token Setup
+
+If you don't use GitHub CLI or prefer manual setup:
 
 1. **Create a Personal Access Token:**
    - Go to [GitHub Settings > Developer settings > Personal access tokens](https://github.com/settings/tokens)
@@ -66,11 +86,11 @@ is **optional** but **highly recommended** to avoid rate limiting.
      private repositories)
    - Copy the generated token
 
-2. **Set the token via environment variable (recommended):**
+2. **Set the token via environment variable:**
 
    ```bash
    export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-   gha-workflow-linter
+   gha-workflow-linter lint
    ```
 
 3. **Or pass the token via CLI flag:**
@@ -79,6 +99,14 @@ is **optional** but **highly recommended** to avoid rate limiting.
    gha-workflow-linter lint --github-token ghp_xxxxxxxxxxxxxxxxxxxx
    ```
 
+### Authentication Priority
+
+The linter uses the following priority order:
+
+1. **CLI flag** (`--github-token`)
+2. **Environment variable** (`GITHUB_TOKEN`)
+3. **GitHub CLI fallback** (`gh auth token`)
+
 ### Rate Limits
 
 | Authentication | Requests/Hour | Recommended Use |
@@ -86,7 +114,8 @@ is **optional** but **highly recommended** to avoid rate limiting.
 | **With Token** | 5,000 | ✅ Production, CI/CD, large repositories |
 | **Without Token** | 60 | ⚠️ Small repositories, testing purposes |
 
-**Without a token, you'll see:** `⚠️ No GitHub token provided; risk of rate-limiting`
+**Without any authentication, you'll see:**
+`⚠️ No GitHub token available; API requests may be rate-limited`
 
 ## Usage
 
@@ -96,7 +125,10 @@ is **optional** but **highly recommended** to avoid rate limiting.
 # Show help with version
 gha-workflow-linter --help
 
-# Scan current directory (with environment token)
+# Scan current directory (automatic authentication via GitHub CLI)
+gha-workflow-linter lint
+
+# Scan with environment token
 export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 gha-workflow-linter lint
 
@@ -118,8 +150,10 @@ gha-workflow-linter lint --exclude "**/test/**" --exclude "**/docs/**"
 # Disable SHA pinning policy (allow tags/branches)
 gha-workflow-linter lint --no-require-pinned-sha
 
-# Run without token (limited to 60 requests/hour)
-gha-workflow-linter lint  # Shows: ⚠️ No GitHub token provided; risk of rate-limiting
+# Run without any authentication (limited to 60 requests/hour)
+# This happens when GitHub CLI is not installed/authenticated AND no token exists
+# Shows: ⚠️ No GitHub token available; API requests may be rate-limited
+gha-workflow-linter lint
 ```
 
 ### As a Pre-commit Hook
@@ -243,6 +277,7 @@ results to improve performance and reduce API calls for later runs.
 ### Cache Features
 
 - **Automatic Caching**: Validation results are automatically cached locally
+- **Version-Based Invalidation**: Tool purges cache when version changes
 - **Configurable TTL**: Cache entries expire after seven days by default
 - **Size Limits**: Cache size limits prevent excessive disk usage
 - **Persistence**: Cache survives between CLI invocations and system restarts
@@ -289,6 +324,25 @@ By default, cache files go in:
 - **Windows**: `%LOCALAPPDATA%\gha-workflow-linter\validation_cache.json`
 
 You can customize the cache location via configuration file or environment variables.
+
+### Version-Based Cache Invalidation
+
+The cache system automatically detects when you've upgraded to a new version of
+the tool and purges all cached entries to ensure consistency. This prevents
+issues where validation logic changes between versions could result in stale
+cached data.
+
+When the tool detects a version mismatch, you'll see a message like:
+
+```text
+INFO Cache version mismatch (cache: 0.1.3, current: 0.1.4). Purging cache.
+```
+
+This ensures that:
+
+- Validation logic improvements are always applied
+- Bug fixes in validation don't get masked by old cache entries
+- New validation features work properly from the first run
 
 **Note**: Caching works for CLI and pre-commit hook usage. GitHub Actions
 runners use ephemeral containers, so caching provides no benefit in that
@@ -509,7 +563,7 @@ Arguments:
 
 Options:
   -c, --config FILE          Configuration file path
-  --github-token TEXT        GitHub API token (or set GITHUB_TOKEN env var)
+  --github-token TEXT        GitHub API token (auto-detects from GitHub CLI)
   -v, --verbose              Enable verbose output
   -q, --quiet                Suppress all output except errors
   --log-level LEVEL          Set logging level
@@ -695,9 +749,45 @@ For contributors, use the development setup script:
 # This sets up:
 # - Development dependencies
 # - Pre-commit hooks (including gha-workflow-linter)
-# - GitHub token configuration
+# - GitHub authentication (GitHub CLI recommended)
 # - Self-linting test
 ```
+
+## Troubleshooting
+
+### Authentication Issues
+
+**GitHub CLI not found:**
+
+```text
+❌ Unable to get GitHub token from any source
+💡 Authentication options:
+   • Install GitHub CLI: https://cli.github.com/
+   • Or set environment variable: export GITHUB_TOKEN=ghp_xxx
+   • Or use --github-token flag with your personal access token
+```
+
+**GitHub CLI not authenticated:**
+
+```bash
+# Check authentication status
+gh auth status
+
+# Login if not authenticated
+gh auth login
+```
+
+**Token permissions:**
+
+- Ensure your token has `public_repo` scope for public repositories
+- Use `repo` scope for private repositories
+- Check token validity: `gh auth token` should return a valid token
+
+**Rate limiting:**
+
+- Without authentication: 60 requests/hour
+- With GitHub token: 5,000 requests/hour
+- Large repositories may require authentication to avoid limits
 
 ## Contributing
 

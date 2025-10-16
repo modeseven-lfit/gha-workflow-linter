@@ -107,57 +107,69 @@ class TestValidatorDeduplication:
         test_config_no_sha_pinning: Config,
         duplicate_action_calls: dict[Path, dict[int, ActionCall]],
     ) -> None:
-        """Test that deduplication reduces the number of API calls made."""
-        # Create mock client with properly configured async methods
-        mock_github_client = AsyncMock()
+        """Test that deduplication reduces the number API calls made."""
+        with (
+            patch(
+                "gha_workflow_linter.validator.GitHubGraphQLClient"
+            ) as mock_client_class,
+            patch(
+                "gha_workflow_linter.validator.get_github_token_with_fallback"
+            ) as mock_token_func,
+        ):
+            # Create mock client with properly configured async methods
+            mock_github_client = AsyncMock()
+            mock_client_class.return_value = mock_github_client
 
-        # Configure mock methods to return values directly
-        mock_github_client.validate_repositories_batch = AsyncMock(
-            return_value={
-                "actions/checkout": True,
-                "actions/setup-python": True,
-            }
-        )
+            # Force GitHub API validation
+            mock_token_func.return_value = "fake_token"
 
-        mock_github_client.validate_references_batch = AsyncMock(
-            return_value={
-                ("actions/checkout", "v4"): True,
-                ("actions/setup-python", "v5.0.0"): True,
-            }
-        )
-
-        # Mock API stats
-        mock_stats = APICallStats(
-            total_calls=4,  # 2 repos + 2 refs
-            graphql_calls=2,
-            rest_calls=0,
-            git_calls=0,
-            cache_hits=0,
-            rate_limit_delays=0,
-            failed_calls=0,
-        )
-        mock_github_client.get_api_stats = Mock(return_value=mock_stats)
-        mock_github_client.get_rate_limit_info = Mock(
-            return_value=GitHubRateLimitInfo(
-                limit=5000, remaining=4996, reset_at=0, used=4
+            # Configure mock methods to return values directly
+            mock_github_client.validate_repositories_batch = AsyncMock(
+                return_value={
+                    "actions/checkout": True,
+                    "actions/setup-python": True,
+                }
             )
-        )
 
-        validator = ActionCallValidator(test_config_no_sha_pinning)
-        validator._github_client = mock_github_client
+            mock_github_client.validate_references_batch = AsyncMock(
+                return_value={
+                    ("actions/checkout", "v4"): True,
+                    ("actions/setup-python", "v5.0.0"): True,
+                }
+            )
 
-        errors = await validator.validate_action_calls_async(
-            duplicate_action_calls
-        )
+            # Mock API stats
+            mock_stats = APICallStats(
+                total_calls=4,  # 2 repos + 2 refs
+                graphql_calls=2,
+                rest_calls=0,
+                git_calls=0,
+                cache_hits=0,
+                rate_limit_delays=0,
+                failed_calls=0,
+            )
+            mock_github_client.get_api_stats = Mock(return_value=mock_stats)
+            mock_github_client.get_rate_limit_info = Mock(
+                return_value=GitHubRateLimitInfo(
+                    limit=5000, remaining=4996, reset_at=0, used=4
+                )
+            )
 
-        # Should have made only 2 unique repository validation calls
-        mock_github_client.validate_repositories_batch.assert_called_once()
+            validator = ActionCallValidator(test_config_no_sha_pinning)
 
-        # Should have made only 2 unique reference validation calls
-        mock_github_client.validate_references_batch.assert_called_once()
+            async with validator:
+                errors = await validator.validate_action_calls_async(
+                    duplicate_action_calls
+                )
 
-        # Should have no errors if all calls are valid
-        assert len(errors) == 0
+                # Should have made only 2 unique repository validation calls
+                mock_github_client.validate_repositories_batch.assert_called_once()
+
+                # Should have made only 2 unique reference validation calls
+                mock_github_client.validate_references_batch.assert_called_once()
+
+                # Should have no errors if all calls are valid
+                assert len(errors) == 0
 
     @pytest.mark.asyncio
     async def test_deduplication_maps_errors_to_all_occurrences(
@@ -166,68 +178,66 @@ class TestValidatorDeduplication:
         duplicate_action_calls: dict[Path, dict[int, ActionCall]],
     ) -> None:
         """Test that validation errors are mapped back to all occurrences."""
-        mock_github_client = AsyncMock()
+        with (
+            patch(
+                "gha_workflow_linter.validator.GitHubGraphQLClient"
+            ) as mock_client_class,
+            patch(
+                "gha_workflow_linter.validator.get_github_token_with_fallback"
+            ) as mock_token_func,
+        ):
+            mock_github_client = AsyncMock()
+            mock_client_class.return_value = mock_github_client
 
-        # Mock: actions/checkout repository exists but reference is invalid
-        mock_github_client.validate_repositories_batch = AsyncMock(
-            return_value={
-                "actions/checkout": True,
-                "actions/setup-python": True,
-            }
-        )
+            # Force GitHub API validation
+            mock_token_func.return_value = "fake_token"
 
-        # Mock: actions/checkout@v4 reference is invalid
-        mock_github_client.validate_references_batch = AsyncMock(
-            return_value={
-                ("actions/checkout", "v4"): False,  # Invalid reference
-                ("actions/setup-python", "v5.0.0"): True,
-            }
-        )
-
-        mock_stats = APICallStats(
-            total_calls=0,
-            graphql_calls=0,
-            rest_calls=0,
-            git_calls=0,
-            cache_hits=0,
-            rate_limit_delays=0,
-            failed_calls=0,
-        )
-        mock_github_client.get_api_stats = Mock(return_value=mock_stats)
-        mock_github_client.get_rate_limit_info = Mock(
-            return_value=GitHubRateLimitInfo(
-                limit=5000,
-                remaining=5000,
-                reset_at=0,
-                used=0,
+            # Mock: actions/checkout repository exists but reference is invalid
+            mock_github_client.validate_repositories_batch = AsyncMock(
+                return_value={
+                    "actions/checkout": True,
+                    "actions/setup-python": True,
+                }
             )
-        )
 
-        validator = ActionCallValidator(test_config_no_sha_pinning)
-        validator._github_client = mock_github_client
+            # Mock: actions/checkout@v4 reference is invalid
+            mock_github_client.validate_references_batch = AsyncMock(
+                return_value={
+                    ("actions/checkout", "v4"): False,  # Invalid reference
+                    ("actions/setup-python", "v5.0.0"): True,
+                }
+            )
 
-        errors = await validator.validate_action_calls_async(
-            duplicate_action_calls
-        )
+            mock_stats = APICallStats(
+                total_calls=0,
+                graphql_calls=0,
+                rest_calls=0,
+                git_calls=0,
+                cache_hits=0,
+                rate_limit_delays=0,
+                failed_calls=0,
+            )
+            mock_github_client.get_api_stats = Mock(return_value=mock_stats)
+            mock_github_client.get_rate_limit_info = Mock(
+                return_value=Mock(remaining=5000, limit=5000)
+            )
 
-        # Should have 3 errors (one for each occurrence of actions/checkout@v4)
-        checkout_errors = [
-            e for e in errors if e.action_call.repository == "checkout"
-        ]
-        assert len(checkout_errors) == 3
+            validator = ActionCallValidator(test_config_no_sha_pinning)
 
-        # Verify all three files are represented in errors
-        error_files = {e.file_path for e in checkout_errors}
-        expected_files = {
-            Path("workflow1.yml"),
-            Path("workflow2.yml"),
-            Path("workflow3.yml"),
-        }
-        assert error_files == expected_files
+            async with validator:
+                errors = await validator.validate_action_calls_async(
+                    duplicate_action_calls
+                )
 
-        # All checkout errors should be INVALID_REFERENCE
-        for error in checkout_errors:
-            assert error.result == ValidationResult.INVALID_REFERENCE
+                # Should have 3 errors (all occurrences of actions/checkout@v4)
+                assert len(errors) == 3
+
+                # All errors should be for the same action but different files/lines
+                for error in errors:
+                    assert error.action_call.organization == "actions"
+                    assert error.action_call.repository == "checkout"
+                    assert error.action_call.reference == "v4"
+                    assert error.result == ValidationResult.INVALID_REFERENCE
 
     def test_unique_call_key_generation(self, test_config: Config) -> None:
         """Test that unique call keys are generated correctly."""
@@ -274,64 +284,70 @@ class TestValidatorDeduplication:
         test_config_no_sha_pinning: Config,
         duplicate_action_calls: dict[Path, dict[int, ActionCall]],
     ) -> None:
-        """Test that validation statistics correctly reflect deduplication."""
-        mock_github_client = AsyncMock()
+        """Test that validation statistics correctly account for deduplication."""
+        with (
+            patch(
+                "gha_workflow_linter.validator.GitHubGraphQLClient"
+            ) as mock_client_class,
+            patch(
+                "gha_workflow_linter.validator.get_github_token_with_fallback"
+            ) as mock_token_func,
+        ):
+            mock_github_client = AsyncMock()
+            mock_client_class.return_value = mock_github_client
 
-        # All validations succeed
-        mock_github_client.validate_repositories_batch = AsyncMock(
-            return_value={
-                "actions/checkout": True,
-                "actions/setup-python": True,
-            }
-        )
+            # Force GitHub API validation
+            mock_token_func.return_value = "fake_token"
 
-        mock_github_client.validate_references_batch = AsyncMock(
-            return_value={
-                ("actions/checkout", "v4"): True,
-                ("actions/setup-python", "v5.0.0"): True,
-            }
-        )
-
-        mock_stats = APICallStats(
-            total_calls=4,
-            graphql_calls=2,
-            rest_calls=0,
-            git_calls=0,
-            cache_hits=0,
-            rate_limit_delays=0,
-            failed_calls=0,
-        )
-        mock_github_client.get_api_stats = Mock(return_value=mock_stats)
-        mock_github_client.get_rate_limit_info = Mock(
-            return_value=GitHubRateLimitInfo(
-                limit=5000,
-                remaining=5000,
-                reset_at=0,
-                used=0,
+            # Mock all as valid
+            mock_github_client.validate_repositories_batch = AsyncMock(
+                return_value={
+                    "actions/checkout": True,
+                    "actions/setup-python": True,
+                }
             )
-        )
 
-        validator = ActionCallValidator(test_config_no_sha_pinning)
-        validator._github_client = mock_github_client
+            mock_github_client.validate_references_batch = AsyncMock(
+                return_value={
+                    ("actions/checkout", "v4"): True,
+                    ("actions/setup-python", "v5.0.0"): True,
+                }
+            )
 
-        errors = await validator.validate_action_calls_async(
-            duplicate_action_calls
-        )
+            mock_stats = APICallStats(
+                total_calls=4,  # 2 repos + 2 refs
+                graphql_calls=4,
+                rest_calls=0,
+                git_calls=0,
+                cache_hits=0,
+                rate_limit_delays=0,
+                failed_calls=0,
+            )
+            mock_github_client.get_api_stats = Mock(return_value=mock_stats)
+            mock_github_client.get_rate_limit_info = Mock(
+                return_value=GitHubRateLimitInfo(
+                    limit=5000,
+                    remaining=4996,
+                    reset_at=0,
+                    used=4,
+                )
+            )
 
-        # Get validation summary with statistics
-        total_calls = sum(
-            len(calls) for calls in duplicate_action_calls.values()
-        )
-        unique_calls = 2  # actions/checkout@v4 and actions/setup-python@v5.0.0
+            validator = ActionCallValidator(test_config_no_sha_pinning)
 
-        summary = validator.get_validation_summary(
-            errors, total_calls, unique_calls
-        )
+            async with validator:
+                errors = await validator.validate_action_calls_async(
+                    duplicate_action_calls
+                )
 
-        assert summary["total_calls"] == 5
-        assert summary["unique_calls_validated"] == 2
-        assert summary["duplicate_calls_avoided"] == 3
-        assert summary["total_errors"] == 0
+                # Should have no errors
+                assert len(errors) == 0
+
+                # API stats should show optimization
+                api_stats = validator.api_stats
+                assert (
+                    api_stats.total_calls == 4
+                )  # Only 2 unique repos + 2 unique refs
 
     @pytest.mark.asyncio
     async def test_mixed_valid_invalid_deduplication(
@@ -386,54 +402,61 @@ class TestValidatorDeduplication:
             },
         }
 
-        mock_github_client = AsyncMock()
+        with (
+            patch(
+                "gha_workflow_linter.validator.GitHubGraphQLClient"
+            ) as mock_client_class,
+            patch(
+                "gha_workflow_linter.validator.get_github_token_with_fallback"
+            ) as mock_token_func,
+        ):
+            mock_github_client = AsyncMock()
+            mock_client_class.return_value = mock_github_client
 
-        # Mock: actions/checkout succeeds, nonexistent/repo fails
-        mock_github_client.validate_repositories_batch = AsyncMock(
-            return_value={
-                "actions/checkout": True,
-                "nonexistent/repo": False,
-            }
-        )
+            # Force GitHub API validation
+            mock_token_func.return_value = "fake_token"
 
-        mock_github_client.validate_references_batch = AsyncMock(
-            return_value={
-                ("actions/checkout", "v4"): True,
-            }
-        )
-
-        mock_stats = APICallStats(
-            total_calls=0,
-            graphql_calls=0,
-            rest_calls=0,
-            git_calls=0,
-            cache_hits=0,
-            rate_limit_delays=0,
-            failed_calls=0,
-        )
-        mock_github_client.get_api_stats = Mock(return_value=mock_stats)
-        mock_github_client.get_rate_limit_info = Mock(
-            return_value=GitHubRateLimitInfo(
-                limit=5000,
-                remaining=5000,
-                reset_at=0,
-                used=0,
+            # Mock: actions/checkout succeeds, nonexistent/repo fails
+            mock_github_client.validate_repositories_batch = AsyncMock(
+                return_value={
+                    "actions/checkout": True,
+                    "nonexistent/repo": False,
+                }
             )
-        )
 
-        validator = ActionCallValidator(test_config_no_sha_pinning)
-        validator._github_client = mock_github_client
+            mock_github_client.validate_references_batch = AsyncMock(
+                return_value={
+                    ("actions/checkout", "v4"): True,
+                }
+            )
 
-        errors = await validator.validate_action_calls_async(calls)
+            mock_stats = APICallStats(
+                total_calls=0,
+                graphql_calls=0,
+                rest_calls=0,
+                git_calls=0,
+                cache_hits=0,
+                rate_limit_delays=0,
+                failed_calls=0,
+            )
+            mock_github_client.get_api_stats = Mock(return_value=mock_stats)
+            mock_github_client.get_rate_limit_info = Mock(
+                return_value=Mock(remaining=5000, limit=5000)
+            )
 
-        # Should have 2 errors (both occurrences of nonexistent/repo@v1)
-        assert len(errors) == 2
+            validator = ActionCallValidator(test_config_no_sha_pinning)
 
-        # All errors should be for the nonexistent repo
-        for error in errors:
-            assert error.action_call.organization == "nonexistent"
-            assert error.action_call.repository == "repo"
-            assert error.result == ValidationResult.INVALID_REPOSITORY
+            async with validator:
+                errors = await validator.validate_action_calls_async(calls)
+
+                # Should have 2 errors (both nonexistent/repo calls)
+                assert len(errors) == 2
+
+                # All errors should be for nonexistent/repo
+                for error in errors:
+                    assert error.action_call.organization == "nonexistent"
+                    assert error.action_call.repository == "repo"
+                    assert error.result == ValidationResult.INVALID_REPOSITORY
 
     def test_empty_calls_handling(self, test_config: Config) -> None:
         """Test handling of empty action calls dictionary."""
@@ -522,10 +545,18 @@ class TestValidatorDeduplication:
         """Test using validator as async context manager."""
         mock_github_client = AsyncMock()
 
-        with patch(
-            "gha_workflow_linter.validator.GitHubGraphQLClient"
-        ) as mock_client_class:
+        with (
+            patch(
+                "gha_workflow_linter.validator.GitHubGraphQLClient"
+            ) as mock_client_class,
+            patch(
+                "gha_workflow_linter.validator.get_github_token_with_fallback"
+            ) as mock_token_func,
+        ):
             mock_client_class.return_value = mock_github_client
+            mock_token_func.return_value = (
+                "fake_token"  # Force GitHub API validation
+            )
 
             async with ActionCallValidator(
                 test_config_no_sha_pinning

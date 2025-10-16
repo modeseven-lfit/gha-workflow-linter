@@ -218,8 +218,9 @@ cache:
 
         with open(cache_file) as f:
             cache_data = json.load(f)
-        assert len(cache_data) == 1
+        assert len(cache_data) == 2  # 1 cache entry + 1 metadata entry
         assert "actions/checkout@v4" in cache_data
+        assert "_metadata" in cache_data
 
     def test_main_command_purge_cache_flag(self, temp_cache_dir: Path) -> None:
         """Test --purge-cache flag on main command."""

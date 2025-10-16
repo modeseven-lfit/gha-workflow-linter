@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-"""Validator for GitHub Actions calls using GraphQL API with comprehensive tracking."""
+"""Validator for GitHub Actions calls using GraphQL API or Git operations with comprehensive tracking."""
 
 from __future__ import annotations
 
@@ -27,19 +27,22 @@ from .exceptions import (
     TemporaryAPIError,
     ValidationAbortedError,
 )
+from .git_validator import GitValidationClient
 from .github_api import GitHubGraphQLClient
+from .github_auth import get_github_token_with_fallback
 from .models import (
     ActionCall,
     APICallStats,
     Config,
     ReferenceType,
     ValidationError,
+    ValidationMethod,
     ValidationResult,
 )
 
 
 class ActionCallValidator:
-    """Validator for GitHub Actions and workflow calls using GraphQL API."""
+    """Validator for GitHub Actions and workflow calls using GraphQL API or Git operations."""
 
     def __init__(self, config: Config) -> None:
         """
@@ -51,19 +54,44 @@ class ActionCallValidator:
         self.config = config
         self.logger = logging.getLogger(__name__)
         self._github_client: GitHubGraphQLClient | None = None
+        self._git_client: GitValidationClient | None = None
         self.api_stats = APICallStats()
         self._cache = ValidationCache(config.cache)
+        self._validation_method: ValidationMethod | None = None
 
     async def __aenter__(self) -> ActionCallValidator:
         """Async context manager entry."""
-        self._github_client = GitHubGraphQLClient(self.config.github_api)
-        await self._github_client.__aenter__()
+        # Determine validation method
+        self._validation_method = self._determine_validation_method()
+
+        if self._validation_method == ValidationMethod.GITHUB_API:
+            self._github_client = GitHubGraphQLClient(self.config.github_api)
+            await self._github_client.__aenter__()
+        else:
+            self._git_client = GitValidationClient(self.config.git)
+
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Async context manager exit."""
         if self._github_client:
             await self._github_client.__aexit__(exc_type, exc_val, exc_tb)
+        elif self._git_client:
+            # Merge Git client stats
+            git_stats = self._git_client.get_api_stats()
+            self.api_stats.total_calls += git_stats.total_calls
+            self.api_stats.git_calls += git_stats.git_calls
+            self.api_stats.git_clone_operations += (
+                git_stats.git_clone_operations
+            )
+            self.api_stats.git_ls_remote_operations += (
+                git_stats.git_ls_remote_operations
+            )
+            self.api_stats.failed_calls += git_stats.failed_calls
+            self.api_stats.repositories_validated += (
+                git_stats.repositories_validated
+            )
+
         # Merge cache stats into API stats
         self.api_stats.cache_hits += self._cache.stats.hits
         # Save cache before exiting
@@ -76,7 +104,7 @@ class ActionCallValidator:
         task_id: TaskID | None = None,
     ) -> list[ValidationError]:
         """
-        Validate all action calls against remote repositories using GraphQL.
+        Validate all action calls against remote repositories.
 
         Args:
             action_calls: Dictionary mapping file paths to action calls
@@ -86,13 +114,117 @@ class ActionCallValidator:
         Returns:
             List of validation errors
         """
-        if not self._github_client:
-            raise RuntimeError("GitHub client not initialized")
+        # Check for suspicious cache patterns and auto-purge if needed
+        self._cache.auto_purge_if_suspicious()
+        if self._validation_method == ValidationMethod.GITHUB_API:
+            if not self._github_client:
+                raise RuntimeError("GitHub client not initialized")
+            return await self._validate_with_github_api(
+                action_calls, progress, task_id
+            )
+        else:
+            if not self._git_client:
+                raise RuntimeError("Git client not initialized")
+            return await self._validate_with_git(
+                action_calls, progress, task_id
+            )
 
+    def _determine_validation_method(self) -> ValidationMethod:
+        """
+        Determine which validation method to use.
+
+        Returns:
+            ValidationMethod to use
+        """
+        # If explicitly specified in config, use that
+        if self.config.validation_method:
+            self.logger.info(
+                f"Using explicitly specified validation method: {self.config.validation_method}"
+            )
+            return self.config.validation_method
+
+        # Try to get a GitHub token
+        token = get_github_token_with_fallback(
+            explicit_token=self.config.github_api.token, quiet=True
+        )
+
+        if token:
+            self.logger.info(
+                "GitHub token available, using GitHub API validation"
+            )
+            return ValidationMethod.GITHUB_API
+        else:
+            self.logger.info(
+                "No GitHub token available, falling back to Git validation"
+            )
+            return ValidationMethod.GIT
+
+    async def _validate_with_github_api(
+        self,
+        action_calls: dict[Path, dict[int, ActionCall]],
+        progress: Progress | None = None,
+        task_id: TaskID | None = None,
+    ) -> list[ValidationError]:
+        """
+        Validate action calls using GitHub GraphQL API.
+
+        Args:
+            action_calls: Dictionary mapping file paths to action calls
+            progress: Optional progress bar
+            task_id: Optional task ID for progress updates
+
+        Returns:
+            List of validation errors
+        """
         self.logger.info(
             "Starting action call validation using GitHub GraphQL API"
         )
 
+        return await self._perform_validation(
+            action_calls, progress, task_id, use_github_api=True
+        )
+
+    async def _validate_with_git(
+        self,
+        action_calls: dict[Path, dict[int, ActionCall]],
+        progress: Progress | None = None,
+        task_id: TaskID | None = None,
+    ) -> list[ValidationError]:
+        """
+        Validate action calls using Git operations.
+
+        Args:
+            action_calls: Dictionary mapping file paths to action calls
+            progress: Optional progress bar
+            task_id: Optional task ID for progress updates
+
+        Returns:
+            List of validation errors
+        """
+        self.logger.info("Starting action call validation using Git operations")
+        return await self._perform_validation(
+            action_calls, progress, task_id, use_github_api=False
+        )
+
+    async def _perform_validation(
+        self,
+        action_calls: dict[Path, dict[int, ActionCall]],
+        progress: Progress | None = None,
+        task_id: TaskID | None = None,
+        use_github_api: bool = True,
+    ) -> list[ValidationError]:
+        """
+        Perform the actual validation using the specified method.
+
+        Args:
+            action_calls: Dictionary mapping file paths to action calls
+            progress: Optional progress bar
+            task_id: Optional task ID for progress updates
+            use_github_api: Whether to use GitHub API or Git operations
+
+        Returns:
+            List of validation errors
+        """
         errors: list[ValidationError] = []
 
         # Flatten and deduplicate action calls
@@ -106,8 +238,13 @@ class ActionCallValidator:
             for action_call in calls.values():
                 all_calls.append((file_path, action_call))
 
-                # Create unique key for deduplication
-                call_key = f"{action_call.organization}/{action_call.repository}@{action_call.reference}"
+                # For reusable workflows, extract the actual repository name for validation
+                repo_for_validation = self._extract_repository_for_validation(
+                    action_call
+                )
+
+                # Create unique key for deduplication using the repo name for validation
+                call_key = f"{action_call.organization}/{repo_for_validation}@{action_call.reference}"
                 unique_calls[call_key] = action_call
                 call_locations[call_key].append((file_path, action_call))
 
@@ -118,9 +255,12 @@ class ActionCallValidator:
             self.logger.info("No action calls to validate")
             return errors
 
+        validation_method_str = (
+            "GitHub GraphQL API" if use_github_api else "Git operations"
+        )
         self.logger.info(
             f"Validating {total_calls} action calls "
-            f"({unique_count} unique calls) using GraphQL API"
+            f"({unique_count} unique calls) using {validation_method_str}"
         )
 
         # Deduplication savings
@@ -136,7 +276,11 @@ class ActionCallValidator:
         repo_refs: list[tuple[str, str]] = []
 
         for _call_key, action_call in unique_calls.items():
-            repo_key = f"{action_call.organization}/{action_call.repository}"
+            # Use the extracted repository name for validation
+            repo_for_validation = self._extract_repository_for_validation(
+                action_call
+            )
+            repo_key = f"{action_call.organization}/{repo_for_validation}"
             unique_repos.add(repo_key)
             repo_refs.append((repo_key, action_call.reference))
 
@@ -169,22 +313,36 @@ class ActionCallValidator:
             f"Validating {len(repos_to_validate)} unique repositories (after cache)"
         )
 
-        repo_results = {}
+        repo_results: dict[str, bool] = {}
 
         if repos_to_validate:
             try:
-                repo_results = (
-                    await self._github_client.validate_repositories_batch(
-                        list(repos_to_validate)
+                if use_github_api:
+                    assert self._github_client is not None
+                    repo_results = (
+                        await self._github_client.validate_repositories_batch(
+                            list(repos_to_validate)
+                        )
                     )
-                )
+                    # Merge API stats
+                    self._merge_api_stats(self._github_client.get_api_stats())
+                else:
+                    assert self._git_client is not None
+                    git_repo_results = (
+                        await self._git_client.validate_repositories_batch(
+                            list(repos_to_validate)
+                        )
+                    )
+                    # Convert ValidationResult enum to boolean for consistency with GitHub API
+                    repo_results = {
+                        repo: result == ValidationResult.VALID
+                        for repo, result in git_repo_results.items()
+                    }
 
-                # Merge API stats
-                self._merge_api_stats(self._github_client.get_api_stats())
-
+                method_stats = "GraphQL" if use_github_api else "Git"
                 self.logger.debug(
                     f"Repository validation complete. API calls so far: "
-                    f"{self.api_stats.total_calls} (GraphQL: {self.api_stats.graphql_calls}, "
+                    f"{self.api_stats.total_calls} ({method_stats}: {self.api_stats.graphql_calls if use_github_api else self.api_stats.git_calls}, "
                     f"Cache hits: {self.api_stats.cache_hits})"
                 )
 
@@ -195,8 +353,11 @@ class ActionCallValidator:
                 RateLimitError,
                 TemporaryAPIError,
             ) as e:
+                error_context = (
+                    "GitHub API/Network" if use_github_api else "Git/Network"
+                )
                 self.logger.error(
-                    f"GitHub API/Network error during repository validation: {e}"
+                    f"{error_context} error during repository validation: {e}"
                 )
                 raise ValidationAbortedError(
                     "Unable to validate GitHub Actions due to API/network issues",
@@ -240,23 +401,36 @@ class ActionCallValidator:
             f"Validating {len(valid_repo_refs_to_validate)} references for valid repositories (after cache)"
         )
 
-        ref_results = {}
+        ref_results: dict[tuple[str, str], bool] = {}
 
         if valid_repo_refs_to_validate:
             try:
-                ref_results = (
-                    await self._github_client.validate_references_batch(
-                        valid_repo_refs_to_validate
+                if use_github_api:
+                    assert self._github_client is not None
+                    ref_results = (
+                        await self._github_client.validate_references_batch(
+                            valid_repo_refs_to_validate
+                        )
                     )
-                )
+                    # Merge API stats again
+                    self._merge_api_stats(self._github_client.get_api_stats())
+                else:
+                    assert self._git_client is not None
+                    git_ref_results = (
+                        await self._git_client.validate_references_batch(
+                            valid_repo_refs_to_validate
+                        )
+                    )
+                    # Convert ValidationResult enum to boolean for consistency with GitHub API
+                    ref_results = {
+                        repo_ref: result == ValidationResult.VALID
+                        for repo_ref, result in git_ref_results.items()
+                    }
 
-                # Merge API stats again
-                self._merge_api_stats(self._github_client.get_api_stats())
-
+                method_stats = "GraphQL" if use_github_api else "Git"
                 self.logger.debug(
                     f"Reference validation complete. Total API calls: "
-                    f"{self.api_stats.total_calls} (GraphQL: {self.api_stats.graphql_calls}, "
-                    f"REST: {self.api_stats.rest_calls}, "
+                    f"{self.api_stats.total_calls} ({method_stats}: {self.api_stats.graphql_calls if use_github_api else self.api_stats.git_calls}, "
                     f"Cache hits: {self.api_stats.cache_hits})"
                 )
 
@@ -267,8 +441,11 @@ class ActionCallValidator:
                 RateLimitError,
                 TemporaryAPIError,
             ) as e:
+                error_context = (
+                    "GitHub API/Network" if use_github_api else "Git/Network"
+                )
                 self.logger.error(
-                    f"GitHub API/Network error during reference validation: {e}"
+                    f"{error_context} error during reference validation: {e}"
                 )
                 raise ValidationAbortedError(
                     "Unable to validate GitHub Actions due to API/network issues",
@@ -308,21 +485,28 @@ class ActionCallValidator:
 
             if repo_valid and ref_valid:
                 result = ValidationResult.VALID
-                api_call_type = "graphql"
+                api_call_type = "graphql" if use_github_api else "git"
                 error_message = None
             elif not repo_valid:
                 result = ValidationResult.INVALID_REPOSITORY
-                api_call_type = "graphql"
+                api_call_type = "graphql" if use_github_api else "git"
                 error_message = f"Repository {repo} not found or not accessible"
             else:
                 result = ValidationResult.INVALID_REFERENCE
-                api_call_type = "graphql"
+                api_call_type = "graphql" if use_github_api else "git"
                 error_message = (
                     f"Reference {ref} not found in repository {repo}"
                 )
 
             cache_entries_to_store.append(
-                (repo, ref, result, api_call_type, error_message)
+                (
+                    repo,
+                    ref,
+                    result,
+                    api_call_type,
+                    self._validation_method or ValidationMethod.GITHUB_API,
+                    error_message,
+                )
             )
 
         if cache_entries_to_store:
@@ -379,21 +563,32 @@ class ActionCallValidator:
                         errors.append(error)
 
         # Log final statistics
-        rate_limit_info = self._github_client.get_rate_limit_info()
         self.logger.info(
             f"Validation complete: {len(errors)} errors out of "
             f"{total_calls} calls ({unique_count} unique calls validated)"
         )
-        self.logger.info(
-            f"API Statistics: {self.api_stats.total_calls} total calls "
-            f"(GraphQL: {self.api_stats.graphql_calls}, "
-            f"REST: {self.api_stats.rest_calls}, "
-            f"Cache hits: {self.api_stats.cache_hits})"
-        )
-        self.logger.info(
-            f"GitHub Rate Limit: {rate_limit_info.remaining}/"
-            f"{rate_limit_info.limit} remaining"
-        )
+
+        if use_github_api and self._github_client:
+            rate_limit_info = self._github_client.get_rate_limit_info()
+            self.logger.info(
+                f"API Statistics: {self.api_stats.total_calls} total calls "
+                f"(GraphQL: {self.api_stats.graphql_calls}, "
+                f"REST: {self.api_stats.rest_calls}, "
+                f"Cache hits: {self.api_stats.cache_hits})"
+            )
+            self.logger.info(
+                f"GitHub Rate Limit: {rate_limit_info.remaining}/{rate_limit_info.limit} remaining"
+            )
+        else:
+            # Merge cache statistics before printing
+            self.api_stats.cache_hits += self._cache.stats.hits
+            self.logger.debug(
+                f"Git Statistics: {self.api_stats.total_calls} total calls "
+                f"(Git: {self.api_stats.git_calls}, "
+                f"Clone ops: {self.api_stats.git_clone_operations}, "
+                f"ls-remote ops: {self.api_stats.git_ls_remote_operations}, "
+                f"Cache hits: {self.api_stats.cache_hits})"
+            )
 
         if self.api_stats.rate_limit_delays > 0:
             self.logger.warning(
@@ -401,6 +596,56 @@ class ActionCallValidator:
             )
 
         return errors
+
+    def _extract_repository_for_validation(
+        self, action_call: ActionCall
+    ) -> str:
+        """
+        Extract the repository name for validation purposes.
+
+        For reusable workflows, the repository field contains the full path like:
+        'releng-reusable-workflows/.github/workflows/workflow.yaml'
+
+        For validation, we need just the repository part:
+        'releng-reusable-workflows'
+
+        Args:
+            action_call: The action call to extract repository from
+
+        Returns:
+            Repository name suitable for validation
+        """
+        from .models import ActionCallType
+
+        if action_call.call_type == ActionCallType.WORKFLOW:
+            # For workflows, extract just the repository part before /.github/workflows/
+            repo_path = action_call.repository
+            if "/.github/workflows/" in repo_path:
+                return repo_path.split("/.github/workflows/")[0]
+            else:
+                # Fallback: use the full path as repository name
+                return repo_path
+        else:
+            # For regular actions, use the repository as-is
+            return action_call.repository
+
+    def _extract_workflow_path(self, action_call: ActionCall) -> str | None:
+        """
+        Extract the workflow file path for validation.
+
+        Args:
+            action_call: The action call to extract workflow path from
+
+        Returns:
+            Workflow file path if this is a workflow call, None otherwise
+        """
+        from .models import ActionCallType
+
+        if action_call.call_type == ActionCallType.WORKFLOW:
+            repo_path = action_call.repository
+            if "/.github/workflows/" in repo_path:
+                return repo_path.split("/.github/workflows/", 1)[1]
+        return None
 
     def validate_action_calls(
         self,
@@ -448,7 +693,10 @@ class ActionCallValidator:
         validation_results = {}
 
         for call_key, action_call in unique_calls.items():
-            repo_key = f"{action_call.organization}/{action_call.repository}"
+            repo_for_validation = self._extract_repository_for_validation(
+                action_call
+            )
+            repo_key = f"{action_call.organization}/{repo_for_validation}"
 
             # Check repository validity
             if not repo_results.get(repo_key, False):
