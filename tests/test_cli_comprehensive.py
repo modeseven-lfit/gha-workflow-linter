@@ -350,6 +350,9 @@ class TestOutputFunctions:
             "sha_references": 1,
             "tag_references": 2,
             "branch_references": 1,
+            "unique_calls_validated": 3,
+            "duplicate_calls_avoided": 1,
+            "validation_efficiency": 25.0,
         }
         validation_summary = {
             "total_calls": 4,
@@ -392,7 +395,11 @@ class TestOutputFunctions:
 
         with patch("gha_workflow_linter.cli.console") as mock_console:
             output_text_results(
-                scan_summary, validation_summary, validation_errors, quiet=False
+                scan_summary,
+                validation_summary,
+                validation_errors,
+                Path("test"),
+                quiet=False,
             )
 
             mock_console.print.assert_called()
@@ -414,6 +421,9 @@ class TestOutputFunctions:
             "sha_references": 1,
             "tag_references": 2,
             "branch_references": 1,
+            "unique_calls_validated": 3,
+            "duplicate_calls_avoided": 1,
+            "validation_efficiency": 25.0,
         }
         validation_summary = {
             "total_calls": 4,
@@ -452,7 +462,10 @@ class TestOutputFunctions:
 
         with patch("gha_workflow_linter.cli.console") as mock_console:
             output_json_results(
-                scan_summary, validation_summary, validation_errors
+                scan_summary,
+                validation_summary,
+                validation_errors,
+                Path("test"),
             )
 
             mock_console.print.assert_called_once()

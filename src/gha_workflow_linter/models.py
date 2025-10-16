@@ -22,6 +22,13 @@ class LogLevel(str, Enum):
     CRITICAL = "CRITICAL"
 
 
+class ValidationMethod(str, Enum):
+    """Method used for validating action calls."""
+
+    GITHUB_API = "github-api"
+    GIT = "git"
+
+
 class ValidationResult(str, Enum):
     """Result of action call validation."""
 
@@ -167,6 +174,22 @@ class GitConfig(BaseModel):  # type: ignore[misc]
     use_ssh_agent: bool = Field(
         True, description="Use SSH agent for authentication"
     )
+    max_parallel_operations: int = Field(
+        None, description="Max parallel Git operations (default: CPU count)"
+    )
+    clone_depth: int = Field(
+        1, description="Git clone depth for shallow clones"
+    )
+
+    @field_validator("max_parallel_operations")  # type: ignore[misc]
+    @classmethod
+    def validate_max_parallel_operations(cls, v: int | None) -> int | None:
+        """Validate max parallel operations."""
+        if v is not None and v < 1:
+            raise ValueError("Max parallel operations must be at least 1")
+        if v is not None and v > 64:
+            raise ValueError("Max parallel operations must be at most 64")
+        return v
 
 
 class GitHubAPIConfig(BaseModel):  # type: ignore[misc]
@@ -219,12 +242,16 @@ class APICallStats(BaseModel):  # type: ignore[misc]
     total_calls: int = Field(0, description="Total API calls made")
     graphql_calls: int = Field(0, description="GraphQL API calls")
     rest_calls: int = Field(0, description="REST API calls")
-    git_calls: int = Field(0, description="Git ls-remote calls")
+    git_calls: int = Field(0, description="Git operations")
     cache_hits: int = Field(0, description="Cache hits")
     rate_limit_delays: int = Field(0, description="Rate limit induced delays")
     failed_calls: int = Field(0, description="Failed API calls")
     repositories_validated: int = Field(
         0, description="Number of repositories validated"
+    )
+    git_clone_operations: int = Field(0, description="Git clone operations")
+    git_ls_remote_operations: int = Field(
+        0, description="Git ls-remote operations"
     )
 
     @property
@@ -340,6 +367,9 @@ class Config(BaseModel):  # type: ignore[misc]
     require_pinned_sha: bool = Field(
         True, description="Require all actions to be pinned to commit SHAs"
     )
+    validation_method: ValidationMethod | None = Field(
+        None, description="Validation method (auto-detected if None)"
+    )
 
     network: NetworkConfig = Field(
         default_factory=lambda: NetworkConfig(),
@@ -390,6 +420,9 @@ class CLIOptions(BaseModel):  # type: ignore[misc]
     purge_cache: bool = Field(False, description="Purge cache and exit")
     cache_ttl: int | None = Field(
         None, description="Override cache TTL in seconds"
+    )
+    validation_method: ValidationMethod | None = Field(
+        None, description="Validation method (auto-detected if None)"
     )
 
     @field_validator("output_format")  # type: ignore[misc]

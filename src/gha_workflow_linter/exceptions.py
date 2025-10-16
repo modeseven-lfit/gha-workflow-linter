@@ -87,6 +87,40 @@ class ValidationAbortedError(ValidationError):
         super().__init__(f"{message}: {reason}")
 
 
+class GitError(ValidationError):
+    """Raised when Git operations fail."""
+
+    def __init__(
+        self, message: str, original_error: Optional[Exception] = None
+    ):
+        self.message = message
+        self.original_error = original_error
+        super().__init__(message)
+
+
+class RepositoryNotFoundError(ValidationError):
+    """Raised when a repository cannot be found or accessed."""
+
+    def __init__(self, repository: str, message: Optional[str] = None):
+        self.repository = repository
+        if message is None:
+            message = f"Repository not found: {repository}"
+        super().__init__(message)
+
+
+class ReferenceNotFoundError(ValidationError):
+    """Raised when a Git reference cannot be found."""
+
+    def __init__(
+        self, repository: str, reference: str, message: Optional[str] = None
+    ):
+        self.repository = repository
+        self.reference = reference
+        if message is None:
+            message = f"Reference '{reference}' not found in repository '{repository}'"
+        super().__init__(message)
+
+
 class ConfigurationError(Exception):
     """Raised when there's an issue with configuration."""
 

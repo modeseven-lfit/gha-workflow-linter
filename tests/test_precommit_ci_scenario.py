@@ -87,17 +87,18 @@ jobs:
         """Create configuration without GitHub token (as in pre-commit.ci)."""
         import tempfile
 
-        from gha_workflow_linter.models import CacheConfig
+        from gha_workflow_linter.models import CacheConfig, ValidationMethod
 
         # Use non-existent domain to naturally cause DNS failures
         temp_cache_dir = Path(tempfile.mkdtemp()) / "test_cache"
         return Config(
             github_api=GitHubAPIConfig(
-                token=None,  # No token available in pre-commit.ci
+                token="fake_token",  # Fake token to force GitHub API method
                 base_url="https://nonexistent-domain-for-testing.invalid",
                 graphql_url="https://nonexistent-domain-for-testing.invalid/graphql",
             ),
-            cache=CacheConfig(enabled=True, cache_dir=str(temp_cache_dir)),
+            cache=CacheConfig(enabled=False, cache_dir=temp_cache_dir),
+            validation_method=ValidationMethod.GITHUB_API,  # Force GitHub API validation
         )
 
     def test_dns_resolution_failure_scenario(

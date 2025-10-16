@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import tempfile
 import time
 
 from gha_workflow_linter.cache import (
@@ -90,7 +92,20 @@ class TestValidationCache:
 
     def setup_method(self) -> None:
         """Set up test fixtures."""
-        self.cache_config = CacheConfig()
+        # Use a temporary file to avoid interference with real cache
+        self.temp_cache_file_path = tempfile.mktemp(suffix=".json")
+
+        self.cache_config = CacheConfig(
+            enabled=True,
+            cache_dir=Path(self.temp_cache_file_path).parent,
+            cache_file=Path(self.temp_cache_file_path).name,
+        )
+
+    def teardown_method(self) -> None:
+        """Clean up test fixtures."""
+        # Clean up the temporary cache file
+        if os.path.exists(self.temp_cache_file_path):
+            os.unlink(self.temp_cache_file_path)
 
     def test_init_with_config(self) -> None:
         """Test ValidationCache initialization."""
@@ -129,10 +144,14 @@ class TestValidationCache:
         path = cache.config.cache_file_path
 
         assert isinstance(path, Path)
-        assert str(path).endswith("validation_cache.json")
+        assert str(path).endswith(".json")
 
     def test_load_cache_basic(self) -> None:
         """Test loading cache with no existing file."""
+        # Remove the temp file to ensure we start with no cache
+        if os.path.exists(self.temp_cache_file_path):
+            os.unlink(self.temp_cache_file_path)
+
         cache = ValidationCache(self.cache_config)
         cache._load_cache()
         assert cache._cache == {}

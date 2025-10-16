@@ -15,7 +15,7 @@ from gha_workflow_linter.cache import (
     CachedValidationEntry,
     ValidationCache,
 )
-from gha_workflow_linter.models import ValidationResult
+from gha_workflow_linter.models import ValidationMethod, ValidationResult
 
 
 class TestCacheConfig:
@@ -212,6 +212,7 @@ class TestValidationCache:
             "v2.0.0",
             ValidationResult.INVALID_REPOSITORY,
             "graphql",
+            ValidationMethod.GITHUB_API,
             "Not found",
         )
         cache1.save()
@@ -237,15 +238,30 @@ class TestValidationCache:
 
         # Store batch of results
         batch_data = [
-            ("owner/repo1", "v1.0.0", ValidationResult.VALID, "graphql", None),
+            (
+                "owner/repo1",
+                "v1.0.0",
+                ValidationResult.VALID,
+                "graphql",
+                ValidationMethod.GITHUB_API,
+                None,
+            ),
             (
                 "owner/repo2",
                 "v2.0.0",
                 ValidationResult.INVALID_REPOSITORY,
                 "graphql",
+                ValidationMethod.GITHUB_API,
                 "Not found",
             ),
-            ("owner/repo3", "v3.0.0", ValidationResult.VALID, "graphql", None),
+            (
+                "owner/repo3",
+                "v3.0.0",
+                ValidationResult.VALID,
+                "graphql",
+                ValidationMethod.GITHUB_API,
+                None,
+            ),
         ]
         cache.put_batch(batch_data)
 

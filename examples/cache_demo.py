@@ -17,7 +17,7 @@ import time
 from typing import Optional
 
 from gha_workflow_linter.cache import CacheConfig, ValidationCache
-from gha_workflow_linter.models import ValidationResult
+from gha_workflow_linter.models import ValidationMethod, ValidationResult
 
 
 def demo_basic_cache_operations() -> None:
@@ -88,14 +88,24 @@ def demo_batch_operations() -> None:
 
         # Batch put operations
         batch_data: list[
-            tuple[str, str, ValidationResult, str, Optional[str]]
+            tuple[
+                str, str, ValidationResult, str, ValidationMethod, Optional[str]
+            ]
         ] = [
-            ("actions/checkout", "v4", ValidationResult.VALID, "graphql", None),
+            (
+                "actions/checkout",
+                "v4",
+                ValidationResult.VALID,
+                "graphql",
+                ValidationMethod.GITHUB_API,
+                None,
+            ),
             (
                 "actions/setup-python",
                 "v5",
                 ValidationResult.VALID,
                 "graphql",
+                ValidationMethod.GITHUB_API,
                 None,
             ),
             (
@@ -103,13 +113,15 @@ def demo_batch_operations() -> None:
                 "v4",
                 ValidationResult.VALID,
                 "graphql",
+                ValidationMethod.GITHUB_API,
                 None,
             ),
             (
-                "actions/upload-artifact",
+                "actions/checkout",
                 "v4",
                 ValidationResult.VALID,
                 "graphql",
+                ValidationMethod.GITHUB_API,
                 None,
             ),
             (
@@ -117,6 +129,7 @@ def demo_batch_operations() -> None:
                 "v4",
                 ValidationResult.VALID,
                 "graphql",
+                ValidationMethod.GITHUB_API,
                 None,
             ),
         ]
@@ -285,13 +298,26 @@ def demo_cache_info() -> None:
         cache = ValidationCache(config)
 
         # Add some test data
-        cache.put("actions/checkout", "v4", ValidationResult.VALID, "graphql")
-        cache.put("actions/setup-node", "v4", ValidationResult.VALID, "graphql")
+        cache.put(
+            "actions/checkout",
+            "v4",
+            ValidationResult.VALID,
+            "graphql",
+            ValidationMethod.GITHUB_API,
+        )
+        cache.put(
+            "actions/setup-node",
+            "v4",
+            ValidationResult.VALID,
+            "graphql",
+            ValidationMethod.GITHUB_API,
+        )
         cache.put(
             "invalid/repo",
             "v1",
             ValidationResult.INVALID_REPOSITORY,
             "graphql",
+            ValidationMethod.GITHUB_API,
             "Repository not found",
         )
 

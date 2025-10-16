@@ -268,10 +268,165 @@ jobs:
         ]
 
         for case in test_cases:
-            result = ActionCallPatterns.parse_action_call(
-                f"  - {case['line']}", 1
-            )
-            assert result is not None
+            result = ActionCallPatterns.parse_action_call(case["line"], 1)
+            assert result is not None, f"Failed to parse: {case['line']}"
             assert result.organization == case["org"]
             assert result.repository == case["repo"]
             assert result.call_type == case["type"]
+
+    def test_nested_action_paths(self) -> None:
+        """Test parsing actions in nested subdirectories."""
+        test_cases = [
+            {
+                "line": "uses: actions/aws/ec2@v1",
+                "org": "actions",
+                "repo": "aws/ec2",
+                "ref": "v1",
+                "type": ActionCallType.ACTION,
+                "description": "AWS EC2 action in subdirectory",
+            },
+            {
+                "line": "uses: company/monorepo/tools/deploy@main",
+                "org": "company",
+                "repo": "monorepo/tools/deploy",
+                "ref": "main",
+                "type": ActionCallType.ACTION,
+                "description": "Monorepo action in deep path",
+            },
+            {
+                "line": "uses: microsoft/setup-msbuild@v2",
+                "org": "microsoft",
+                "repo": "setup-msbuild",
+                "ref": "v2",
+                "type": ActionCallType.ACTION,
+                "description": "Standard root-level action",
+            },
+            {
+                "line": "uses: octocat/hello-world/greet/action@v1.0.0",
+                "org": "octocat",
+                "repo": "hello-world/greet/action",
+                "ref": "v1.0.0",
+                "type": ActionCallType.ACTION,
+                "description": "Nested action with specific path",
+            },
+        ]
+
+        for case in test_cases:
+            result = ActionCallPatterns.parse_action_call(case["line"], 1)
+            assert result is not None, (
+                f"Failed to parse {case['description']}: {case['line']}"
+            )
+            assert result.organization == case["org"], (
+                f"Wrong org for {case['description']}"
+            )
+            assert result.repository == case["repo"], (
+                f"Wrong repo for {case['description']}"
+            )
+            assert result.reference == case["ref"], (
+                f"Wrong ref for {case['description']}"
+            )
+            assert result.call_type == case["type"], (
+                f"Wrong type for {case['description']}"
+            )
+
+    def test_workflow_path_variations(self) -> None:
+        """Test various reusable workflow path patterns."""
+        test_cases = [
+            {
+                "line": "uses: lfit/releng-reusable-workflows/.github/workflows/reuse-verify-github-actions.yaml@1a9d1394836d7511179d478facd9466a9e45596e",
+                "org": "lfit",
+                "repo": "releng-reusable-workflows/.github/workflows/reuse-verify-github-actions.yaml",
+                "ref": "1a9d1394836d7511179d478facd9466a9e45596e",
+                "type": ActionCallType.WORKFLOW,
+                "description": "Real-world reusable workflow with SHA",
+            },
+            {
+                "line": "uses: org/repo/.github/workflows/ci.yml@v1.2.3",
+                "org": "org",
+                "repo": "repo/.github/workflows/ci.yml",
+                "ref": "v1.2.3",
+                "type": ActionCallType.WORKFLOW,
+                "description": "Simple workflow with semantic version",
+            },
+            {
+                "line": "uses: enterprise/shared/.github/workflows/security/scan.yaml@main",
+                "org": "enterprise",
+                "repo": "shared/.github/workflows/security/scan.yaml",
+                "ref": "main",
+                "type": ActionCallType.WORKFLOW,
+                "description": "Nested workflow directory",
+            },
+        ]
+
+        for case in test_cases:
+            result = ActionCallPatterns.parse_action_call(case["line"], 1)
+            assert result is not None, (
+                f"Failed to parse {case['description']}: {case['line']}"
+            )
+            assert result.organization == case["org"], (
+                f"Wrong org for {case['description']}"
+            )
+            assert result.repository == case["repo"], (
+                f"Wrong repo for {case['description']}"
+            )
+            assert result.reference == case["ref"], (
+                f"Wrong ref for {case['description']}"
+            )
+            assert result.call_type == case["type"], (
+                f"Wrong type for {case['description']}"
+            )
+
+    def test_edge_cases_and_validation_scenarios(self) -> None:
+        """Test edge cases that would require special validation handling."""
+        test_cases = [
+            {
+                "line": "uses: actions/cache/restore@v4",
+                "org": "actions",
+                "repo": "cache/restore",
+                "ref": "v4",
+                "type": ActionCallType.ACTION,
+                "description": "Action in cache subdirectory",
+            },
+            {
+                "line": "uses: google-github-actions/setup-gcloud@v2.1.1",
+                "org": "google-github-actions",
+                "repo": "setup-gcloud",
+                "ref": "v2.1.1",
+                "type": ActionCallType.ACTION,
+                "description": "Standard action with hyphenated org",
+            },
+            {
+                "line": "uses: Azure/k8s-deploy@v5",
+                "org": "Azure",
+                "repo": "k8s-deploy",
+                "ref": "v5",
+                "type": ActionCallType.ACTION,
+                "description": "Azure action with capital A",
+            },
+            {
+                "line": "uses: docker/build-push-action@v6.9.0",
+                "org": "docker",
+                "repo": "build-push-action",
+                "ref": "v6.9.0",
+                "type": ActionCallType.ACTION,
+                "description": "Docker action with hyphens",
+            },
+        ]
+
+        for case in test_cases:
+            result = ActionCallPatterns.parse_action_call(case["line"], 1)
+            assert result is not None, (
+                f"Failed to parse {case['description']}: {case['line']}"
+            )
+            assert result.organization == case["org"], (
+                f"Wrong org for {case['description']}"
+            )
+            assert result.repository == case["repo"], (
+                f"Wrong repo for {case['description']}"
+            )
+            assert result.reference == case["ref"], (
+                f"Wrong ref for {case['description']}"
+            )
+            assert result.call_type == case["type"], (
+                f"Wrong type for {case['description']}"
+            )

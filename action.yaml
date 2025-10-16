@@ -41,6 +41,9 @@ inputs:
     description: "Require action calls to be pinned to commit SHAs"
     required: false
     default: "true"
+  validation-method:
+    description: "Validation method (github-api, git, or auto-detect)"
+    required: false
 
 outputs:
   errors-found:
@@ -122,6 +125,10 @@ runs:
 
         if [[ "${{ inputs.require-pinned-sha }}" == "false" ]]; then
           args+=(--no-require-pinned-sha)
+        fi
+
+        if [[ -n "${{ inputs.validation-method }}" ]]; then
+          args+=(--validation-method "${{ inputs.validation-method }}")
         fi
 
         # Run gha-workflow-linter and capture output
