@@ -163,6 +163,10 @@ class ConfigManager:
             "parallel_workers": default_config.parallel_workers,
             "scan_extensions": default_config.scan_extensions,
             "exclude_patterns": default_config.exclude_patterns,
+            "require_pinned_sha": default_config.require_pinned_sha,
+            "auto_fix": default_config.auto_fix,
+            "auto_latest": default_config.auto_latest,
+            "two_space_comments": default_config.two_space_comments,
             "network": {
                 "timeout_seconds": default_config.network.timeout_seconds,
                 "max_retries": default_config.network.max_retries,
@@ -195,6 +199,18 @@ scan_extensions:
 
 # Patterns to exclude from scanning (can be empty)
 exclude_patterns: []
+
+# Require action calls to be pinned to commit SHAs
+require_pinned_sha: {config_dict["require_pinned_sha"]}
+
+# Auto-fix broken/invalid references
+auto_fix: {config_dict["auto_fix"]}
+
+# Use latest versions when auto-fixing
+auto_latest: {config_dict["auto_latest"]}
+
+# Use two spaces before inline comments when fixing
+two_space_comments: {config_dict["two_space_comments"]}
 
 # Network configuration
 network:

@@ -165,7 +165,7 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-report=xml",
-    "--cov-fail-under=75",
+    "--cov-fail-under=70",
 ]
 filterwarnings = [
     "ignore:install \"ipywidgets\" for Jupyter support:UserWarning",

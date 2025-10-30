@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 # 🔍 GHA Workflow Linter
 
-[![GitHub Actions](https://github.com/modeseven-lfit/gha-workflow-linter/actions/workflows/build-test.yaml/badge.svg)](https://github.com/modeseven-lfit/gha-workflow-linter/actions)
+[![GitHub Actions](https://github.com/modeseven-lfit/gha-workflow-linter/actions/workflows/build-test.yaml/badge.svg)](https://github.com/modeseven-lfit/gha-workflow-linter/actions/workflows/build-test.yaml)
 [![PyPI version](https://img.shields.io/pypi/v/gha-workflow-linter.svg)](https://pypi.org/project/gha-workflow-linter/)
 [![Python Support](https://img.shields.io/pypi/pyversions/gha-workflow-linter.svg)](https://devguide.python.org/versions/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -17,6 +17,7 @@ Actions workflows reference valid repositories, branches, tags, and commit SHAs.
 ## Features
 
 <!-- markdownlint-disable MD013 -->
+
 - **🔒 SHA Pinning Enforcement**: Requires actions using commit SHAs for security (configurable)
 - **🔑 Automatic Authentication**: Auto-detects GitHub tokens from GitHub CLI when available
 - **📦 Local Caching**: Stores validation results locally to improve performance and reduce API calls
@@ -27,6 +28,7 @@ Actions workflows reference valid repositories, branches, tags, and commit SHAs.
 - **Rich Output**: Clear error reporting with file paths and line numbers
 - **SSH Support**: Respects SSH configuration and agent for private repositories
 - **Rate Limiting**: Built-in throttling to respect API limits
+
 <!-- markdownlint-enable MD013 -->
 
 ## Installation
@@ -71,7 +73,7 @@ gha-workflow-linter lint
 When no token exists, you'll see:
 
 ```text
-⚠️  No GitHub token found; attempting to get using GitHub CLI
+⚠️ No GitHub token found; attempting to get using GitHub CLI
 ✅ GitHub token retrieved from GitHub CLI
 ```
 
@@ -80,11 +82,16 @@ When no token exists, you'll see:
 If you don't use GitHub CLI or prefer manual setup:
 
 1. **Create a Personal Access Token:**
+
+   <!-- markdownlint-disable MD013 -->
+
    - Go to [GitHub Settings > Developer settings > Personal access tokens](https://github.com/settings/tokens)
    - Click "Generate new token (classic)"
    - Select scopes: `public_repo` (for public repositories) or `repo` (for
      private repositories)
    - Copy the generated token
+
+   <!-- markdownlint-enable MD013 -->
 
 2. **Set the token via environment variable:**
 
@@ -109,10 +116,14 @@ The linter uses the following priority order:
 
 ### Rate Limits
 
+<!-- markdownlint-disable MD013 -->
+
 | Authentication | Requests/Hour | Recommended Use |
 |---------------|---------------|-----------------|
 | **With Token** | 5,000 | ✅ Production, CI/CD, large repositories |
 | **Without Token** | 60 | ⚠️ Small repositories, testing purposes |
+
+<!-- markdownlint-enable MD013 -->
 
 **Without any authentication, you'll see:**
 `⚠️ No GitHub token available; API requests may be rate-limited`
@@ -390,11 +401,13 @@ GHA Workflow Linter validates that references exist using GitHub's GraphQL API:
 ### Supported Reference Types
 
 <!-- markdownlint-disable MD013 -->
+
 | Type | Example | Validation Method | SHA Pinning |
 |------|---------|-------------------|-------------|
 | Commit SHA | `f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a` | GitHub GraphQL API | ✅ **Required by default** |
 | Semantic Version | `v1.2.3`, `1.0.0` | GitHub GraphQL API | ❌ Fails unless `--no-require-pinned-sha` |
 | Branch | `main`, `develop` | GitHub GraphQL API | ❌ Fails unless `--no-require-pinned-sha` |
+
 <!-- markdownlint-enable MD013 -->
 
 ### SHA Pinning Enforcement
@@ -530,6 +543,8 @@ gha-workflow-linter lint --format json
 
 ## GitHub Action Inputs
 
+<!-- markdownlint-disable MD013 -->
+
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | `path` | Path to scan for workflows | No | `.` |
@@ -543,13 +558,19 @@ gha-workflow-linter lint --format json
 | `exclude` | Comma-separated exclude patterns | No | |
 | `require-pinned-sha` | Require actions pinned to commit SHAs | No | `true` |
 
+<!-- markdownlint-enable MD013 -->
+
 ## GitHub Action Outputs
+
+<!-- markdownlint-disable MD013 -->
 
 | Output | Description |
 |--------|-------------|
 | `errors-found` | Number of validation errors |
 | `total-calls` | Total action calls scanned |
 | `scan-summary` | JSON summary of results |
+
+<!-- markdownlint-enable MD013 -->
 
 ## CLI Options
 
@@ -616,6 +637,8 @@ docker run --rm -v "$(pwd):/workspace" \
 
 ## Error Types
 
+<!-- markdownlint-disable MD013 -->
+
 | Error Type | Description | Resolution |
 |------------|-------------|------------|
 | `invalid_repository` | Repository not found | Check org/repo name spelling |
@@ -623,8 +646,8 @@ docker run --rm -v "$(pwd):/workspace" \
 | `invalid_syntax` | Malformed action call | Fix YAML syntax |
 | `network_error` | Connection failed | Check network/credentials |
 | `timeout` | Validation timed out | Increase timeout settings |
-<!-- markdownlint-disable MD013 -->
 | `not_pinned_to_sha` | Action not using SHA | Pin to commit SHA or use `--no-require-pinned-sha` |
+
 <!-- markdownlint-enable MD013 -->
 
 ## Development
@@ -692,7 +715,8 @@ This project uses automated CI/CD workflows for building and publishing:
 
 ## Architecture
 
-GHA Workflow Linter follows a modular architecture with clear separation of concerns:
+GHA Workflow Linter follows a modular architecture with clear separation of
+concerns:
 
 - **CLI Interface**: Typer-based command-line interface
 - **Configuration**: Pydantic models with YAML/env support

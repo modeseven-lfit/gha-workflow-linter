@@ -370,6 +370,15 @@ class Config(BaseModel):  # type: ignore[misc]
     validation_method: ValidationMethod | None = Field(
         None, description="Validation method (auto-detected if None)"
     )
+    auto_fix: bool = Field(
+        True, description="Automatically fix broken/invalid references"
+    )
+    auto_latest: bool = Field(
+        True, description="Use latest versions when auto-fixing"
+    )
+    two_space_comments: bool = Field(
+        False, description="Use two spaces before inline comments"
+    )
 
     network: NetworkConfig = Field(
         default_factory=lambda: NetworkConfig(),
@@ -423,6 +432,18 @@ class CLIOptions(BaseModel):  # type: ignore[misc]
     )
     validation_method: ValidationMethod | None = Field(
         None, description="Validation method (auto-detected if None)"
+    )
+    exclude: list[str] | None = Field(
+        None, description="Patterns to exclude from scanning"
+    )
+    auto_fix: bool = Field(
+        True, description="Automatically fix broken/invalid references"
+    )
+    auto_latest: bool = Field(
+        True, description="Use latest versions when auto-fixing"
+    )
+    two_space_comments: bool = Field(
+        False, description="Use two spaces before inline comments"
     )
 
     @field_validator("output_format")  # type: ignore[misc]

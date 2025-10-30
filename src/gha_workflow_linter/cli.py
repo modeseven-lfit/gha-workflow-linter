@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-"""CLI interface for gha-workflow-linter using Typer."""
+"""Command-line interface for gha-workflow-linter."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
+import platform
+import sys
 from pathlib import Path
 from typing import Any
 
+import typer
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.progress import (
@@ -20,9 +25,9 @@ from rich.progress import (
     TextColumn,
 )
 from rich.table import Table
-import typer
 
-from . import __version__
+from ._version import __version__
+from .auto_fix import AutoFixer
 from .cache import ValidationCache
 from .config import ConfigManager
 from .exceptions import (
@@ -271,6 +276,21 @@ def lint(
         "--validation-method",
         help="Validation method: github-api or git (auto-detected if not specified)",
     ),
+    auto_fix: bool = typer.Option(
+        True,
+        "--auto-fix/--no-auto-fix",
+        help="Automatically fix broken/invalid SHA pins, versions, and branches (default: enabled)",
+    ),
+    auto_latest: bool = typer.Option(
+        True,
+        "--auto-latest/--no-auto-latest",
+        help="When auto-fixing, use the latest version of actions (default: enabled)",
+    ),
+    two_space_comments: bool = typer.Option(
+        False,
+        "--two-space-comments/--no-two-space-comments",
+        help="Use two spaces before inline comments when fixing (default: disabled)",
+    ),
     _help: bool = typer.Option(
         False,
         "--help",
@@ -345,6 +365,12 @@ def lint(
 
         # Disable SHA pinning requirement
         gha-workflow-linter lint --no-require-pinned-sha
+
+        # Auto-fix issues without using latest versions
+        gha-workflow-linter lint --auto-fix --no-auto-latest
+
+        # Auto-fix with two-space comment formatting
+        gha-workflow-linter lint --auto-fix --two-space-comments
     """
     # Handle mutually exclusive options
     if verbose and quiet:
@@ -378,11 +404,15 @@ def lint(
             output_format=output_format,
             fail_on_error=fail_on_error,
             parallel=parallel,
+            exclude=exclude,
             require_pinned_sha=require_pinned_sha,
             no_cache=no_cache,
             purge_cache=purge_cache,
             cache_ttl=cache_ttl,
             validation_method=validation_method,
+            auto_fix=auto_fix,
+            auto_latest=auto_latest,
+            two_space_comments=two_space_comments,
         )
 
         # Apply CLI overrides to config
@@ -393,6 +423,11 @@ def lint(
         if not parallel:
             config.parallel_workers = 1
         config.require_pinned_sha = require_pinned_sha
+
+        # Apply auto-fix overrides
+        config.auto_fix = auto_fix
+        config.auto_latest = auto_latest
+        config.two_space_comments = two_space_comments
 
         # Apply validation method override if specified
         if validation_method is not None:
@@ -441,8 +476,15 @@ def lint(
                 config.validation_method = ValidationMethod.GIT
                 if not quiet:
                     console.print(
-                        "[yellow]ℹ️  No GitHub token available, using Git validation method[/yellow]"
+                        "[yellow]ℹ️ No GitHub token available, using Git validation method[/yellow]"
                     )
+
+        # Display validation method being used
+        if not quiet:
+            if config.validation_method == ValidationMethod.GITHUB_API:
+                console.print("[blue]🔍 Using validation method: [GraphQL][/blue]")
+            else:
+                console.print("[blue]🔍 Using validation method: [Git/SSH][/blue]")
 
         # Only check rate limits if using GitHub API
         if config.validation_method == ValidationMethod.GITHUB_API:
@@ -715,6 +757,32 @@ def run_linter(config: Config, options: CLIOptions) -> int:
             logger.error(f"Unexpected error validating action calls: {e}")
             return 1
 
+    # Auto-fix validation errors if enabled
+    fixed_files = {}
+    if config.auto_fix and validation_errors:
+        try:
+            async def run_auto_fix() -> dict[Path, list[dict[str, str]]]:
+                async with AutoFixer(config) as auto_fixer:
+                    return await auto_fixer.fix_validation_errors(validation_errors)
+
+            fixed_files = asyncio.run(run_auto_fix())
+
+            if fixed_files and not options.quiet:
+                console.print(f"\n[yellow]🔧 Auto-fixed issues in {len(fixed_files)} file(s):[/yellow]")
+                for file_path, changes in fixed_files.items():
+                    console.print(f"\n[bold]📄 {_get_relative_path(file_path, options.path)}[/bold]")
+                    for change in changes:
+                        console.print(f"[red]  - {change['old_line'].strip()}[/red]")
+                        console.print(f"[green]  + {change['new_line'].strip()}[/green]")
+
+                console.print(f"\n[yellow]⚠️ Files have been modified. Please review changes and commit them.[/yellow]")
+                console.print("[yellow]💡 Run the linter again after committing to verify fixes.[/yellow]")
+
+        except Exception as e:
+            logger.warning(f"Auto-fix failed: {e}")
+            if not options.quiet:
+                console.print(f"[yellow]⚠️ Auto-fix failed: {e}[/yellow]")
+
     # Generate and display results
     scan_summary = scanner.get_scan_summary(workflow_calls)
 
@@ -743,6 +811,11 @@ def run_linter(config: Config, options: CLIOptions) -> int:
         )
 
     # Determine exit code
+    # If we auto-fixed files, always exit with error to indicate changes were made
+    if fixed_files:
+        return 1
+
+    # Otherwise, exit with error only if there are validation errors and fail_on_error is enabled
     if validation_errors and options.fail_on_error:
         return 1
 
