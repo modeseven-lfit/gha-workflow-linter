@@ -71,7 +71,7 @@ runs:
       with:
         enable-cache: true
 
-    - name: "Install gha-workflow-linter"
+    - name: "Install gha-workflow-linter (if local)"
       shell: bash
       run: |
         if [[ -f "${{ github.action_path }}/pyproject.toml" ]]; then
@@ -79,16 +79,24 @@ runs:
           echo "Installing gha-workflow-linter from local source..."
           cd "${{ github.action_path }}"
           uv pip install --system -e .
+          echo "USE_UVX=false" >> "$GITHUB_ENV"
         else
-          # Install from PyPI when used as external action
-          echo "Installing gha-workflow-linter from PyPI..."
-          uv pip install --system gha-workflow-linter
+          # When used as external action, we'll use uvx to run latest from PyPI
+          echo "Will use uvx to run latest gha-workflow-linter from PyPI..."
+          echo "USE_UVX=true" >> "$GITHUB_ENV"
         fi
 
     - name: "Run gha-workflow-linter"
       id: gha-workflow-linter
       shell: bash
       run: |
+        # Determine command prefix (uvx for PyPI, direct for local)
+        if [[ "$USE_UVX" == "true" ]]; then
+          cmd_prefix="uvx --from gha-workflow-linter gha-workflow-linter"
+        else
+          cmd_prefix="gha-workflow-linter"
+        fi
+
         # Build command arguments
         args=("${{ inputs.path }}")
 
@@ -133,7 +141,7 @@ runs:
 
         # Run gha-workflow-linter and capture output
         if [[ "${{ inputs.output-format }}" == "json" ]]; then
-          output=$(gha-workflow-linter lint "${args[@]}" --no-cache)
+          output=$($cmd_prefix lint "${args[@]}" --no-cache)
           echo "scan-summary<<EOF" >> "$GITHUB_OUTPUT"
           echo "$output" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
@@ -145,7 +153,7 @@ runs:
             jq -r '.scan_summary.total_calls // 0')
         else
           # For text output, run twice, once for display and again for JSON
-          gha-workflow-linter lint "${args[@]}" --no-cache
+          $cmd_prefix lint "${args[@]}" --no-cache
           exit_code=$?
 
           # Get JSON data for outputs - rebuild args with --format json
@@ -159,7 +167,7 @@ runs:
             fi
           done
 
-          json_output=$(gha-workflow-linter lint "${json_args[@]}" --no-cache \
+          json_output=$($cmd_prefix lint "${json_args[@]}" --no-cache \
             2>/dev/null || echo '{}')
 
           errors_found=$(echo "$json_output" | \

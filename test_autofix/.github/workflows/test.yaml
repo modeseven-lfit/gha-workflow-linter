@@ -1,0 +1,36 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+# Test workflow with auto-fixable issues
+name: 'Test Auto-Fix'
+
+# yamllint disable-line rule:truthy
+on:
+  push:
+    branches: ['main']
+
+jobs:
+  test-invalid-references:
+    runs-on: ubuntu-latest
+    # yamllint disable rule:line-length
+    steps:
+      # This should be fixed to use a valid branch (main instead of master)
+      - uses: actions/checkout@61b9e3751b92087fd0b06925ba6dd6314e06f089 # master
+
+      # This should be fixed to pin to SHA with version comment
+      - uses: actions/setup-python@0ae58361cdfd39e2950bed97a1e26aa20c3d8955 # v4
+
+      # This should be fixed to pin to SHA with version comment
+      - uses: actions/setup-node@5e21ff4d9bc1a8cf6de233a3057d20ec6b3fb69d # v3.8.1
+
+      # This has an invalid reference that should be fixed to default branch
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+
+      # This should be auto-fixed to latest version if auto-latest is enabled
+      - uses: actions/upload-artifact@82c141cc518b40d92cc801eee768e7aafc9c2fa2 # v2
+
+      # Valid SHA-pinned action (should not be changed)
+      - uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+        with:
+          egress-policy: audit
