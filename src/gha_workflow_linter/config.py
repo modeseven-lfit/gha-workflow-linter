@@ -167,6 +167,7 @@ class ConfigManager:
             "auto_fix": default_config.auto_fix,
             "auto_latest": default_config.auto_latest,
             "two_space_comments": default_config.two_space_comments,
+            "skip_actions": default_config.skip_actions,
             "network": {
                 "timeout_seconds": default_config.network.timeout_seconds,
                 "max_retries": default_config.network.max_retries,
@@ -211,6 +212,9 @@ auto_latest: {config_dict["auto_latest"]}
 
 # Use two spaces before inline comments when fixing
 two_space_comments: {config_dict["two_space_comments"]}
+
+# Skip scanning action.yaml/action.yml files
+skip_actions: {config_dict["skip_actions"]}
 
 # Network configuration
 network:

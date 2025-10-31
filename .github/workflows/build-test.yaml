@@ -8,6 +8,15 @@ name: 'Python Build/Test'
 # yamllint disable-line rule:truthy
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - '**'
+      - '!.github/**'
+      - '!.*'
+      - '!tox.ini'
   pull_request:
     types: [opened, reopened, edited, synchronize]
     branches:

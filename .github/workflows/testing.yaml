@@ -42,12 +42,12 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          repository: 'lfit/releng-reusable-workflows'
-          path: 'releng-reusable-workflows'
+          repository: 'lfreleng-actions/actions-template'
+          path: 'actions-template'
 
       - name: "Running local action: ${{ github.repository }}"
         uses: ./
         with:
-          path: 'releng-reusable-workflows'
+          path: 'actions-template'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
