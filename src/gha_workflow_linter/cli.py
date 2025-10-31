@@ -291,6 +291,11 @@ def lint(
         "--two-space-comments/--no-two-space-comments",
         help="Use two spaces before inline comments when fixing (default: disabled)",
     ),
+    skip_actions: bool = typer.Option(
+        False,
+        "--skip-actions/--no-skip-actions",
+        help="Skip scanning action.yaml/action.yml files (default: disabled, actions ARE scanned)",
+    ),
     _help: bool = typer.Option(
         False,
         "--help",
@@ -307,10 +312,11 @@ def lint(
     ),
 ) -> None:
     """
-    Scan GitHub Actions workflows for invalid action and workflow calls.
+    Scan GitHub Actions workflows and action definitions for invalid action and workflow calls.
 
-    This tool scans for .github/workflows directories and validates that all
-    'uses' statements reference valid repositories, branches, tags, or commit SHAs.
+    This tool scans for .github/workflows directories and action.yaml/action.yml files,
+    validating that all 'uses' statements reference valid repositories, branches, tags,
+    or commit SHAs.
 
     Validation Methods:
         github-api: Uses GitHub GraphQL API (requires token, faster)
@@ -413,6 +419,7 @@ def lint(
             auto_fix=auto_fix,
             auto_latest=auto_latest,
             two_space_comments=two_space_comments,
+            skip_actions=skip_actions,
         )
 
         # Apply CLI overrides to config
@@ -428,6 +435,7 @@ def lint(
         config.auto_fix = auto_fix
         config.auto_latest = auto_latest
         config.two_space_comments = two_space_comments
+        config.skip_actions = skip_actions
 
         # Apply validation method override if specified
         if validation_method is not None:

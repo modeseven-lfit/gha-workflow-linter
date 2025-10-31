@@ -379,6 +379,9 @@ class Config(BaseModel):  # type: ignore[misc]
     two_space_comments: bool = Field(
         False, description="Use two spaces before inline comments"
     )
+    skip_actions: bool = Field(
+        False, description="Skip scanning action.yaml/action.yml files"
+    )
 
     network: NetworkConfig = Field(
         default_factory=lambda: NetworkConfig(),
@@ -444,6 +447,9 @@ class CLIOptions(BaseModel):  # type: ignore[misc]
     )
     two_space_comments: bool = Field(
         False, description="Use two spaces before inline comments"
+    )
+    skip_actions: bool = Field(
+        False, description="Skip scanning action.yaml/action.yml files"
     )
 
     @field_validator("output_format")  # type: ignore[misc]

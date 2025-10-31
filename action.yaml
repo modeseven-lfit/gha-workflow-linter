@@ -41,6 +41,10 @@ inputs:
     description: "Require action calls to be pinned to commit SHAs"
     required: false
     default: "true"
+  skip-actions:
+    description: "Skip scanning action.yaml/action.yml files"
+    required: false
+    default: "false"
   validation-method:
     description: "Validation method (github-api, git, or auto-detect)"
     required: false
@@ -133,6 +137,10 @@ runs:
 
         if [[ "${{ inputs.require-pinned-sha }}" == "false" ]]; then
           args+=(--no-require-pinned-sha)
+        fi
+
+        if [[ "${{ inputs.skip-actions }}" == "true" ]]; then
+          args+=(--skip-actions)
         fi
 
         if [[ -n "${{ inputs.validation-method }}" ]]; then

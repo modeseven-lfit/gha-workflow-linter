@@ -44,7 +44,7 @@ class WorkflowScanner:
         task_id: TaskID | None = None,
     ) -> Iterator[Path]:
         """
-        Find all GitHub workflow files in directory tree.
+        Find all GitHub workflow files and action definition files in directory tree.
 
         Args:
             root_path: Root directory to scan
@@ -52,9 +52,9 @@ class WorkflowScanner:
             task_id: Optional task ID for progress updates
 
         Yields:
-            Path objects for workflow files
+            Path objects for workflow files and action definition files
         """
-        self.logger.info(f"Scanning for workflows in: {root_path}")
+        self.logger.info(f"Scanning for workflows and actions in: {root_path}")
 
         # Look for .github/workflows directories
         workflow_dirs = self._find_workflow_directories(root_path)
@@ -83,7 +83,25 @@ class WorkflowScanner:
                     self.logger.debug(f"Found workflow file: {workflow_file}")
                     yield workflow_file
 
-        self.logger.info(f"Found {total_files} workflow files")
+        # Look for action.yaml/action.yml files (unless skip_actions is enabled)
+        if not self.config.skip_actions:
+            action_files = self._find_action_files(root_path)
+            for action_file in action_files:
+                if self._should_exclude_file(action_file):
+                    self.logger.debug(f"Excluding file: {action_file}")
+                    continue
+
+                total_files += 1
+                if progress and task_id:
+                    progress.update(
+                        task_id,
+                        description=f"Scanning {action_file.name}...",
+                    )
+
+                self.logger.debug(f"Found action file: {action_file}")
+                yield action_file
+
+        self.logger.info(f"Found {total_files} workflow and action files")
 
     def _find_workflow_directories(self, root_path: Path) -> set[Path]:
         """
@@ -113,6 +131,35 @@ class WorkflowScanner:
             self.logger.warning(f"Error scanning directory {root_path}: {e}")
 
         return workflow_dirs
+
+    def _find_action_files(self, root_path: Path) -> Iterator[Path]:
+        """
+        Find all action.yaml and action.yml files in directory tree.
+
+        Args:
+            root_path: Root directory to scan
+
+        Yields:
+            Path objects for action definition files
+        """
+        self.logger.debug(f"Scanning for action definition files in: {root_path}")
+
+        # Search for action.yaml and action.yml files recursively
+        try:
+            for ext in self.config.scan_extensions:
+                # Look for action.yaml or action.yml (depending on extension)
+                action_name = f"action{ext}"
+
+                # Find recursively (rglob includes root directory)
+                for action_file in root_path.rglob(action_name):
+                    if action_file.is_file():
+                        # Skip if it's in .github/workflows (those are workflow files, not actions)
+                        if ".github/workflows" not in str(action_file):
+                            self.logger.debug(f"Found action file: {action_file}")
+                            yield action_file
+
+        except (PermissionError, OSError) as e:
+            self.logger.warning(f"Error scanning for action files in {root_path}: {e}")
 
     def _should_exclude_file(self, file_path: Path) -> bool:
         """
