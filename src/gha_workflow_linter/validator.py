@@ -551,10 +551,10 @@ class ActionCallValidator:
                     and action_call.reference_type != ReferenceType.COMMIT_SHA
                 ):
                     # Add error for each occurrence of this unpinned call
-                    for file_path, _ in call_locations[call_key]:
+                    for file_path, actual_action_call in call_locations[call_key]:
                         error = ValidationError(
                             file_path=file_path,
-                            action_call=action_call,
+                            action_call=actual_action_call,
                             result=ValidationResult.NOT_PINNED_TO_SHA,
                             error_message=self._get_error_message(
                                 ValidationResult.NOT_PINNED_TO_SHA
