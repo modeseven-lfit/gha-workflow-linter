@@ -525,15 +525,21 @@ class AutoFixer:
         # Extract indentation and YAML structure from original line
         original_line = action_call.raw_line
 
-        # Match the full structure: indentation + "- " + "uses: "
+        # Match the full structure with optional dash
+        # First try: indentation + "- " + "uses: "
         structure_match = re.match(r'^(\s*-\s*uses:\s*)', original_line)
         if structure_match:
             prefix = structure_match.group(1)
         else:
-            # Fallback: just extract indentation and assume basic structure
-            indent_match = re.match(r'^(\s*)', original_line)
-            indent = indent_match.group(1) if indent_match else ""
-            prefix = f"{indent}- uses: "
+            # Second try: indentation + "uses: " (no dash)
+            structure_match = re.match(r'^(\s*uses:\s*)', original_line)
+            if structure_match:
+                prefix = structure_match.group(1)
+            else:
+                # Fallback: extract indentation and add basic "uses: "
+                indent_match = re.match(r'^(\s*)', original_line)
+                indent = indent_match.group(1) if indent_match else ""
+                prefix = f"{indent}uses: "
 
         # Build the new action reference
         new_action_ref = f"{action_call.organization}/{action_call.repository}@{new_ref}"
