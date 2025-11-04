@@ -9,6 +9,6 @@
   language: python
   files: '^\.github/workflows/.*\.ya?ml$'
   pass_filenames: false
-  args: [lint, ., --quiet]
+  args: [lint, .]
   always_run: false
   require_serial: true

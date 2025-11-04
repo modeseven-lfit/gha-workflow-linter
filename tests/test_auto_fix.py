@@ -1406,3 +1406,276 @@ jobs:
                 )
                 assert "Auto-fixed issues in 3 file(s)" in result.stdout
                 assert result.exit_code == 1
+
+
+class TestYAMLStructurePreservation:
+    """Test that auto-fix preserves YAML structure (indentation and dashes)."""
+
+    @pytest.fixture
+    def config_with_pinned_sha(self) -> Config:
+        """Config with require_pinned_sha=True."""
+        return Config(
+            log_level=LogLevel.DEBUG,
+            parallel_workers=2,
+            require_pinned_sha=True,
+            auto_fix=True,
+            auto_latest=True,
+            two_space_comments=True,
+            validation_method=ValidationMethod.GIT,
+            network=NetworkConfig(
+                timeout_seconds=10,
+                max_retries=2,
+                retry_delay_seconds=1.0,
+                rate_limit_delay_seconds=0.1,
+            ),
+        )
+
+    def test_build_fixed_line_preserves_dash_prefix(
+        self, config_with_pinned_sha: Config
+    ) -> None:
+        """Test that _build_fixed_line preserves dash prefix when present."""
+        auto_fixer = AutoFixer(config_with_pinned_sha)
+
+        # Test case 1: Line WITH dash prefix (workflow style)
+        action_call_with_dash = ActionCall(
+            raw_line="      - uses: astral-sh/setup-uv@0f33eebc8badfbd026c0aa235815a1f99c93ce1f  # v5.2.0",
+            line_number=10,
+            organization="astral-sh",
+            repository="setup-uv",
+            reference="0f33eebc8badfbd026c0aa235815a1f99c93ce1f",
+            reference_type=ReferenceType.COMMIT_SHA,
+            call_type=ActionCallType.ACTION,
+            comment="v5.2.0",
+        )
+
+        fixed_line = auto_fixer._build_fixed_line(
+            action_call_with_dash,
+            "85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41",
+            "v7.1.2",
+        )
+
+        # Should preserve the dash and indentation
+        assert fixed_line.startswith("      - uses: ")
+        assert (
+            "astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41"
+            in fixed_line
+        )
+        assert "# v7.1.2" in fixed_line
+        # Should NOT have double dash
+        assert "- - uses:" not in fixed_line
+
+    def test_build_fixed_line_preserves_no_dash_prefix(
+        self, config_with_pinned_sha: Config
+    ) -> None:
+        """Test that _build_fixed_line does not add dash when not present."""
+        auto_fixer = AutoFixer(config_with_pinned_sha)
+
+        # Test case 2: Line WITHOUT dash prefix (composite action style)
+        action_call_without_dash = ActionCall(
+            raw_line="      uses: astral-sh/setup-uv@0f33eebc8badfbd026c0aa235815a1f99c93ce1f  # v5.2.0",
+            line_number=10,
+            organization="astral-sh",
+            repository="setup-uv",
+            reference="0f33eebc8badfbd026c0aa235815a1f99c93ce1f",
+            reference_type=ReferenceType.COMMIT_SHA,
+            call_type=ActionCallType.ACTION,
+            comment="v5.2.0",
+        )
+
+        fixed_line = auto_fixer._build_fixed_line(
+            action_call_without_dash,
+            "85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41",
+            "v7.1.2",
+        )
+
+        # Should NOT add a dash when original doesn't have one
+        assert fixed_line.startswith("      uses: ")
+        assert not fixed_line.startswith("      - uses: ")
+        assert (
+            "astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41"
+            in fixed_line
+        )
+        assert "# v7.1.2" in fixed_line
+
+    def test_build_fixed_line_preserves_various_indentation(
+        self, config_with_pinned_sha: Config
+    ) -> None:
+        """Test that _build_fixed_line preserves different indentation levels."""
+        auto_fixer = AutoFixer(config_with_pinned_sha)
+
+        test_cases = [
+            # (original_line, expected_prefix)
+            ("  - uses: actions/checkout@v4", "  - uses: "),
+            ("    - uses: actions/checkout@v4", "    - uses: "),
+            ("        - uses: actions/checkout@v4", "        - uses: "),
+            ("  uses: actions/checkout@v4", "  uses: "),
+            ("    uses: actions/checkout@v4", "    uses: "),
+            ("        uses: actions/checkout@v4", "        uses: "),
+        ]
+
+        for original_line, expected_prefix in test_cases:
+            action_call = ActionCall(
+                raw_line=original_line,
+                line_number=1,
+                organization="actions",
+                repository="checkout",
+                reference="v4",
+                reference_type=ReferenceType.TAG,
+                call_type=ActionCallType.ACTION,
+                comment=None,
+            )
+
+            fixed_line = auto_fixer._build_fixed_line(
+                action_call,
+                "abc123def456",
+                "v5.0.0",
+            )
+
+            assert fixed_line.startswith(expected_prefix), (
+                f"Expected '{expected_prefix}' but got '{fixed_line[: len(expected_prefix)]}' "
+                f"for original line: '{original_line}'"
+            )
+
+    @pytest.mark.asyncio
+    async def test_composite_action_format_preservation(
+        self, tmp_path: Path, config_with_pinned_sha: Config
+    ) -> None:
+        """Test that composite action.yaml format is preserved during auto-fix."""
+        # Create a composite action.yaml with the specific format
+        action_file = tmp_path / "action.yaml"
+        action_file.write_text("""name: Test Action
+description: Test composite action
+
+runs:
+  using: "composite"
+  steps:
+    - name: "Setup Python"
+      uses: actions/setup-python@v5.0.0
+      with:
+        python-version: "3.11"
+
+    - name: "Install uv"
+      uses: astral-sh/setup-uv@0f33eebc8badfbd026c0aa235815a1f99c93ce1f  # v5.2.0
+      with:
+        enable-cache: true
+""")
+
+        validation_error = ValidationError(
+            file_path=action_file,
+            action_call=ActionCall(
+                raw_line="      uses: astral-sh/setup-uv@0f33eebc8badfbd026c0aa235815a1f99c93ce1f  # v5.2.0",
+                line_number=12,
+                organization="astral-sh",
+                repository="setup-uv",
+                reference="0f33eebc8badfbd026c0aa235815a1f99c93ce1f",
+                reference_type=ReferenceType.COMMIT_SHA,
+                call_type=ActionCallType.ACTION,
+                comment="v5.2.0",
+            ),
+            result=ValidationResult.NOT_PINNED_TO_SHA,
+            error_message="Outdated SHA",
+        )
+
+        async with AutoFixer(config_with_pinned_sha) as auto_fixer:
+            with patch.object(
+                auto_fixer,
+                "_get_commit_sha_for_reference",
+                return_value={
+                    "sha": "85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41"
+                },
+            ):
+                with patch.object(
+                    auto_fixer,
+                    "_get_latest_release_or_tag",
+                    return_value="v7.1.2",
+                ):
+                    fixed_files = await auto_fixer.fix_validation_errors(
+                        [validation_error]
+                    )
+
+        # Verify the file was fixed
+        assert action_file in fixed_files
+
+        # Read the fixed content
+        fixed_content = action_file.read_text()
+
+        # The line should be updated WITHOUT adding a dash
+        assert (
+            "      uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41"
+            in fixed_content
+        )
+        # Should NOT have a dash added
+        assert (
+            "      - uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41"
+            not in fixed_content
+        )
+        # Comment should be updated
+        assert "# v7.1.2" in fixed_content or "# v5.2.0" in fixed_content
+
+    @pytest.mark.asyncio
+    async def test_workflow_format_preservation(
+        self, tmp_path: Path, config_with_pinned_sha: Config
+    ) -> None:
+        """Test that workflow YAML format with dashes is preserved during auto-fix."""
+        # Create a workflow file with dash format
+        workflow_dir = tmp_path / ".github" / "workflows"
+        workflow_dir.mkdir(parents=True)
+        workflow_file = workflow_dir / "test.yaml"
+        workflow_file.write_text("""name: Test Workflow
+
+on: [push]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+""")
+
+        validation_error = ValidationError(
+            file_path=workflow_file,
+            action_call=ActionCall(
+                raw_line="      - uses: actions/checkout@v4",
+                line_number=9,
+                organization="actions",
+                repository="checkout",
+                reference="v4",
+                reference_type=ReferenceType.TAG,
+                call_type=ActionCallType.ACTION,
+                comment=None,
+            ),
+            result=ValidationResult.NOT_PINNED_TO_SHA,
+            error_message="Not pinned to SHA",
+        )
+
+        async with AutoFixer(config_with_pinned_sha) as auto_fixer:
+            with patch.object(
+                auto_fixer,
+                "_get_commit_sha_for_reference",
+                return_value={
+                    "sha": "abc123def456789abc123def456789abc123def4"
+                },
+            ):
+                with patch.object(
+                    auto_fixer,
+                    "_get_latest_release_or_tag",
+                    return_value="v5.0.0",
+                ):
+                    fixed_files = await auto_fixer.fix_validation_errors(
+                        [validation_error]
+                    )
+
+        # Verify the file was fixed
+        assert workflow_file in fixed_files
+
+        # Read the fixed content
+        fixed_content = workflow_file.read_text()
+
+        # The line should still have a single dash
+        assert (
+            "      - uses: actions/checkout@abc123def456789abc123def456789abc123def4"
+            in fixed_content
+        )
+        # Should NOT have double dash
+        assert "      - - uses:" not in fixed_content
