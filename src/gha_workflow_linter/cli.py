@@ -995,8 +995,8 @@ def output_text_results(
                 action_ref += f"  {error.action_call.comment}"
 
             console.print(
-                f"❌ Invalid action call in workflow: {relative_path}\n"
-                f"line {error.action_call.line_number}:\n{action_ref}"
+                f"❌ Invalid action call in workflow: {relative_path} [line {error.action_call.line_number}]\n"
+                f"{action_ref}"
             )
 
 

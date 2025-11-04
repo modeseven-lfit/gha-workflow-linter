@@ -137,6 +137,7 @@ class AutoFixer:
         default_branch = repo_info.get("default_branch", "main") if repo_info else "main"
 
         # Determine the target reference
+        original_ref = action_call.reference
         if self.config.auto_latest:
             # Use latest release/tag if available
             target_ref = await self._get_latest_release_or_tag(repo_key)
@@ -172,6 +173,9 @@ class AutoFixer:
                     version_comment = target_ref
                 elif target_ref != default_branch:
                     version_comment = target_ref
+                elif original_ref != default_branch and validation_result == ValidationResult.NOT_PINNED_TO_SHA:
+                    # Preserve original branch name when falling back to default branch
+                    version_comment = original_ref
             else:
                 # Without access to resolve SHAs, we can't fix NOT_PINNED_TO_SHA issues
                 if validation_result == ValidationResult.NOT_PINNED_TO_SHA:
