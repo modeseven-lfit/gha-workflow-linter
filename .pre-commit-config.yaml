@@ -3,7 +3,11 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 ci:
-  skip: [pytest, gha-workflow-linter]
+  # pre-commit.ci sandbox prevents network calls; aislop runs engines
+  # that can call the network at scan time, so it cannot run there
+  # either. gha-workflow-linter validates action calls over the
+  # network; pytest runs the full suite.
+  skip: [pytest, gha-workflow-linter, aislop]
   autofix_commit_msg: |
     Chore: pre-commit autofixes
 
@@ -54,10 +58,10 @@ repos:
     rev: 01a675ea018f2fb714478a5ffb83fcea8374bb06  # frozen: v0.15.21
     hooks:
       - id: ruff
-        files: ^(scripts|tests|custom_components)/.+\.py$
+        files: ^(src|scripts|tests)/.+\.py$
         args: [--fix, --exit-non-zero-on-fix]
       - id: ruff-format
-        files: ^(scripts|tests|custom_components)/.+\.py$
+        files: ^(src|scripts|tests)/.+\.py$
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: 41e691678310dfd3833f7ab4e180ddb014310356  # frozen: v2.3.0
@@ -72,6 +76,13 @@ repos:
           - rich>=13.9.4
           - httpx>=0.28.1
           - typing-extensions>=4.12.0
+
+  # Requires a mirror, primary repo lacks .pre-commit-hooks.yaml
+  - repo: https://github.com/DetachHead/basedpyright-prek-mirror
+    rev: d55eabd2531b4f4a4c49c30fba627ce3a636ab79  # frozen: 1.39.9
+    hooks:
+      - id: basedpyright
+        files: ^src/.+\.py$
 
   - repo: https://github.com/btford/write-good
     rev: ab66ce10136dfad5146e69e70f82a3efac8842c1 # frozen: v1.0.8
@@ -107,6 +118,22 @@ repos:
     rev: 2ccb47ff45ad361a21071a7eedda4c37e6ae8c5a  # frozen: v2.4.2
     hooks:
       - id: codespell
+
+  # Catch AI slop developer-side before it reaches a pull request.
+  # Runs the full-repository quality gate, scored against
+  # .aislop/config.yml. A local hook installing the published npm
+  # package: the scanaislop/aislop git repository does not ship the
+  # built dist/, so its bundled pre-commit hook cannot install. Bump
+  # the pinned version here manually when new aislop releases ship.
+  - repo: local
+    hooks:
+      - id: aislop
+        name: aislop
+        entry: aislop ci --human
+        language: node
+        additional_dependencies: ["aislop@0.13.1"]
+        pass_filenames: false
+        always_run: true
 
   - repo: https://github.com/python-jsonschema/check-jsonschema
     rev: 1a4bb160cab6417b3045e1b37b6b72449243e658  # frozen: 0.37.4

@@ -123,7 +123,6 @@ class ActionCallPatterns:
         if cls.VERSION_TAG_PATTERN.match(reference):
             return ReferenceType.TAG
 
-        # Check for other common tag patterns
         if reference.startswith("v") and any(c.isdigit() for c in reference):
             return ReferenceType.TAG
 

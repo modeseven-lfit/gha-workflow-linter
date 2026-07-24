@@ -229,7 +229,6 @@ class ValidationCache:
             with open(self.config.cache_file_path, encoding="utf-8") as f:
                 cache_data = json.load(f)
 
-            # Load repository redirects
             redirects_data = cache_data.get("redirects", {})
             for old_repo, redirect_info in redirects_data.items():
                 try:
@@ -241,7 +240,6 @@ class ValidationCache:
                         f"Failed to load redirect for {old_repo}: {e}"
                     )
 
-            # Load latest versions
             latest_versions_data = cache_data.get("latest_versions", {})
             for repo, version_info in latest_versions_data.items():
                 try:
@@ -264,7 +262,10 @@ class ValidationCache:
             # returning the current tool version, which made the
             # version-mismatch branch in those introspection APIs dead
             # code).
-            cache_version = cache_data.get("_metadata", {}).get("version")
+            metadata = cache_data.get("_metadata")
+            cache_version = (
+                metadata.get("version") if isinstance(metadata, dict) else None
+            )
             self._cache_version = cache_version or __version__
             if cache_version != __version__:
                 if cache_version:
@@ -472,7 +473,6 @@ class ValidationCache:
         if len(self._cache) <= self.config.max_cache_size:
             return
 
-        # Remove oldest entries first
         sorted_entries = sorted(
             self._cache.items(), key=lambda x: x[1].timestamp
         )
@@ -513,7 +513,6 @@ class ValidationCache:
 
         if entry.is_expired(self.config.default_ttl_seconds):
             self.stats.expired += 1
-            # Remove expired entry
             del self._cache[cache_key]
             return None
 
@@ -628,7 +627,6 @@ class ValidationCache:
                 error_message,
             )
 
-        # Save cache after batch update
         self._save_cache()
 
     def purge(self) -> int:
@@ -647,7 +645,6 @@ class ValidationCache:
         self._cache.clear()
         self.stats.purges += 1
 
-        # Remove cache file from disk
         self._purge_cache_file()
 
         if purged_count > 0:
@@ -761,7 +758,6 @@ class ValidationCache:
 
         self._load_cache()
 
-        # Check for version mismatch first
         if self._cache_version != __version__:
             return {
                 "suspicious": True,

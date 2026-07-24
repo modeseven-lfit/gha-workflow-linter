@@ -8,25 +8,19 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from contextlib import nullcontext
-from datetime import datetime, timedelta, timezone
 import logging
 from pathlib import Path
 import re
-import time
 from typing import Any
 
 import httpx
 from rich.live import Live
 from rich.text import Text
 
+from .auto_fix_versions import _VersionResolutionMixin
 from .cache import ValidationCache
 from .console import console as _shared_console
-from .exceptions import GitError
-from .git_validator import (
-    GitValidationClient,
-    _get_remote_branches,
-    _get_remote_tags,
-)
+from .git_validator import GitValidationClient
 from .github_api import GitHubGraphQLClient
 from .models import (
     ActionCall,
@@ -36,175 +30,11 @@ from .models import (
     ValidationMethod,
     ValidationResult,
 )
-from .paths import base_repository
 from .patterns import ActionCallPatterns
 from .utils import has_test_comment
 
 
-def _parse_version(tag: str) -> tuple[int, int, int]:
-    """Extract major, minor, patch from a version tag for sorting.
-
-    Args:
-        tag: A version tag (e.g., 'v4.31.0', 'v4.31', '1.2.3', '0.9')
-
-    Returns:
-        A tuple of (major, minor, patch) as integers
-
-    Raises:
-        ValueError: If version segments contain non-numeric characters
-    """
-    # Strip optional 'v' prefix and any pre-release/metadata suffixes
-    version = tag.lstrip("v").split("-")[0].split("+")[0]
-    parts = version.split(".")
-
-    try:
-        major = int(parts[0]) if len(parts) > 0 else 0
-        minor = int(parts[1]) if len(parts) > 1 else 0
-        patch = int(parts[2]) if len(parts) > 2 else 0
-    except ValueError as e:
-        raise ValueError(
-            f"Invalid version tag '{tag}': version segments must be numeric. "
-            f"Found non-numeric value in '{version}'"
-        ) from e
-
-    return (major, minor, patch)
-
-
-def _get_version_specificity(tag: str) -> int:
-    """
-    Get the specificity level of a version tag.
-
-    Returns:
-        3 for full semver (v1.2.3), 2 for major.minor (v1.2), 1 for major only (v1)
-
-    This helps prefer v8.0.0 over v8 when both point to the same SHA.
-    """
-    version = tag.lstrip("v").split("-")[0].split("+")[0]
-    parts = version.split(".")
-    return len([p for p in parts if p])
-
-
-def _find_most_specific_version_tag(
-    tag: str, sha: str, all_tags: list[tuple[str, str]]
-) -> str:
-    """
-    Find the most specific semantic version tag for a given SHA.
-
-    For example, if we get 'v8' but 'v8.0.0' also points to the same SHA,
-    return 'v8.0.0' as it's more specific.
-
-    Args:
-        tag: The tag we found (e.g., 'v8')
-        sha: The commit SHA
-        all_tags: List of (tag_name, sha) tuples from the repository
-
-    Returns:
-        The most specific version tag pointing to the same SHA
-    """
-    # Find all tags pointing to the same SHA
-    matching_tags = [t for t, s in all_tags if s == sha]
-
-    if not matching_tags:
-        return tag
-
-    try:
-        base_version = _parse_version(tag)
-    except ValueError:
-        return tag
-
-    # Find all tags with the same base version
-    same_version_tags = []
-    for t in matching_tags:
-        try:
-            if _parse_version(t) == base_version:
-                same_version_tags.append(t)
-        except ValueError:
-            continue
-
-    if not same_version_tags:
-        return tag
-
-    # Sort by specificity (most specific first)
-    sorted_by_specificity = sorted(
-        same_version_tags, key=_get_version_specificity, reverse=True
-    )
-
-    return sorted_by_specificity[0]
-
-
-def _parse_iso_datetime(value: str | None) -> datetime | None:
-    """Parse an ISO-8601 timestamp into a timezone-aware ``datetime``.
-
-    GitHub returns timestamps such as ``2026-01-02T03:04:05Z``. The
-    trailing ``Z`` is normalised to ``+00:00`` so ``fromisoformat`` can
-    parse it on all supported Python versions.
-
-    Args:
-        value: An ISO-8601 timestamp string, or ``None``.
-
-    Returns:
-        A timezone-aware ``datetime`` (UTC if no offset was provided), or
-        ``None`` if the value is missing or cannot be parsed.
-    """
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def _select_version_with_cooldown(
-    candidates: list[tuple[str, str, datetime | None]],
-    cooldown_days: int,
-    now: datetime | None = None,
-) -> tuple[str, str] | None:
-    """Pick the newest eligible ``(tag, sha)`` honouring a cooldown window.
-
-    The cooldown enforces a Dependabot-style policy: a release must have
-    been available for at least ``cooldown_days`` days before it is
-    eligible to be selected. This protects against deploying actions that
-    were recently retracted, superseded, or compromised by a supply-chain
-    attack.
-
-    Args:
-        candidates: ``(tag, sha, published)`` tuples ordered newest-first.
-            ``published`` may be ``None`` when a release date is unknown.
-        cooldown_days: Minimum age in days. Values ``<= 0`` disable the
-            cooldown and simply return the newest candidate.
-        now: Reference time (defaults to the current UTC time); primarily
-            an injection point for tests.
-
-    Returns:
-        The first eligible ``(tag, sha)`` tuple, or ``None`` when no
-        candidate satisfies the cooldown. When the cooldown is active and
-        a candidate's release date is unknown, it is skipped because its
-        age cannot be verified.
-    """
-    if not candidates:
-        return None
-
-    if cooldown_days <= 0:
-        tag, sha, _ = candidates[0]
-        return (tag, sha)
-
-    reference = now or datetime.now(timezone.utc)
-    cutoff = reference - timedelta(days=cooldown_days)
-
-    for tag, sha, published in candidates:
-        if published is None:
-            # Cannot verify the release age; skip under an active cooldown.
-            continue
-        if published <= cutoff:
-            return (tag, sha)
-
-    return None
-
-
-class AutoFixer:
+class AutoFixer(_VersionResolutionMixin):
     """Auto-fixes GitHub Actions workflow issues."""
 
     def __init__(
@@ -1104,55 +934,17 @@ class AutoFixer:
         Returns:
             Dictionary with 'fixed_line' and optional redirect info, or None if couldn't be fixed
         """
-        # For actions with paths (e.g., github/codeql-action/init), we need to use
-        # the base repository for API calls but preserve the full path in the output
         repo_key = f"{action_call.organization}/{action_call.repository}"
         base_repo_key = self._get_base_repository(repo_key)
 
         # Check if repository has been redirected/moved
-        new_base_repo = await self._detect_repository_redirect(base_repo_key)
-        redirect_info = None
-        if new_base_repo:
-            # Repository has moved - update the repo key
-            # Preserve any path component from original
-            if len(repo_key.split("/")) > 2:
-                # Has path component, append it to new base
-                path_component = "/".join(repo_key.split("/")[2:])
-                repo_key = f"{new_base_repo}/{path_component}"
-            else:
-                repo_key = new_base_repo
-            base_repo_key = new_base_repo
-            self.logger.debug(
-                f"Using redirected repository: {action_call.organization}/{action_call.repository} -> {repo_key}"
-            )
-
-            # Track redirect for display and statistics
-            old_repo = f"{action_call.organization}/{action_call.repository}"
-
-            # Track unique redirected actions
-            self._redirects_found.add(old_repo)
-
-            if old_repo not in self._redirects_seen and live:
-                self._redirects_seen.add(old_repo)
-                # Show "Action has moved" message in orange
-                moved_msg = Text()
-                moved_msg.append("  Action has moved: ", style="dim")
-                moved_msg.append(old_repo, style="orange3")
-                live.update(moved_msg)
-                await asyncio.sleep(
-                    0.5
-                )  # Brief pause so user can see the message
-
-                # Show "New location" message in green
-                new_location_msg = Text()
-                new_location_msg.append("  New location: ", style="dim")
-                new_location_msg.append(new_base_repo, style="green")
-                live.update(new_location_msg)
-                await asyncio.sleep(
-                    0.5
-                )  # Brief pause so user can see the message
-
-            redirect_info = {"old_repo": old_repo, "new_repo": new_base_repo}
+        (
+            repo_key,
+            base_repo_key,
+            redirect_info,
+        ) = await self._resolve_redirect_for_fix(
+            action_call, repo_key, base_repo_key, live
+        )
 
         # Get repository information (if API available) - use base repo
         repo_info = await self._get_repository_info(base_repo_key)
@@ -1162,75 +954,30 @@ class AutoFixer:
 
         # Determine the target reference
         original_ref = action_call.reference
-        if self.config.auto_latest:
-            # Use latest release/tag if available - use base repo
-            target_ref = await self._get_latest_release_or_tag(base_repo_key)
-            if not target_ref:
-                # Fall back to default branch
-                target_ref = default_branch
-        # Try to fix the current reference based on validation error type
-        elif validation_result == ValidationResult.INVALID_REFERENCE:
-            # Invalid reference, try to find a valid one - use base repo
-            target_ref = await self._find_valid_reference(
-                base_repo_key, action_call.reference
+        target_ref = await self._determine_target_ref(
+            action_call, validation_result, base_repo_key, default_branch
+        )
+
+        # Resolve the target SHA and version comment (pinning as configured)
+        (
+            target_sha,
+            version_comment,
+            cannot_pin,
+        ) = await self._resolve_sha_and_comment(
+            action_call,
+            validation_result,
+            base_repo_key,
+            target_ref,
+            original_ref,
+            default_branch,
+        )
+        if cannot_pin:
+            # Without access to resolve SHAs, we can't fix NOT_PINNED_TO_SHA.
+            return (
+                {"fixed_line": None, "redirect_info": redirect_info}
+                if redirect_info
+                else None
             )
-            if not target_ref:
-                target_ref = await self._get_fallback_reference(
-                    base_repo_key, action_call.reference
-                )
-
-            if not target_ref:
-                # Fall back to default branch
-                target_ref = default_branch
-        else:
-            # Keep the current reference for NOT_PINNED_TO_SHA cases
-            target_ref = action_call.reference
-
-        # Get commit SHA for the target reference if we need to pin to SHA
-        target_sha = None
-        version_comment = None
-
-        if (
-            self.config.require_pinned_sha
-            or action_call.reference_type != ReferenceType.COMMIT_SHA
-        ):
-            # Try to get SHA (API or Git) - use base repo
-            sha_info = await self._get_commit_sha_for_reference(
-                base_repo_key, target_ref
-            )
-            if sha_info:
-                target_sha = sha_info["sha"]
-                # If target_ref looks like a version tag, use it in comment
-                if (
-                    ActionCallPatterns.VERSION_TAG_PATTERN.match(target_ref)
-                    or target_ref != default_branch
-                ):
-                    version_comment = target_ref
-                elif (
-                    original_ref != default_branch
-                    and validation_result == ValidationResult.NOT_PINNED_TO_SHA
-                ):
-                    # Preserve original branch name when falling back to default branch
-                    version_comment = original_ref
-            # Without access to resolve SHAs, we can't fix NOT_PINNED_TO_SHA issues
-            elif validation_result == ValidationResult.NOT_PINNED_TO_SHA:
-                self.logger.debug(
-                    f"Cannot resolve SHA for {base_repo_key}@{target_ref}, skipping SHA pinning"
-                )
-                return (
-                    {"fixed_line": None, "redirect_info": redirect_info}
-                    if redirect_info
-                    else None
-                )
-
-            # If we couldn't get SHA but we have a target_ref that's a version tag, still set the comment
-            # This handles cases where SHA resolution fails but we're still updating the version
-            if (
-                not target_sha
-                and target_ref
-                and ActionCallPatterns.VERSION_TAG_PATTERN.match(target_ref)
-            ):
-                version_comment = target_ref
 
         # Check if we actually have a change to make
         final_ref = target_sha or target_ref
@@ -1268,1219 +1015,164 @@ class AutoFixer:
 
         return {"fixed_line": fixed_line, "redirect_info": redirect_info}
 
-    async def _get_repository_info(
-        self, repo_key: str
-    ) -> dict[str, Any] | None:
-        """Get repository information using the configured validation method."""
-        # Use API if we're in GitHub API validation mode
-        if (
-            self.config.validation_method == ValidationMethod.GITHUB_API
-            and self._http_client
-        ):
-            try:
-                response = await self._http_client.get(
-                    f"https://api.github.com/repos/{repo_key}"
-                )
-                response.raise_for_status()
-                return response.json()  # type: ignore[no-any-return]
-            except Exception as e:
-                self.logger.debug(
-                    f"Failed to get repository info via API for {repo_key}: {e}"
-                )
-
-        # Use Git operations if we're in Git validation mode
-        if (
-            self.config.validation_method == ValidationMethod.GIT
-            and self._git_client
-        ):
-            try:
-                url = f"https://github.com/{repo_key}.git"
-                branches = _get_remote_branches(url, self.config.git)
-
-                # Determine default branch from available branches
-                default_branch = "main"
-                if "main" in branches:
-                    default_branch = "main"
-                elif "master" in branches:
-                    default_branch = "master"
-                elif branches:
-                    # Use the first branch if neither main nor master exists
-                    default_branch = sorted(branches)[0]
-
-                return {"default_branch": default_branch}
-            except GitError as e:
-                self.logger.debug(
-                    f"Failed to get repository info via Git for {repo_key}: {e}"
-                )
-
-        return None
-
-    async def _get_fallback_reference(  # noqa: PLR0911
-        self, repo_key: str, invalid_ref: str
-    ) -> str | None:
-        """Get fallback reference using Git operations or cached data."""
-        # First check cache for known valid references for this repository
-        cached_entry = self._cache.get(repo_key, "main")
-        if cached_entry and cached_entry.result == ValidationResult.VALID:
-            return "main"
-
-        cached_entry = self._cache.get(repo_key, "master")
-        if cached_entry and cached_entry.result == ValidationResult.VALID:
-            return "master"
-
-        # Try Git operations if we have the client
-        if self._git_client:
-            try:
-                url = f"https://github.com/{repo_key}.git"
-                branches = _get_remote_branches(url, self.config.git)
-
-                # Common fallbacks for invalid references
-                if invalid_ref == "master" and "main" in branches:
-                    return "main"
-                elif invalid_ref == "main" and "master" in branches:
-                    return "master"
-                elif invalid_ref.startswith("invalid"):
-                    for default_branch in ["main", "master"]:
-                        if default_branch in branches:
-                            return default_branch
-
-                # Try to find similar branch names
-                for branch in branches:
-                    if branch.endswith(invalid_ref) or invalid_ref in branch:
-                        return branch
-
-            except GitError as e:
-                self.logger.debug(f"Git fallback failed for {repo_key}: {e}")
-
-        # Final fallbacks without Git access
-        if invalid_ref == "master":
-            return "main"
-        elif invalid_ref == "main":
-            return "master"
-        elif invalid_ref.startswith("invalid"):
-            return "main"
-        return None
-
-    async def _get_latest_release_or_tag(self, repo_key: str) -> str | None:
-        """Get the latest release or tag for a repository."""
-        # Use API if we're in GitHub API validation mode
-        if (
-            self.config.validation_method == ValidationMethod.GITHUB_API
-            and self._http_client
-        ):
-            # Try to get latest release first
-            try:
-                response = await self._http_client.get(
-                    f"https://api.github.com/repos/{repo_key}/releases/latest"
-                )
-                if response.status_code == 200:
-                    release_data = response.json()
-                    return release_data.get("tag_name")  # type: ignore[no-any-return]
-            except Exception as e:
-                # A request failure or malformed-JSON error: fall back to the
-                # tags API below. (A non-200 status such as 404 -- normal for
-                # repos that only tag -- is not an error here: it simply skips
-                # the block above and falls through, since the response is not
-                # raised for status.)
-                self.logger.debug(
-                    f"Failed to get latest release via API for {repo_key}: {e}"
-                )
-
-            # Fall back to getting latest tag via API
-            try:
-                response = await self._http_client.get(
-                    f"https://api.github.com/repos/{repo_key}/tags?per_page=1"
-                )
-                response.raise_for_status()
-                tags = response.json()
-                if tags:
-                    return tags[0]["name"]  # type: ignore[no-any-return]
-            except Exception as e:
-                self.logger.debug(
-                    f"Failed to get latest tag via API for {repo_key}: {e}"
-                )
-
-        # Use Git operations if we're in Git validation mode
-        if (
-            self.config.validation_method == ValidationMethod.GIT
-            and self._git_client
-        ):
-            try:
-                url = f"https://github.com/{repo_key}.git"
-                git_tags = _get_remote_tags(url, self.config.git)
-
-                if git_tags:
-                    # Convert to sorted list (Git ls-remote doesn't guarantee order)
-                    tag_list = sorted(git_tags, reverse=True)
-
-                    # Try to find semantic version tags first
-                    version_tags = [
-                        tag
-                        for tag in tag_list
-                        if ActionCallPatterns.VERSION_TAG_PATTERN.match(tag)
-                    ]
-                    if version_tags:
-                        return version_tags[0]
-
-                    # Otherwise return the first tag
-                    return tag_list[0]
-
-            except GitError as e:
-                self.logger.debug(
-                    f"Git tag enumeration failed for {repo_key}: {e}"
-                )
-
-        return None
-
-    async def _find_valid_reference(  # noqa: PLR0911
-        self, repo_key: str, invalid_ref: str
-    ) -> str | None:
-        """Try to find a valid reference similar to the invalid one."""
-        for potential_ref in [invalid_ref, "main", "master"]:
-            cached_entry = self._cache.get(repo_key, potential_ref)
-            if (
-                cached_entry
-                and cached_entry.result == ValidationResult.VALID
-                and potential_ref != invalid_ref
-            ):
-                return potential_ref
-
-        # Use API if we're in GitHub API validation mode
-        if (
-            self.config.validation_method == ValidationMethod.GITHUB_API
-            and self._http_client
-        ):
-            # For common patterns like "main" vs "master"
-            if invalid_ref in ["main", "master"]:
-                alternative = "master" if invalid_ref == "main" else "main"
-                if await self._check_reference_exists(repo_key, alternative):
-                    return alternative
-
-            # Try to find similar tags/branches
-            try:
-                # Check if it's a partial version match
-                if re.match(r"^v?\d+", invalid_ref):
-                    api_tags = await self._get_tags(repo_key, limit=50)
-                    for api_tag in api_tags:
-                        if api_tag["name"].startswith(invalid_ref):
-                            return api_tag["name"]  # type: ignore[no-any-return]
-
-                api_branches = await self._get_branches(repo_key, limit=20)
-                for api_branch in api_branches:
-                    if api_branch["name"] == invalid_ref or api_branch[
-                        "name"
-                    ].endswith(invalid_ref):
-                        return api_branch["name"]  # type: ignore[no-any-return]
-
-            except Exception as e:
-                self.logger.debug(
-                    f"Failed to find valid reference via API for {repo_key}@{invalid_ref}: {e}"
-                )
-
-        # Use Git operations if we're in Git validation mode
-        if (
-            self.config.validation_method == ValidationMethod.GIT
-            and self._git_client
-        ):
-            try:
-                url = f"https://github.com/{repo_key}.git"
-
-                git_branches = _get_remote_branches(url, self.config.git)
-                git_tags = _get_remote_tags(url, self.config.git)
-
-                # For common patterns like "main" vs "master"
-                if invalid_ref == "main" and "master" in git_branches:
-                    return "master"
-                elif invalid_ref == "master" and "main" in git_branches:
-                    return "main"
-
-                # Check if it's a partial version match in tags
-                if re.match(r"^v?\d+", invalid_ref):
-                    for git_tag in sorted(git_tags, reverse=True):
-                        if git_tag.startswith(invalid_ref):
-                            return git_tag
-
-                for git_branch in git_branches:
-                    if git_branch == invalid_ref or git_branch.endswith(
-                        invalid_ref
-                    ):
-                        return git_branch
-
-            except GitError as e:
-                self.logger.debug(
-                    f"Git reference search failed for {repo_key}@{invalid_ref}: {e}"
-                )
-
-        return None
-
-    async def _check_reference_exists(self, repo_key: str, ref: str) -> bool:
-        """Check if a specific reference exists."""
-        if (
-            self.config.validation_method == ValidationMethod.GITHUB_API
-            and self._http_client
-        ):
-            try:
-                response = await self._http_client.get(
-                    f"https://api.github.com/repos/{repo_key}/git/refs/heads/{ref}"
-                )
-                if response.status_code == 200:
-                    return True
-
-                response = await self._http_client.get(
-                    f"https://api.github.com/repos/{repo_key}/git/refs/tags/{ref}"
-                )
-                return bool(response.status_code == 200)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self.logger.debug(
-                    f"GitHub API reference check failed for {repo_key}@{ref}: {exc}",
-                    exc_info=True,
-                )
-
-        # Use Git operations if we're in Git validation mode
-        if (
-            self.config.validation_method == ValidationMethod.GIT
-            and self._git_client
-        ):
-            try:
-                url = f"https://github.com/{repo_key}.git"
-                git_branches = _get_remote_branches(url, self.config.git)
-                git_tags = _get_remote_tags(url, self.config.git)
-                return ref in git_branches or ref in git_tags
-            except GitError as exc:
-                self.logger.debug(
-                    f"Git reference check failed for {repo_key}@{ref}: {exc}",
-                    exc_info=True,
-                )
-
-        return False
-
-    async def _get_tags(
-        self, repo_key: str, limit: int = 30
-    ) -> list[dict[str, Any]]:
-        """Get repository tags."""
-        if (
-            self.config.validation_method == ValidationMethod.GITHUB_API
-            and self._http_client
-        ):
-            try:
-                response = await self._http_client.get(
-                    f"https://api.github.com/repos/{repo_key}/tags?per_page={limit}"
-                )
-                response.raise_for_status()
-                return response.json()  # type: ignore[no-any-return]
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self.logger.debug(
-                    f"GitHub API tag lookup failed for {repo_key}: {exc}",
-                    exc_info=True,
-                )
-
-        # Use Git operations if we're in Git validation mode - convert to API-like format
-        if (
-            self.config.validation_method == ValidationMethod.GIT
-            and self._git_client
-        ):
-            try:
-                url = f"https://github.com/{repo_key}.git"
-                git_tags = _get_remote_tags(url, self.config.git)
-                # Convert to API-like format for compatibility
-                return [
-                    {"name": tag}
-                    for tag in sorted(git_tags, reverse=True)[:limit]
-                ]
-            except GitError as exc:
-                self.logger.debug(
-                    f"Git tag lookup failed for {repo_key}: {exc}",
-                    exc_info=True,
-                )
-
-        return []
-
-    async def _get_branches(
-        self, repo_key: str, limit: int = 20
-    ) -> list[dict[str, Any]]:
-        """Get repository branches."""
-        if (
-            self.config.validation_method == ValidationMethod.GITHUB_API
-            and self._http_client
-        ):
-            try:
-                response = await self._http_client.get(
-                    f"https://api.github.com/repos/{repo_key}/branches?per_page={limit}"
-                )
-                response.raise_for_status()
-                return response.json()  # type: ignore[no-any-return]
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self.logger.debug(
-                    f"GitHub API branch lookup failed for {repo_key}: {exc}",
-                    exc_info=True,
-                )
-
-        # Use Git operations if we're in Git validation mode - convert to API-like format
-        if (
-            self.config.validation_method == ValidationMethod.GIT
-            and self._git_client
-        ):
-            try:
-                url = f"https://github.com/{repo_key}.git"
-                git_branches = _get_remote_branches(url, self.config.git)
-                # Convert to API-like format for compatibility
-                return [
-                    {"name": branch} for branch in sorted(git_branches)[:limit]
-                ]
-            except GitError as exc:
-                self.logger.debug(
-                    f"Git branch lookup failed for {repo_key}: {exc}",
-                    exc_info=True,
-                )
-
-        return []
-
-    async def _get_commit_sha_for_reference(  # noqa: PLR0911
-        self, repo_key: str, ref: str
-    ) -> dict[str, Any] | None:
-        """Get commit SHA for a specific reference."""
-        # Use API if we're in GitHub API validation mode
-        if (
-            self.config.validation_method == ValidationMethod.GITHUB_API
-            and self._http_client
-        ):
-            try:
-                # Try as branch first
-                response = await self._http_client.get(
-                    f"https://api.github.com/repos/{repo_key}/git/refs/heads/{ref}"
-                )
-                if response.status_code == 200:
-                    ref_data = response.json()
-                    return {"sha": ref_data["object"]["sha"], "type": "branch"}
-
-                # Try as tag
-                response = await self._http_client.get(
-                    f"https://api.github.com/repos/{repo_key}/git/refs/tags/{ref}"
-                )
-                if response.status_code == 200:
-                    ref_data = response.json()
-                    sha = ref_data["object"]["sha"]
-
-                    # If it's an annotated tag, get the commit SHA
-                    if ref_data["object"]["type"] == "tag":
-                        tag_response = await self._http_client.get(
-                            f"https://api.github.com/repos/{repo_key}/git/tags/{sha}"
-                        )
-                        if tag_response.status_code == 200:
-                            tag_data = tag_response.json()
-                            sha = tag_data["object"]["sha"]
-
-                    return {"sha": sha, "type": "tag"}
-
-                # Try as commit SHA
-                response = await self._http_client.get(
-                    f"https://api.github.com/repos/{repo_key}/commits/{ref}"
-                )
-                if response.status_code == 200:
-                    commit_data = response.json()
-                    return {"sha": commit_data["sha"], "type": "commit"}
-
-            except Exception as e:
-                self.logger.debug(
-                    f"Failed to get commit SHA via API for {repo_key}@{ref}: {e}"
-                )
-
-        # Use Git operations if we're in Git validation mode
-        if (
-            self.config.validation_method == ValidationMethod.GIT
-            and self._git_client
-        ):
-            try:
-                url = f"https://github.com/{repo_key}.git"
-
-                # Use git ls-remote to get the SHA for the reference
-                import subprocess
-
-                # Try as branch. The ``--`` end-of-options marker stops git
-                # from misreading a ref beginning with "-" (REF_PATTERN allows
-                # it) as an option (argument injection).
-                cmd = ["git", "ls-remote", "--heads", "--", url, ref]
-                try:
-                    result = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=self.config.git.timeout_seconds,
-                        check=True,
-                    )
-                    if result.stdout.strip():
-                        sha = result.stdout.strip().split("\t")[0]
-                        return {"sha": sha, "type": "branch"}
-                except subprocess.CalledProcessError:
-                    # ref is not a branch; fall through to try it as a tag.
-                    pass
-
-                # Try as tag - need to dereference annotated tags
-                # Query both the tag and the dereferenced commit
-                cmd = [
-                    "git",
-                    "ls-remote",
-                    "--tags",
-                    "--",
-                    url,
-                    f"refs/tags/{ref}",
-                    f"refs/tags/{ref}^{{}}",
-                ]
-                try:
-                    result = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=self.config.git.timeout_seconds,
-                        check=True,
-                    )
-                    if result.stdout.strip():
-                        lines = result.stdout.strip().split("\n")
-                        # Look for dereferenced tag first (ends with ^{})
-                        for line in lines:
-                            if line.endswith(f"refs/tags/{ref}^{{}}"):
-                                sha = line.split("\t")[0]
-                                return {"sha": sha, "type": "tag"}
-                        # Fall back to tag object if no dereferenced version
-                        if lines:
-                            sha = lines[0].split("\t")[0]
-                            return {"sha": sha, "type": "tag"}
-                except subprocess.CalledProcessError:
-                    # ref is not a tag either; leave it unresolved (returns
-                    # None below) so the caller can handle the miss.
-                    pass
-
-            except Exception as e:
-                self.logger.debug(
-                    f"Git SHA resolution failed for {repo_key}@{ref}: {e}"
-                )
-
-        return None
-
-    async def _get_latest_versions_batch(
-        self, repo_keys: list[str]
-    ) -> dict[str, tuple[str, str]]:
-        """
-        Batch-fetch latest versions for multiple repositories.
-
-        Returns dict mapping repo_key to (tag, sha) tuple.
-        Uses both persistent disk cache and session cache for optimal performance.
-        """
-        results: dict[str, tuple[str, str]] = {}
-        repos_to_fetch: list[str] = []
-        session_cache_hits = 0
-        disk_cache_hits = 0
-
-        # Check session cache first (fastest)
-        current_time = time.time()
-        for repo_key in repo_keys:
-            if repo_key in self._latest_versions_cache:
-                tag, sha, timestamp = self._latest_versions_cache[repo_key]
-                if current_time - timestamp < self._cache_ttl:
-                    results[repo_key] = (tag, sha)
-                    session_cache_hits += 1
-                    continue
-
-            cached_version = self._cache.get_latest_version(repo_key)
-            if cached_version:
-                tag, sha = cached_version
-                results[repo_key] = (tag, sha)
-                # Also populate session cache for faster subsequent access
-                self._latest_versions_cache[repo_key] = (tag, sha, current_time)
-                disk_cache_hits += 1
-                continue
-
-            repos_to_fetch.append(repo_key)
-
-        if session_cache_hits > 0 or disk_cache_hits > 0:
-            self.logger.debug(
-                f"Latest version cache hits: {session_cache_hits} session, {disk_cache_hits} disk, "
-                f"{len(repos_to_fetch)} to fetch"
-            )
-
-        if not repos_to_fetch:
-            return results
-
-        # Use GraphQL batch query if available
-        if (
-            self.config.validation_method == ValidationMethod.GITHUB_API
-            and self._graphql_client
-        ):
-            try:
-                graphql_results = await self._get_latest_versions_graphql_batch(
-                    repos_to_fetch
-                )
-
-                for repo_key, (tag, sha) in graphql_results.items():
-                    results[repo_key] = (tag, sha)
-                    # Cache in both session and persistent storage
-                    self._latest_versions_cache[repo_key] = (
-                        tag,
-                        sha,
-                        current_time,
-                    )
-                    self._cache.put_latest_version(repo_key, tag, sha)
-
-                repos_to_fetch = [
-                    repo
-                    for repo in repos_to_fetch
-                    if repo not in graphql_results
-                ]
-                if not repos_to_fetch:
-                    return results
-
-                self.logger.debug(
-                    f"GraphQL returned results for {len(graphql_results)} repos, falling back to REST API for {len(repos_to_fetch)} repos"
-                )
-            except Exception as e:
-                self.logger.debug(
-                    f"GraphQL batch fetch failed, falling back to individual queries: {e}"
-                )
-
-        # Fallback to parallel REST API or Git operations
-        if repos_to_fetch:
-            tasks = [
-                self._get_latest_version_single(repo_key)
-                for repo_key in repos_to_fetch
-            ]
-            fetch_results = await asyncio.gather(*tasks, return_exceptions=True)
-        else:
-            fetch_results = []
-
-        for repo_key, result in zip(repos_to_fetch, fetch_results, strict=True):
-            if isinstance(result, Exception):
-                self.logger.debug(
-                    f"Failed to fetch latest version for {repo_key}: {result}"
-                )
-                continue
-            if result and isinstance(result, tuple):
-                tag, sha = result
-                results[repo_key] = (tag, sha)
-                # Cache in both session and persistent storage
-                self._latest_versions_cache[repo_key] = (tag, sha, current_time)
-                self._cache.put_latest_version(repo_key, tag, sha)
-
-        self._cache.save()
-
-        return results
-
-    async def _get_latest_versions_graphql_batch(
-        self, repo_keys: list[str]
-    ) -> dict[str, tuple[str, str]]:
-        """
-        Fetch latest releases for multiple repos using a single GraphQL query.
-
-        Returns dict mapping repo_key to (tag, sha) tuple.
-        """
-        query_parts = []
-        aliases = {}
-
-        for i, repo_key in enumerate(repo_keys):
-            try:
-                owner, name = repo_key.split("/", 1)
-                base_name = name.split("/")[0]
-                alias = f"repo_{i}"
-                aliases[alias] = repo_key
-
-                query_parts.append(f"""
-                    {alias}: repository(owner: "{owner}", name: "{base_name}") {{
-                        latestRelease {{
-                            tagName
-                            createdAt
-                            publishedAt
-                            tagCommit {{
-                                oid
-                            }}
-                        }}
-                        refs(refPrefix: "refs/tags/", first: 100, orderBy: {{field: TAG_COMMIT_DATE, direction: DESC}}) {{
-                            nodes {{
-                                name
-                                target {{
-                                    ... on Commit {{
-                                        oid
-                                    }}
-                                    ... on Tag {{
-                                        tagger {{
-                                            date
-                                        }}
-                                        target {{
-                                            ... on Commit {{
-                                                oid
-                                            }}
-                                        }}
-                                    }}
-                                }}
-                            }}
-                        }}
-                    }}
-                """)
-            except ValueError:
-                self.logger.warning(f"Invalid repository format: {repo_key}")
-                continue
-
-        if not query_parts:
-            return {}
-
-        query = f"query {{ {' '.join(query_parts)} }}"
-
-        try:
-            if not self._graphql_client:
-                return {}
-            response_data = await self._graphql_client._execute_graphql_query(
-                query
-            )
-
-            results = {}
-            response_root = response_data.get("data") or {}
-            for alias, repo_key in aliases.items():
-                repo_data = response_root.get(alias)
-                if not repo_data:
-                    continue
-
-                # Collect all tags for specificity resolution. ``tag_dates``
-                # records a verifiable *publication* timestamp per tag so the
-                # cooldown can reason about release age: the tagger date for
-                # annotated tags. Lightweight tags carry no creation
-                # timestamp of their own (only the commit they point at,
-                # which may be far older than the tag), so they are recorded
-                # as undated and skipped while a cooldown applies. The latest
-                # release's publication date is layered on separately by
-                # ``_select_cooldown_version_graphql``.
-                refs_field = repo_data.get("refs") or {}
-                refs = refs_field.get("nodes") or []
-                all_tags = []
-                tag_dates: dict[str, datetime | None] = {}
-                for ref in refs:
-                    if ActionCallPatterns.VERSION_TAG_PATTERN.match(
-                        ref["name"]
-                    ):
-                        target = ref.get("target", {})
-                        if "oid" in target:
-                            # Lightweight tag: target is the commit itself and
-                            # has no verifiable tag-creation time.
-                            all_tags.append((ref["name"], target["oid"]))
-                            tag_dates[ref["name"]] = None
-                        elif "target" in target and "oid" in target["target"]:
-                            # Annotated tag: use the tagger date as the
-                            # publication timestamp.
-                            all_tags.append(
-                                (ref["name"], target["target"]["oid"])
-                            )
-                            tagger = target.get("tagger") or {}
-                            tag_dates[ref["name"]] = _parse_iso_datetime(
-                                tagger.get("date")
-                            )
-
-                # When a cooldown is active, select the newest version that
-                # has been available long enough, falling back to older
-                # eligible versions when the very latest is still "warming".
-                if self.config.cooldown_days > 0:
-                    cooldown_choice = self._select_cooldown_version_graphql(
-                        repo_data, all_tags, tag_dates
-                    )
-                    if cooldown_choice:
-                        results[repo_key] = cooldown_choice
-                    else:
-                        self.logger.debug(
-                            "No release for %s satisfies the %d-day "
-                            "cooldown; leaving reference unchanged",
-                            repo_key,
-                            self.config.cooldown_days,
-                        )
-                    continue
-
-                # Try latestRelease first, but only if prereleases are NOT allowed
-                # (latestRelease excludes prereleases by GitHub's API design)
-                # If allow_prerelease is True, skip latestRelease and check all tags
-                if not self.config.allow_prerelease and repo_data.get(
-                    "latestRelease"
-                ):
-                    tag = repo_data["latestRelease"]["tagName"]
-                    sha = repo_data["latestRelease"]["tagCommit"]["oid"]
-                    # Only use latestRelease if it matches our version patterns
-                    if ActionCallPatterns.VERSION_TAG_PATTERN.match(tag):
-                        # Find most specific version tag for this SHA (e.g., v8 -> v8.0.0)
-                        specific_tag = _find_most_specific_version_tag(
-                            tag, sha, all_tags
-                        )
-                        results[repo_key] = (specific_tag, sha)
-                        continue
-
-                # Fall back to tags with version pattern filtering
-                if all_tags:
-                    # Sort by specificity first, then version
-                    sorted_tags = sorted(
-                        all_tags,
-                        key=lambda x: (
-                            _get_version_specificity(x[0]),
-                            _parse_version(x[0]),
-                        ),
-                        reverse=True,
-                    )
-                    tag, sha = sorted_tags[0]
-                    results[repo_key] = (tag, sha)
-                else:
-                    # No clean version tags found, try fallback version-like tags (v1.2, v0.9, etc.)
-                    fallback_pattern = re.compile(r"^v?\d+\.\d+")
-                    fallback_tags = []
-                    for ref in refs:
-                        if fallback_pattern.match(ref["name"]):
-                            target = ref.get("target", {})
-                            if "oid" in target:
-                                # Direct commit
-                                fallback_tags.append(
-                                    (ref["name"], target["oid"])
-                                )
-                            elif (
-                                "target" in target and "oid" in target["target"]
-                            ):
-                                # Annotated tag pointing to commit
-                                fallback_tags.append(
-                                    (ref["name"], target["target"]["oid"])
-                                )
-                    if fallback_tags:
-                        # Just use the first one (already sorted by TAG_COMMIT_DATE DESC)
-                        tag, sha = fallback_tags[0]
-                        results[repo_key] = (tag, sha)
-
-            return results
-        except Exception as e:
-            self.logger.debug(f"GraphQL batch query failed: {e}")
-            return {}
-
-    def _select_cooldown_version_graphql(
+    async def _resolve_redirect_for_fix(
         self,
-        repo_data: dict[str, Any],
-        all_tags: list[tuple[str, str]],
-        tag_dates: dict[str, datetime | None],
-        now: datetime | None = None,
-    ) -> tuple[str, str] | None:
-        """Choose a cooldown-eligible ``(tag, sha)`` from GraphQL repo data.
-
-        Builds a newest-first list of version-tag candidates (each
-        annotated with a verifiable publication timestamp) and delegates
-        to :func:`_select_version_with_cooldown`. The latest release's
-        publish date is layered on for its tag because it best reflects
-        when the version became consumable.
-
-        Args:
-            repo_data: The per-repository GraphQL response fragment.
-            all_tags: ``(tag, sha)`` pairs for every matching version tag.
-            tag_dates: Mapping of tag name to its publication ``datetime``
-                (``None`` when no verifiable publication time exists, e.g.
-                lightweight tags).
-            now: Reference time for the cooldown window (defaults to the
-                current UTC time); primarily an injection point for tests.
-
-        Returns:
-            The newest eligible ``(tag, sha)`` tuple, or ``None`` when no
-            version satisfies the configured cooldown.
-        """
-        # Prefer the published date of the latest release, which better
-        # reflects when the version became available to consumers.
-        latest_release = repo_data.get("latestRelease")
-        if latest_release:
-            release_tag = latest_release.get("tagName")
-            release_date = _parse_iso_datetime(
-                latest_release.get("publishedAt")
-                or latest_release.get("createdAt")
-            )
-            if release_tag and release_date is not None:
-                tag_dates[release_tag] = release_date
-
-        candidates = sorted(
-            ((name, sha, tag_dates.get(name)) for name, sha in all_tags),
-            key=lambda item: (
-                _parse_version(item[0]),
-                _get_version_specificity(item[0]),
-            ),
-            reverse=True,
-        )
-
-        selected = _select_version_with_cooldown(
-            candidates, self.config.cooldown_days, now=now
-        )
-        if not selected:
-            return None
-
-        tag, sha = selected
-        # Resolve to the most specific equivalent tag for the chosen SHA
-        # (e.g. prefer v8.0.0 over v8 when both point at the same commit).
-        specific_tag = _find_most_specific_version_tag(tag, sha, all_tags)
-        return (specific_tag, sha)
-
-    def _select_release_tag_with_cooldown(
-        self,
+        action_call: ActionCall,
         repo_key: str,
-        sorted_releases: list[dict[str, Any]],
-    ) -> str | None:
-        """Pick a REST release tag honouring the configured cooldown.
+        base_repo_key: str,
+        live: Live | None,
+    ) -> tuple[str, str, dict[str, Any] | None]:
+        """Detect and apply a repository redirect for an action call.
 
-        Args:
-            repo_key: Repository identifier (used for debug logging).
-            sorted_releases: REST API release objects ordered newest
-                version first.
-
-        Returns:
-            The chosen tag name, or ``None`` when no release satisfies the
-            cooldown window. When the cooldown is disabled the newest tag
-            is returned unchanged.
+        Returns the (possibly updated) ``repo_key`` and ``base_repo_key``
+        alongside ``redirect_info`` (``None`` when the repository has not
+        moved). Also records the redirect for statistics and, when a live
+        display is supplied, surfaces a one-off "Action has moved" message.
         """
-        if self.config.cooldown_days <= 0:
-            return sorted_releases[0].get("tag_name")
+        new_base_repo = await self._detect_repository_redirect(base_repo_key)
+        if not new_base_repo:
+            return repo_key, base_repo_key, None
 
-        candidates = [
-            (
-                release.get("tag_name", ""),
-                "",  # SHA is resolved separately by the caller
-                _parse_iso_datetime(
-                    release.get("published_at") or release.get("created_at")
-                ),
-            )
-            for release in sorted_releases
-        ]
-        selected = _select_version_with_cooldown(
-            candidates, self.config.cooldown_days
+        # Repository has moved - update the repo key, preserving any path
+        # component from the original reference.
+        if len(repo_key.split("/")) > 2:
+            path_component = "/".join(repo_key.split("/")[2:])
+            repo_key = f"{new_base_repo}/{path_component}"
+        else:
+            repo_key = new_base_repo
+        base_repo_key = new_base_repo
+        self.logger.debug(
+            f"Using redirected repository: {action_call.organization}/"
+            f"{action_call.repository} -> {repo_key}"
         )
-        if selected is None:
-            self.logger.debug(
-                "No release for %s satisfies the %d-day cooldown",
-                repo_key,
-                self.config.cooldown_days,
+
+        old_repo = f"{action_call.organization}/{action_call.repository}"
+        # Track unique redirected actions
+        self._redirects_found.add(old_repo)
+
+        if old_repo not in self._redirects_seen and live:
+            self._redirects_seen.add(old_repo)
+            await self._display_redirect_messages(old_repo, new_base_repo, live)
+
+        redirect_info = {"old_repo": old_repo, "new_repo": new_base_repo}
+        return repo_key, base_repo_key, redirect_info
+
+    async def _display_redirect_messages(
+        self, old_repo: str, new_base_repo: str, live: Live
+    ) -> None:
+        """Show the "Action has moved / New location" live-display messages."""
+        # Show "Action has moved" message in orange
+        moved_msg = Text()
+        moved_msg.append("  Action has moved: ", style="dim")
+        moved_msg.append(old_repo, style="orange3")
+        live.update(moved_msg)
+        await asyncio.sleep(0.5)  # Brief pause so user can see the message
+
+        # Show "New location" message in green
+        new_location_msg = Text()
+        new_location_msg.append("  New location: ", style="dim")
+        new_location_msg.append(new_base_repo, style="green")
+        live.update(new_location_msg)
+        await asyncio.sleep(0.5)  # Brief pause so user can see the message
+
+    async def _determine_target_ref(
+        self,
+        action_call: ActionCall,
+        validation_result: ValidationResult,
+        base_repo_key: str,
+        default_branch: str,
+    ) -> str:
+        """Choose the reference to fix an action call to.
+
+        Uses the latest release/tag when ``auto_latest`` is set, otherwise
+        repairs an invalid reference (with a fallback), and finally falls
+        back to the default branch. Non-fixable cases keep the current
+        reference (e.g. NOT_PINNED_TO_SHA).
+        """
+        if self.config.auto_latest:
+            # Use latest release/tag if available - use base repo
+            target_ref = await self._get_latest_release_or_tag(base_repo_key)
+            if not target_ref:
+                # Fall back to default branch
+                target_ref = default_branch
+        elif validation_result == ValidationResult.INVALID_REFERENCE:
+            # Invalid reference, try to find a valid one - use base repo
+            target_ref = await self._find_valid_reference(
+                base_repo_key, action_call.reference
             )
-            return None
-        return selected[0]
+            if not target_ref:
+                target_ref = await self._get_fallback_reference(
+                    base_repo_key, action_call.reference
+                )
+            if not target_ref:
+                # Fall back to default branch
+                target_ref = default_branch
+        else:
+            # Keep the current reference for NOT_PINNED_TO_SHA cases
+            target_ref = action_call.reference
+        return target_ref
 
-    async def _get_latest_version_single(  # noqa: PLR0911
-        self, repo_key: str
-    ) -> tuple[str, str] | None:
-        """
-        Fetch latest version for a single repository.
+    async def _resolve_sha_and_comment(
+        self,
+        action_call: ActionCall,
+        validation_result: ValidationResult,
+        base_repo_key: str,
+        target_ref: str,
+        original_ref: str,
+        default_branch: str,
+    ) -> tuple[str | None, str | None, bool]:
+        """Resolve the commit SHA and version comment for a fix.
 
-        Returns (tag, sha) tuple or None.
-        Supports both REST API and Git operations.
+        Returns ``(target_sha, version_comment, cannot_pin)``. ``cannot_pin``
+        is ``True`` only when a NOT_PINNED_TO_SHA reference could not be
+        resolved to a SHA, signalling the caller to abandon the fix.
         """
-        # Try REST API first
-        if (
-            self.config.validation_method == ValidationMethod.GITHUB_API
-            and self._http_client
+        target_sha = None
+        version_comment = None
+
+        if not (
+            self.config.require_pinned_sha
+            or action_call.reference_type != ReferenceType.COMMIT_SHA
         ):
-            try:
-                # Try latest release
-                response = await self._http_client.get(
-                    f"https://api.github.com/repos/{repo_key}/releases?per_page=100"
-                )
-                if response.status_code == 200:
-                    releases = response.json()
-                    # Filter releases based on allow_prerelease config
-                    if self.config.allow_prerelease:
-                        clean_releases = [
-                            r
-                            for r in releases
-                            if ActionCallPatterns.VERSION_TAG_PATTERN.match(
-                                r.get("tag_name", "")
-                            )
-                            and not r.get("draft", False)
-                        ]
-                    else:
-                        clean_releases = [
-                            r
-                            for r in releases
-                            if ActionCallPatterns.VERSION_TAG_PATTERN.match(
-                                r.get("tag_name", "")
-                            )
-                            and not r.get("draft", False)
-                            and not r.get("prerelease", False)
-                        ]
-                    if clean_releases:
-                        sorted_releases = sorted(
-                            clean_releases,
-                            key=lambda r: _parse_version(r.get("tag_name", "")),
-                            reverse=True,
-                        )
-                        tag = self._select_release_tag_with_cooldown(
-                            repo_key, sorted_releases
-                        )
-                        if tag is None:
-                            # No release satisfies the cooldown window.
-                            return None
-                        sha_info = await self._get_commit_sha_for_reference(
-                            repo_key, tag
-                        )
-                        sha = sha_info["sha"] if sha_info else ""
-                        return (tag, sha)
+            return target_sha, version_comment, False
 
-                # Fall back to tags
-                response = await self._http_client.get(
-                    f"https://api.github.com/repos/{repo_key}/tags?per_page=100"
-                )
-                if response.status_code == 200:
-                    tags = response.json()
-                    # Note: GitHub tags API doesn't include prerelease info
-                    # Only the releases API has that metadata
-                    # So when using tags endpoint, we can't filter prereleases
-                    clean_tags = [
-                        tag
-                        for tag in tags
-                        if ActionCallPatterns.VERSION_TAG_PATTERN.match(
-                            tag.get("name", "")
-                        )
-                    ]
-                    if clean_tags:
-                        if self.config.cooldown_days > 0:
-                            # The tags endpoint carries no release dates, so
-                            # we cannot verify the cooldown window here.
-                            self.logger.debug(
-                                "Cooldown active but %s exposes no release "
-                                "dates via the tags API; leaving reference "
-                                "unchanged",
-                                repo_key,
-                            )
-                            return None
-                        sorted_tags = sorted(
-                            clean_tags,
-                            key=lambda t: _parse_version(t.get("name", "")),
-                            reverse=True,
-                        )
-                        tag = sorted_tags[0]["name"]
-                        sha = sorted_tags[0]["commit"]["sha"]
-                        return (tag, sha)
-            except Exception as e:
-                self.logger.debug(f"REST API fetch failed for {repo_key}: {e}")
+        # Try to get SHA (API or Git) - use base repo
+        sha_info = await self._get_commit_sha_for_reference(
+            base_repo_key, target_ref
+        )
+        if sha_info:
+            target_sha = sha_info["sha"]
+            # If target_ref looks like a version tag, use it in comment
+            if (
+                ActionCallPatterns.VERSION_TAG_PATTERN.match(target_ref)
+                or target_ref != default_branch
+            ):
+                version_comment = target_ref
+            elif (
+                original_ref != default_branch
+                and validation_result == ValidationResult.NOT_PINNED_TO_SHA
+            ):
+                # Preserve original branch name when falling back to default
+                version_comment = original_ref
+        # Without access to resolve SHAs, we can't fix NOT_PINNED_TO_SHA issues
+        elif validation_result == ValidationResult.NOT_PINNED_TO_SHA:
+            self.logger.debug(
+                f"Cannot resolve SHA for {base_repo_key}@{target_ref}, "
+                f"skipping SHA pinning"
+            )
+            return target_sha, version_comment, True
 
-        # Fall back to Git operations
+        # If we couldn't get SHA but target_ref is a version tag, still set the
+        # comment. This handles cases where SHA resolution fails but we're
+        # still updating the version.
         if (
-            self.config.validation_method == ValidationMethod.GIT
-            and self._git_client
+            not target_sha
+            and target_ref
+            and ActionCallPatterns.VERSION_TAG_PATTERN.match(target_ref)
         ):
-            try:
-                url = f"https://github.com/{repo_key}.git"
-                git_tags = _get_remote_tags(url, self.config.git)
+            version_comment = target_ref
 
-                if git_tags:
-                    tag_list = sorted(git_tags, reverse=True)
-                    clean_tags = [
-                        tag
-                        for tag in tag_list
-                        if ActionCallPatterns.VERSION_TAG_PATTERN.match(tag)
-                    ]
-                    if clean_tags:
-                        if self.config.cooldown_days > 0:
-                            # ``git ls-remote`` does not expose tag dates, so
-                            # the cooldown cannot be enforced for the Git
-                            # validation method.
-                            self.logger.debug(
-                                "Cooldown active but release dates are "
-                                "unavailable via Git for %s; leaving "
-                                "reference unchanged",
-                                repo_key,
-                            )
-                            return None
-                        sorted_versions = sorted(
-                            clean_tags, key=_parse_version, reverse=True
-                        )
-                        tag = sorted_versions[0]
-                        sha_info = await self._get_commit_sha_for_reference(
-                            repo_key, tag
-                        )
-                        sha = sha_info["sha"] if sha_info else ""
-                        return (tag, sha)
-            except GitError as e:
-                self.logger.debug(f"Git fetch failed for {repo_key}: {e}")
-
-        return None
-
-    async def _get_shas_batch(
-        self, refs: list[tuple[str, str]]
-    ) -> dict[tuple[str, str], str]:
-        """
-        Batch-fetch SHAs for multiple (repo, ref) pairs.
-
-        Returns dict mapping (repo_key, ref) to SHA.
-        Supports both GraphQL and parallel Git operations.
-        """
-        results: dict[tuple[str, str], str] = {}
-
-        if not refs:
-            return results
-
-        # Use GraphQL batch query if available
-        if (
-            self.config.validation_method == ValidationMethod.GITHUB_API
-            and self._graphql_client
-        ):
-            try:
-                # Group refs by repository for efficient querying
-                refs_by_repo: dict[str, list[str]] = defaultdict(list)
-                for repo_key, ref in refs:
-                    refs_by_repo[repo_key].append(ref)
-
-                query_parts = []
-                aliases = {}
-
-                for repo_idx, (repo_key, repo_refs) in enumerate(
-                    refs_by_repo.items()
-                ):
-                    owner, name = repo_key.split("/", 1)
-                    base_name = name.split("/")[0]
-
-                    ref_queries = []
-                    for ref_idx, ref in enumerate(repo_refs):
-                        ref_alias = f"ref_{ref_idx}"
-                        aliases[f"repo_{repo_idx}_{ref_alias}"] = (
-                            repo_key,
-                            ref,
-                        )
-                        ref_queries.append(f"""
-                            {ref_alias}: ref(qualifiedName: "refs/tags/{ref}") {{
-                                target {{
-                                    oid
-                                    ... on Tag {{
-                                        target {{
-                                            oid
-                                        }}
-                                    }}
-                                }}
-                            }}
-                        """)
-
-                    repo_alias = f"repo_{repo_idx}"
-                    query_parts.append(f"""
-                        {repo_alias}: repository(owner: "{owner}", name: "{base_name}") {{
-                            {" ".join(ref_queries)}
-                        }}
-                    """)
-
-                query = f"query {{ {' '.join(query_parts)} }}"
-                response_data = (
-                    await self._graphql_client._execute_graphql_query(query)
-                )
-
-                response_root = response_data.get("data") or {}
-                for full_alias, (repo_key, ref) in aliases.items():
-                    # Extract repo_idx and ref_idx from format: "repo_{repo_idx}_ref_{ref_idx}"
-                    match = re.match(r"repo_(\d+)_ref_(\d+)", full_alias)
-                    if match:
-                        repo_alias = f"repo_{match.group(1)}"
-                        ref_alias = f"ref_{match.group(2)}"
-                        repo_data = response_root.get(repo_alias) or {}
-                        ref_data = repo_data.get(ref_alias)
-                        if ref_data:
-                            target = ref_data.get("target")
-                            # For annotated tags, the target has a nested target with the commit SHA
-                            # For lightweight tags, the target directly has the commit SHA
-                            if isinstance(target, dict):
-                                nested_target = target.get("target")
-                                if (
-                                    isinstance(nested_target, dict)
-                                    and "oid" in nested_target
-                                ):
-                                    sha = nested_target["oid"]
-                                elif "oid" in target:
-                                    sha = target["oid"]
-                                else:
-                                    continue
-                                results[(repo_key, ref)] = sha
-                    else:
-                        self.logger.warning(
-                            f"Failed to parse alias format: {full_alias}"
-                        )
-
-                return results
-            except Exception as e:
-                self.logger.debug(
-                    f"GraphQL batch SHA fetch failed, falling back: {e}"
-                )
-
-        # Fall back to parallel individual fetches
-        tasks = [
-            self._get_commit_sha_for_reference(repo_key, ref)
-            for repo_key, ref in refs
-        ]
-        fetch_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for (repo_key, ref), result in zip(refs, fetch_results, strict=True):
-            if isinstance(result, Exception):
-                self.logger.debug(
-                    f"Failed to fetch SHA for {repo_key}@{ref}: {result}"
-                )
-                continue
-            if result and isinstance(result, dict) and "sha" in result:
-                results[(repo_key, ref)] = result["sha"]
-
-        return results
-
-    async def _detect_repository_redirect(self, repo_key: str) -> str | None:
-        """
-        Detect if a repository has been moved/redirected.
-
-        Uses HTTP HEAD requests to the GitHub web URL (not API) to detect
-        repository moves via HTTP 301 redirects. This avoids API rate limits
-        and works for both validation methods.
-
-        Args:
-            repo_key: Repository in format "owner/repo"
-
-        Returns:
-            New repository location if redirected, None otherwise
-        """
-        cached = self._cache.get_redirect(repo_key)
-        if cached:
-            return cached
-
-        # Use HTTP HEAD request to detect redirect via web URL (not API)
-        if self._http_client:
-            try:
-                # Use web URL instead of API URL to avoid rate limits
-                response = await self._http_client.head(
-                    f"https://github.com/{repo_key}"
-                )
-
-                # Check for redirect (301 Moved Permanently)
-                if (
-                    response.status_code == 301
-                    and "location" in response.headers
-                ):
-                    location = response.headers["location"]
-
-                    match = re.search(r"github\.com/([^/]+/[^/]+)", location)
-                    if match:
-                        new_repo = match.group(1)
-                        if new_repo.lower() != repo_key.lower():
-                            self.logger.debug(
-                                f"Detected redirect: {repo_key} -> {new_repo}"
-                            )
-                            # Cache the redirect
-                            self._cache.put_redirect(repo_key, new_repo)
-                            return new_repo
-            except Exception as e:
-                self.logger.debug(
-                    f"Redirect detection failed for {repo_key}: {e}"
-                )
-
-        return None
-
-    def _get_base_repository(self, repo_key: str) -> str:
-        """
-        Extract base repository from a repo key that might include a path.
-
-        For example:
-        - "github/codeql-action/init" -> "github/codeql-action"
-        - "actions/checkout" -> "actions/checkout"
-
-        Args:
-            repo_key: Repository key, possibly with path
-
-        Returns:
-            Base repository (owner/repo)
-        """
-        return base_repository(repo_key)
+        return target_sha, version_comment, False
 
     def _build_fixed_line(
         self,

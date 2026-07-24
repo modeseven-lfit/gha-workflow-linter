@@ -14,7 +14,6 @@ This script demonstrates how the local caching feature works by:
 from pathlib import Path
 import tempfile
 import time
-from typing import Optional
 
 from gha_workflow_linter.cache import CacheConfig, ValidationCache
 from gha_workflow_linter.models import ValidationMethod, ValidationResult
@@ -88,9 +87,7 @@ def demo_batch_operations() -> None:
 
         # Batch put operations
         batch_data: list[
-            tuple[
-                str, str, ValidationResult, str, ValidationMethod, Optional[str]
-            ]
+            tuple[str, str, ValidationResult, str, ValidationMethod, str | None]
         ] = [
             (
                 "actions/checkout",

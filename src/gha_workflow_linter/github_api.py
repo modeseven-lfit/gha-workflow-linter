@@ -10,7 +10,7 @@ import logging
 import os
 import sys
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import httpx
 
@@ -93,7 +93,6 @@ class GitHubGraphQLClient:
             ),
         )
 
-        # Get initial rate limit info
         await self._update_rate_limit_info()
 
         return self
@@ -117,7 +116,6 @@ class GitHubGraphQLClient:
         """
         results = {}
 
-        # Check cache first
         uncached_repos = []
         for repo_key in repo_keys:
             if repo_key in self._repository_cache:
@@ -135,7 +133,6 @@ class GitHubGraphQLClient:
             f"(cache hits: {len(results)})"
         )
 
-        # Process in batches - create all tasks for parallel execution
         batch_size = self.config.max_repositories_per_query
         batches = []
         for i in range(0, len(uncached_repos), batch_size):
@@ -178,7 +175,6 @@ class GitHubGraphQLClient:
                         self._repository_cache[repo_key] = False
                     return batch_results
 
-        # Execute all batches concurrently
         batch_results_list = await asyncio.gather(
             *[process_batch_with_limit(batch) for batch in batches]
         )
@@ -203,7 +199,6 @@ class GitHubGraphQLClient:
         """
         results = {}
 
-        # Check cache first
         uncached_refs = []
         for repo_key, ref in repo_refs:
             if (
@@ -235,7 +230,6 @@ class GitHubGraphQLClient:
         all_tasks: list[tuple[str, list[str]]] = []
 
         for repo_key, refs in refs_by_repo.items():
-            # Process references in batches
             batch_size = self.config.max_references_per_query
             for i in range(0, len(refs), batch_size):
                 ref_batch = refs[i : i + batch_size]
@@ -291,7 +285,6 @@ class GitHubGraphQLClient:
 
                     return repo_key, batch_results
 
-        # Execute all batches concurrently
         batch_results_list = await asyncio.gather(
             *[process_ref_batch_with_limit(rk, rb) for rk, rb in all_tasks]
         )
@@ -327,7 +320,6 @@ class GitHubGraphQLClient:
         """
         results: dict[tuple[str, str], bool] = {}
 
-        # Check cache first.
         uncached: list[tuple[str, str]] = []
         for repo_key, ref in subpath_refs:
             cache_key = (repo_key, ref)
@@ -362,8 +354,8 @@ class GitHubGraphQLClient:
             async with semaphore:
                 await self._check_rate_limit()
                 try:
-                    batch_results = (
-                        await self._validate_subpaths_graphql_batch(batch)
+                    batch_results = await self._validate_subpaths_graphql_batch(
+                        batch
                     )
                     for cache_key, is_valid in batch_results.items():
                         self._subpath_cache[cache_key] = is_valid
@@ -419,14 +411,12 @@ class GitHubGraphQLClient:
         Returns:
             Dictionary mapping repo keys to validation results
         """
-        # Build GraphQL query for multiple repositories
         query_parts = []
         aliases = {}
 
         for i, repo_key in enumerate(repo_keys):
             try:
                 owner, name = repo_key.split("/", 1)
-                # Remove workflow paths for base repository
                 base_name = name.split("/")[0]
 
                 alias = f"repo_{i}"
@@ -457,8 +447,9 @@ class GitHubGraphQLClient:
         response_data = await self._execute_graphql_query(query)
 
         results = {}
+        response_root = response_data.get("data") or {}
         for alias, repo_key in aliases.items():
-            repo_data = response_data.get("data", {}).get(alias)
+            repo_data = response_root.get(alias)
             results[repo_key] = repo_data is not None
 
             if repo_data:
@@ -483,7 +474,6 @@ class GitHubGraphQLClient:
         """
         try:
             owner, name = repo_key.split("/", 1)
-            # Remove workflow paths for base repository
             base_name = name.split("/")[0]
         except ValueError:
             self.logger.warning(f"Invalid repository format: {repo_key}")
@@ -503,14 +493,12 @@ class GitHubGraphQLClient:
 
         results = {}
 
-        # Validate commit SHAs
         if commit_shas:
             sha_results = await self._validate_commit_shas_graphql(
                 owner, base_name, commit_shas
             )
             results.update(sha_results)
 
-        # Validate branches and tags
         if branch_tag_names:
             ref_results = await self._validate_branch_tag_names_graphql(
                 owner, base_name, branch_tag_names
@@ -559,7 +547,8 @@ class GitHubGraphQLClient:
         response_data = await self._execute_graphql_query(query)
 
         results = {}
-        repo_data = response_data.get("data", {}).get("repository", {})
+        response_root = response_data.get("data") or {}
+        repo_data = response_root.get("repository") or {}
 
         for alias, sha in aliases.items():
             commit_data = repo_data.get(alias)
@@ -672,9 +661,9 @@ class GitHubGraphQLClient:
             results.update(dict.fromkeys(refs, False))
             return results
 
-        repo_data = response_data.get("data", {}).get("repository", {})
+        response_root = response_data.get("data") or {}
+        repo_data = response_root.get("repository") or {}
 
-        # Check results for each ref
         for idx, ref in enumerate(refs):
             alias = f"ref_{idx}"
             tag_alias = f"{alias}_tag"
@@ -750,9 +739,7 @@ class GitHubGraphQLClient:
             repo_alias = f"sp_{i}"
             object_parts: list[str] = []
             candidate_aliases: list[str] = []
-            for j, candidate in enumerate(
-                action_subpath_candidates(subpath)
-            ):
+            for j, candidate in enumerate(action_subpath_candidates(subpath)):
                 obj_alias = f"{repo_alias}_c{j}"
                 candidate_aliases.append(f"{repo_alias}.{obj_alias}")
                 expression = self._graphql_string_literal(f"{ref}:{candidate}")
@@ -795,9 +782,7 @@ class GitHubGraphQLClient:
             # a potentially-wrong INVALID_PATH for a non-data failure (e.g. a
             # response-parsing bug); re-raising lets the validator abort the
             # run, consistent with the Git path's inconclusive handling.
-            self.logger.debug(
-                f"Unexpected subpath batch validation error: {e}"
-            )
+            self.logger.debug(f"Unexpected subpath batch validation error: {e}")
             raise
 
         data = response_data.get("data", {}) or {}
@@ -845,73 +830,11 @@ class GitHubGraphQLClient:
                 self.config.graphql_url, json=payload
             )
 
-            # Update rate limit info from headers
             self._update_rate_limit_from_headers(response.headers)
-
-            if response.status_code != 200:
-                self.logger.error(
-                    f"GraphQL query failed: {response.status_code} - {response.text}"
-                )
-                self.api_stats.increment_failed_call()
-
-                # Handle specific HTTP status codes
-                if response.status_code == 401:
-                    raise AuthenticationError(
-                        "GitHub API authentication failed. Please check your token."
-                    )
-                elif response.status_code == 403:
-                    # Could be rate limit or permissions
-                    if "rate limit" in response.text.lower():
-                        raise RateLimitError(
-                            "GitHub API rate limit exceeded. Please wait and try again."
-                        )
-                    else:
-                        raise AuthenticationError(
-                            "GitHub API access forbidden. Please check your token permissions."
-                        )
-                elif response.status_code == 429:
-                    raise RateLimitError(
-                        "GitHub API rate limit exceeded. Please wait and try again."
-                    )
-                elif response.status_code >= 500:
-                    raise TemporaryAPIError(
-                        f"GitHub API server error ({response.status_code}). This may be temporary.",
-                        status_code=response.status_code,
-                    )
-                else:
-                    raise GitHubAPIError(
-                        f"GitHub API request failed: {response.status_code} - {response.text}",
-                        status_code=response.status_code,
-                    )
+            self._raise_for_graphql_status(response)
 
             data = response.json()
-
-            if "errors" in data:
-                self.logger.error(f"GraphQL errors: {data['errors']}")
-                self.api_stats.increment_failed_call()
-
-                # Check for specific GraphQL error types
-                error_messages = [
-                    str(error.get("message", "")) for error in data["errors"]
-                ]
-                combined_errors = "; ".join(error_messages)
-
-                if any("rate limit" in msg.lower() for msg in error_messages):
-                    raise RateLimitError(
-                        f"GitHub API rate limit exceeded: {combined_errors}"
-                    )
-                elif any(
-                    "not found" in msg.lower()
-                    or "could not resolve" in msg.lower()
-                    for msg in error_messages
-                ):
-                    # This is expected for invalid repositories - don't raise an exception
-                    # Let the caller handle the GraphQL errors in the response
-                    pass
-                else:
-                    raise GitHubAPIError(
-                        f"GitHub API GraphQL errors: {combined_errors}"
-                    )
+            self._check_graphql_errors(data)
 
             self.logger.debug(
                 f"GraphQL query successful (API calls made: {self.api_stats.total_calls})"
@@ -920,30 +843,101 @@ class GitHubGraphQLClient:
             return data  # type: ignore[no-any-return]
 
         except httpx.RequestError as e:
-            self.logger.error(f"HTTP request failed: {e}")
-            self.api_stats.increment_failed_call()
+            self._raise_network_error(e)
 
-            # Classify different types of network errors
-            error_str = str(e).lower()
-            if "name resolution" in error_str or "dns" in error_str:
-                raise NetworkError(
-                    "DNS resolution failed. Please check your internet connection and try again.",
-                    original_error=e,
-                ) from e
-            elif "connection" in error_str:
-                raise NetworkError(
-                    "Network connection failed. Please check your internet connection and try again.",
-                    original_error=e,
-                ) from e
-            elif "timeout" in error_str:
-                raise NetworkError(
-                    "Network request timed out. Please check your internet connection and try again.",
-                    original_error=e,
-                ) from e
-            else:
-                raise NetworkError(
-                    f"Network request failed: {e}", original_error=e
-                ) from e
+    def _raise_for_graphql_status(self, response: httpx.Response) -> None:
+        """Raise the appropriate API error for a non-200 GraphQL response."""
+        if response.status_code == 200:
+            return
+
+        self.logger.error(
+            f"GraphQL query failed: {response.status_code} - {response.text}"
+        )
+        self.api_stats.increment_failed_call()
+
+        status = response.status_code
+        if status == 401:
+            raise AuthenticationError(
+                "GitHub API authentication failed. Please check your token."
+            )
+        if status == 403:
+            # Could be rate limit or permissions
+            if "rate limit" in response.text.lower():
+                raise RateLimitError(
+                    "GitHub API rate limit exceeded. Please wait and try again."
+                )
+            raise AuthenticationError(
+                "GitHub API access forbidden. Please check your token permissions."
+            )
+        if status == 429:
+            raise RateLimitError(
+                "GitHub API rate limit exceeded. Please wait and try again."
+            )
+        if status >= 500:
+            raise TemporaryAPIError(
+                f"GitHub API server error ({status}). This may be temporary.",
+                status_code=status,
+            )
+        raise GitHubAPIError(
+            f"GitHub API request failed: {status} - {response.text}",
+            status_code=status,
+        )
+
+    def _check_graphql_errors(self, data: dict[Any, Any]) -> None:
+        """Inspect a GraphQL response body and raise on fatal errors.
+
+        "Not found" / "could not resolve" errors are expected for invalid
+        repositories and are left in the response for the caller to handle.
+        """
+        if "errors" not in data:
+            return
+
+        self.logger.error(f"GraphQL errors: {data['errors']}")
+        self.api_stats.increment_failed_call()
+
+        error_messages = [
+            str(error.get("message", "")) for error in data["errors"]
+        ]
+        combined_errors = "; ".join(error_messages)
+
+        if any("rate limit" in msg.lower() for msg in error_messages):
+            raise RateLimitError(
+                f"GitHub API rate limit exceeded: {combined_errors}"
+            )
+        if any(
+            "not found" in msg.lower() or "could not resolve" in msg.lower()
+            for msg in error_messages
+        ):
+            # Expected for invalid repositories - don't raise an exception.
+            # Let the caller handle the GraphQL errors in the response.
+            return
+        raise GitHubAPIError(f"GitHub API GraphQL errors: {combined_errors}")
+
+    def _raise_network_error(self, e: httpx.RequestError) -> NoReturn:
+        """Classify an httpx request error and raise a NetworkError."""
+        self.logger.error(f"HTTP request failed: {e}")
+        self.api_stats.increment_failed_call()
+
+        # Classify different types of network errors
+        error_str = str(e).lower()
+        if "name resolution" in error_str or "dns" in error_str:
+            raise NetworkError(
+                "DNS resolution failed. Please check your internet connection and try again.",
+                original_error=e,
+            ) from e
+        if "connection" in error_str:
+            raise NetworkError(
+                "Network connection failed. Please check your internet connection and try again.",
+                original_error=e,
+            ) from e
+        if "timeout" in error_str:
+            raise NetworkError(
+                "Network request timed out. Please check your internet connection and try again.",
+                original_error=e,
+            ) from e
+        raise NetworkError(
+            f"Network request failed: {e}", original_error=e
+        ) from e
 
     async def _update_rate_limit_info(self) -> None:
         """Update rate limit information from GitHub API."""
@@ -959,7 +953,8 @@ class GitHubGraphQLClient:
 
             if response.status_code == 200:
                 data = response.json()
-                graphql_limits = data.get("resources", {}).get("graphql", {})
+                resources = data.get("resources") or {}
+                graphql_limits = resources.get("graphql") or {}
 
                 self._rate_limit_info = GitHubRateLimitInfo(
                     limit=graphql_limits.get("limit", 5000),
@@ -1023,7 +1018,6 @@ class GitHubGraphQLClient:
                 self.api_stats.increment_rate_limit_delay()
                 await asyncio.sleep(delay)
 
-                # Update rate limit info after waiting
                 await self._update_rate_limit_info()
 
     def get_api_stats(self) -> APICallStats:
@@ -1078,15 +1072,13 @@ class GitHubGraphQLClient:
 
                 if response.status_code == 200:
                     data = response.json()
-                    graphql_limits = data.get("resources", {}).get(
-                        "graphql", {}
-                    )
+                    resources = data.get("resources") or {}
+                    graphql_limits = resources.get("graphql") or {}
 
                     remaining = graphql_limits.get("remaining", 5000)
                     limit = graphql_limits.get("limit", 5000)
                     reset_at = graphql_limits.get("reset", 0)
 
-                    # Update our rate limit info
                     self._rate_limit_info = GitHubRateLimitInfo(
                         limit=limit,
                         remaining=remaining,

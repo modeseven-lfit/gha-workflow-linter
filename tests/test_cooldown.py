@@ -12,10 +12,12 @@ from typing import TYPE_CHECKING, Any
 from gha_workflow_linter import cli
 from gha_workflow_linter.auto_fix import (
     AutoFixer,
+)
+from gha_workflow_linter.models import Config
+from gha_workflow_linter.version_utils import (
     _parse_iso_datetime,
     _select_version_with_cooldown,
 )
-from gha_workflow_linter.models import Config
 
 if TYPE_CHECKING:
     from pathlib import Path

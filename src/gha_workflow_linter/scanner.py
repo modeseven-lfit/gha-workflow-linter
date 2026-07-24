@@ -10,7 +10,7 @@ from pathlib import Path, PurePath
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
 
     from rich.progress import Progress, TaskID
 
@@ -219,11 +219,9 @@ class WorkflowScanner:
             self.logger.error(f"Error reading file {file_path}: {e}")
             return {}
 
-        # Validate YAML syntax
         if not self._is_valid_yaml(content, file_path):
             return {}
 
-        # Extract action calls using regex patterns
         action_calls = self._patterns.extract_action_calls(content)
 
         self.logger.debug(
@@ -333,65 +331,13 @@ class WorkflowScanner:
             List of resolved file paths
         """
         resolved_files: list[Path] = []
+        seen: set[Path] = set()
 
         for pattern in file_patterns:
-            pattern_path = Path(pattern)
-
-            # Handle absolute paths
-            if pattern_path.is_absolute():
-                if "*" in pattern or "?" in pattern:
-                    # Glob pattern with absolute path
-                    parent = pattern_path.parent
-                    if parent.exists():
-                        matches = list(parent.glob(pattern_path.name))
-                        for match in matches:
-                            if (
-                                match.is_file()
-                                and self._is_workflow_or_action_file(match)
-                            ):
-                                resolved_files.append(match)
-                elif pattern_path.is_file():
-                    if self._is_workflow_or_action_file(pattern_path):
-                        resolved_files.append(pattern_path)
-                    else:
-                        self.logger.warning(
-                            f"File {pattern_path} is not a workflow or action file"
-                        )
-                else:
-                    self.logger.warning(f"File not found: {pattern_path}")
-            # Handle relative paths
-            elif "*" in pattern or "?" in pattern:
-                # Glob pattern - search from root_path
-                matches = list(root_path.glob(pattern))
-                for match in matches:
-                    if match.is_file() and self._is_workflow_or_action_file(
-                        match
-                    ):
-                        resolved_files.append(match)
-
-                # Also try recursive glob if pattern doesn't start with **
-                if not pattern.startswith("**"):
-                    recursive_pattern = f"**/{pattern}"
-                    matches = list(root_path.glob(recursive_pattern))
-                    for match in matches:
-                        if (
-                            match.is_file()
-                            and self._is_workflow_or_action_file(match)
-                            and match not in resolved_files
-                        ):
-                            resolved_files.append(match)
-            else:
-                # Direct file path relative to root_path
-                full_path = root_path / pattern
-                if full_path.is_file():
-                    if self._is_workflow_or_action_file(full_path):
-                        resolved_files.append(full_path)
-                    else:
-                        self.logger.warning(
-                            f"File {full_path} is not a workflow or action file"
-                        )
-                else:
-                    self.logger.warning(f"File not found: {full_path}")
+            for match in self._resolve_file_pattern(root_path, pattern):
+                if match not in seen:
+                    seen.add(match)
+                    resolved_files.append(match)
 
         if not resolved_files:
             self.logger.warning(
@@ -399,6 +345,70 @@ class WorkflowScanner:
             )
 
         return resolved_files
+
+    def _resolve_file_pattern(
+        self, root_path: Path, pattern: str
+    ) -> list[Path]:
+        """Resolve a single file pattern to workflow/action file paths."""
+        pattern_path = Path(pattern)
+        if pattern_path.is_absolute():
+            return self._resolve_absolute_pattern(pattern, pattern_path)
+        if "*" in pattern or "?" in pattern:
+            return self._resolve_glob_pattern(root_path, pattern)
+        return self._resolve_relative_file(root_path, pattern)
+
+    def _resolve_absolute_pattern(
+        self, pattern: str, pattern_path: Path
+    ) -> list[Path]:
+        """Resolve an absolute path or absolute glob pattern."""
+        if "*" in pattern or "?" in pattern:
+            parent = pattern_path.parent
+            if not parent.exists():
+                return []
+            return self._filter_workflow_files(parent.glob(pattern_path.name))
+        if pattern_path.is_file():
+            if self._is_workflow_or_action_file(pattern_path):
+                return [pattern_path]
+            self.logger.warning(
+                f"File {pattern_path} is not a workflow or action file"
+            )
+            return []
+        self.logger.warning(f"File not found: {pattern_path}")
+        return []
+
+    def _resolve_glob_pattern(
+        self, root_path: Path, pattern: str
+    ) -> list[Path]:
+        """Resolve a relative glob pattern, including a recursive fallback."""
+        matches = self._filter_workflow_files(root_path.glob(pattern))
+        if not pattern.startswith("**"):
+            matches.extend(
+                self._filter_workflow_files(root_path.glob(f"**/{pattern}"))
+            )
+        return matches
+
+    def _resolve_relative_file(
+        self, root_path: Path, pattern: str
+    ) -> list[Path]:
+        """Resolve a direct relative file path from ``root_path``."""
+        full_path = root_path / pattern
+        if full_path.is_file():
+            if self._is_workflow_or_action_file(full_path):
+                return [full_path]
+            self.logger.warning(
+                f"File {full_path} is not a workflow or action file"
+            )
+            return []
+        self.logger.warning(f"File not found: {full_path}")
+        return []
+
+    def _filter_workflow_files(self, candidates: Iterable[Path]) -> list[Path]:
+        """Keep only existing files that are workflow or action files."""
+        return [
+            match
+            for match in candidates
+            if match.is_file() and self._is_workflow_or_action_file(match)
+        ]
 
     def _is_workflow_or_action_file(self, file_path: Path) -> bool:
         """
@@ -410,7 +420,6 @@ class WorkflowScanner:
         Returns:
             True if file is a workflow or action file
         """
-        # Check extension
         if file_path.suffix not in self.config.scan_extensions:
             return False
 

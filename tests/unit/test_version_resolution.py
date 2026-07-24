@@ -3,7 +3,7 @@
 
 """Unit tests for version tag resolution."""
 
-from gha_workflow_linter.auto_fix import (
+from gha_workflow_linter.version_utils import (
     _find_most_specific_version_tag,
     _get_version_specificity,
     _parse_version,
