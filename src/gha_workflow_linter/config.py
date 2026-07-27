@@ -36,7 +36,6 @@ class ConfigManager:
         Raises:
             ValueError: If configuration is invalid
         """
-        # Start with default config
         config_data: dict[str, Any] = {}
 
         # Load from default location if no file specified
@@ -66,7 +65,6 @@ class ConfigManager:
         Returns:
             Path to config file if found, None otherwise
         """
-        # Check current directory first
         for filename in [
             "gha-workflow-linter.yaml",
             "gha-workflow-linter.yml",
@@ -76,7 +74,6 @@ class ConfigManager:
             if config_path.exists():
                 return config_path
 
-        # Check user config directory
         config_dir = self._get_config_directory()
         if config_dir:
             for filename in ["config.yaml", "config.yml"]:
@@ -155,7 +152,6 @@ class ConfigManager:
                 config_dir.mkdir(parents=True, exist_ok=True)
                 output_path = config_dir / "config.yaml"
 
-        # Create default config
         default_config = Config()
 
         # Convert to dictionary for YAML serialization

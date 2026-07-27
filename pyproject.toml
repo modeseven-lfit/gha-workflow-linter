@@ -115,6 +115,44 @@ indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
 
+[tool.basedpyright]
+pythonVersion = "3.10"
+include = ["src"]
+typeCheckingMode = "strict"
+reportMissingImports = "none"
+reportMissingTypeStubs = "none"
+# The hook runs on pre-commit.ci in an isolated environment without the
+# project venv, and basedpyright is already ~246MiB so its dependencies
+# cannot be bundled without exceeding the 250MiB tier limit. Since imports
+# are not required to resolve (reportMissingImports = none), diagnostics
+# that only fire because an import is unresolved (an Unknown pydantic
+# BaseModel base, an Unknown typer decorator, or yaml lacking bundled
+# stubs) must be disabled for internal consistency. They never fire
+# locally, where .venv is auto-detected and these types resolve.
+reportUntypedBaseClass = "none"
+reportUntypedFunctionDecorator = "none"
+reportMissingModuleSource = "none"
+reportUnknownParameterType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownLambdaType = "none"
+reportUnknownVariableType = "none"
+reportUnknownMemberType = "none"
+# Focus on real issues, ignore pedantic ones
+reportPrivateUsage = "none"
+reportUnusedFunction = "none"
+reportUnusedVariable = "none"
+reportUnusedImport = "none"
+reportConstantRedefinition = "none"
+reportUnusedClass = "none"
+reportUntypedClassDecorator = "none"
+reportImplicitStringConcatenation = "none"
+# Enable additional type checking features
+reportCallIssue = "error"
+reportArgumentType = "error"
+reportIncompatibleVariableOverride = "error"
+reportOverlappingOverload = "error"
+reportUnsupportedDunderAll = "error"
+
 [tool.mypy]
 python_version = "3.10"
 strict = true

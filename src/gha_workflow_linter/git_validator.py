@@ -118,7 +118,6 @@ class GitValidationClient:
                     repositories
                 )
 
-            # Process results
             results = {}
             for repo, result in zip(
                 repositories, validation_results, strict=True
@@ -201,7 +200,6 @@ class GitValidationClient:
                 )
                 validation_results = [{}] * len(futures)
 
-            # Process results
             for (repo, refs), repo_results in zip(
                 repo_ref_list, validation_results, strict=True
             ):
@@ -433,7 +431,6 @@ def _validate_repository_references(
     # Try HTTPS first, then SSH
     for url in [https_url, ssh_url]:
         try:
-            # Validate different reference types with optimized approaches
             if commit_shas:
                 sha_results = _validate_commit_shas_git(
                     url, commit_shas, config
@@ -559,7 +556,6 @@ def _validate_branches_git(
     results = {}
 
     try:
-        # Get all remote branches
         remote_branches = _get_remote_branches(url, config)
 
         for branch in branches:
@@ -594,7 +590,6 @@ def _validate_tags_git(
     results = {}
 
     try:
-        # Get all remote tags
         remote_tags = _get_remote_tags(url, config)
 
         for tag in tags:
@@ -894,7 +889,6 @@ def _determine_reference_type(reference: str) -> ReferenceType:
     if re.match(r"^v\d+(\.\d+)*", reference):
         return ReferenceType.TAG
 
-    # Check for other tag patterns
     if any(
         pattern in reference.lower()
         for pattern in ["release", "stable", "alpha", "beta", "rc"]

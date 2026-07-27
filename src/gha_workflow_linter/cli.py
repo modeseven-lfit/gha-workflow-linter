@@ -3,10 +3,20 @@
 
 """Command-line interface for gha-workflow-linter."""
 
+# aislop-ignore-file complexity/file-too-large -- The Typer entry points and
+# their orchestration helpers are addressed by module-symbol name in ~165
+# test mock-patch sites (mock.patch("gha_workflow_linter.cli.<symbol>") for
+# ConfigManager, WorkflowScanner, ActionCallValidator, ValidationCache,
+# console, Progress and the run_linter/output helpers). Splitting this module
+# would relocate those symbols and break every patch site, a disproportionate
+# change for a style-level size warning. Long/complex functions here have been
+# decomposed into helpers instead.
+
 from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from dataclasses import dataclass
 import json
 import logging
 from pathlib import Path
@@ -40,9 +50,11 @@ from .exceptions import (
 )
 from .github_auth import get_github_token_with_fallback
 from .models import (
+    ActionCall,
     CLIOptions,
     Config,
     LogLevel,
+    ValidationError,
     ValidationMethod,
 )
 from .scanner import WorkflowScanner
@@ -170,7 +182,10 @@ def _render_cache_prime_banners(
             case the return is a ``Mock``).
         quiet: When True, suppress all output.
     """
-    if quiet or not isinstance(prime_report, CachePrimeReport):
+    # isinstance guards the runtime case documented above: tests may pass a
+    # Mock in place of a real CachePrimeReport. Static types never see that,
+    # so basedpyright's "unnecessary" verdict is a false positive here.
+    if quiet or not isinstance(prime_report, CachePrimeReport):  # pyright: ignore[reportUnnecessaryIsInstance]
         return
     if prime_report.version_mismatch_purged:
         console.print(
@@ -336,7 +351,6 @@ def run() -> None:
     # Preprocess arguments to inject 'lint' if needed
     processed_args = _preprocess_args_for_default_command()
 
-    # Update sys.argv with processed arguments
     sys.argv[1:] = processed_args
 
     # Run the app normally (it will read from sys.argv)
@@ -353,7 +367,6 @@ def setup_logging(log_level: LogLevel, quiet: bool = False) -> None:
     """
     level = logging.ERROR if quiet else getattr(logging, log_level.value)
 
-    # Get root logger and set its level explicitly
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
 
@@ -377,6 +390,122 @@ def setup_logging(log_level: LogLevel, quiet: bool = False) -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("httpcore.connection").setLevel(logging.WARNING)
     logging.getLogger("httpcore.http11").setLevel(logging.WARNING)
+
+
+def _apply_cli_overrides(
+    config: Config, options: CLIOptions, workers: int | None
+) -> None:
+    """Apply CLI option overrides onto the loaded configuration."""
+    logger = logging.getLogger(__name__)
+
+    if workers is not None:
+        config.parallel_workers = workers
+    else:
+        # Auto-detect performance cores if not specified
+        config.parallel_workers = get_default_workers()
+    if options.exclude is not None:
+        config.exclude_patterns = options.exclude
+    if not options.parallel:
+        config.parallel_workers = 1
+    config.require_pinned_sha = options.require_pinned_sha
+
+    # Apply auto-fix overrides (only if explicitly provided)
+    if options.auto_fix is not None:
+        config.auto_fix = options.auto_fix
+    if options.auto_latest is not None:
+        config.auto_latest = options.auto_latest
+    if options.allow_prerelease is not None:
+        config.allow_prerelease = options.allow_prerelease
+    if options.two_space_comments is not None:
+        config.two_space_comments = options.two_space_comments
+    if options.skip_actions is not None:
+        config.skip_actions = options.skip_actions
+    if options.fix_test_calls is not None:
+        config.fix_test_calls = options.fix_test_calls
+
+    # Apply validation method override if specified
+    if options.validation_method is not None:
+        config.validation_method = options.validation_method
+
+    if options.no_cache:
+        config.cache.enabled = False
+        logger.debug("Cache disabled via --no-cache")
+
+    if options.cache_ttl is not None:
+        config.cache.default_ttl_seconds = options.cache_ttl
+        logger.debug(f"Cache TTL overridden to {options.cache_ttl} seconds")
+
+
+def _configure_validation_backend(
+    config: Config,
+    options: CLIOptions,
+    github_token: str | None,
+    workers: int | None,
+) -> None:
+    """Resolve the GitHub token, select a validation method, and pre-flight it.
+
+    Applies the resolved method/token back onto ``config`` and prints the
+    chosen backend (unless quiet/JSON). When the GitHub API backend is
+    selected, this also performs the rate-limit pre-flight check.
+    """
+    logger = logging.getLogger(__name__)
+
+    # Skip GitHub token operations if Git method is explicitly chosen
+    effective_token = None
+    if config.validation_method != ValidationMethod.GIT:
+        # In JSON mode, suppress any human-readable console output from the
+        # token fallback (e.g. GitHub CLI messages) so it cannot corrupt the
+        # JSON stream.
+        json_mode = options.output_format == "json"
+        # Resolve GitHub token with CLI fallback
+        effective_token = get_github_token_with_fallback(
+            explicit_token=github_token or config.github_api.token,
+            console=None if json_mode else console,
+            quiet=options.quiet or json_mode,
+        )
+        if effective_token:
+            config.github_api.token = effective_token
+
+    # Determine validation method based on token availability and preference
+    if not config.validation_method:
+        if effective_token:
+            config.validation_method = ValidationMethod.GITHUB_API
+        else:
+            config.validation_method = ValidationMethod.GIT
+            if not options.quiet and options.output_format != "json":
+                console.print(
+                    "[yellow]No GitHub token available, using Git validation method ℹ️[/yellow]"
+                )
+
+    # Display validation method being used (suppress for JSON output)
+    if not options.quiet and options.output_format != "json":
+        if config.validation_method == ValidationMethod.GITHUB_API:
+            console.print("[blue]Using validation method: [GraphQL] 🔍[/blue]")
+        else:
+            console.print("[blue]Using validation method: [Git/SSH] 🔍[/blue]")
+
+        # Display number of parallel workers
+        worker_source = "auto-detected" if workers is None else "configured"
+        console.print(
+            f"[blue]Using {config.parallel_workers} parallel worker(s) "
+            f"({worker_source}) ⚙️[/blue]"
+        )
+
+    # Only check rate limits if using GitHub API
+    if config.validation_method == ValidationMethod.GITHUB_API:
+        from .github_api import GitHubGraphQLClient
+
+        github_client = GitHubGraphQLClient(config.github_api)
+        try:
+            github_client.check_rate_limit_and_exit_if_needed()
+            # If we get here, we're not rate limited
+            if not effective_token and not options.quiet:
+                logger.warning(
+                    "No GitHub token available; API requests may be rate-limited ⚠️"
+                )
+        except SystemExit:
+            # Rate limit check triggered exit, re-raise to exit cleanly
+            raise
 
 
 @app.command()
@@ -609,7 +738,6 @@ def lint(
         # Auto-fix only specific files
         gha-workflow-linter lint --auto-fix --files .github/workflows/release.yml
     """
-    # Handle mutually exclusive options
     if verbose and quiet:
         console.print(
             "[red]Error: --verbose and --quiet cannot be used together[/red]"
@@ -623,7 +751,6 @@ def lint(
     if verbose:
         log_level = LogLevel.DEBUG
 
-    # Setup logging
     setup_logging(log_level, quiet)
     logger = logging.getLogger(__name__)
 
@@ -637,7 +764,6 @@ def lint(
         path = Path.cwd()
 
     try:
-        # Load configuration
         config_manager = ConfigManager()
         config = config_manager.load_config(config_file)
 
@@ -666,30 +792,7 @@ def lint(
         )
 
         # Apply CLI overrides to config
-        if workers is not None:
-            config.parallel_workers = workers
-        else:
-            # Auto-detect performance cores if not specified
-            config.parallel_workers = get_default_workers()
-        if exclude is not None:
-            config.exclude_patterns = exclude
-        if not parallel:
-            config.parallel_workers = 1
-        config.require_pinned_sha = require_pinned_sha
-
-        # Apply auto-fix overrides (only if explicitly provided)
-        if auto_fix is not None:
-            config.auto_fix = auto_fix
-        if auto_latest is not None:
-            config.auto_latest = auto_latest
-        if allow_prerelease is not None:
-            config.allow_prerelease = allow_prerelease
-        if two_space_comments is not None:
-            config.two_space_comments = two_space_comments
-        if skip_actions is not None:
-            config.skip_actions = skip_actions
-        if fix_test_calls is not None:
-            config.fix_test_calls = fix_test_calls
+        _apply_cli_overrides(config, cli_options, workers)
 
         # Resolve the action-update cooldown window. Precedence: explicit
         # --cooldown flag, then the repository's Dependabot configuration,
@@ -698,84 +801,16 @@ def lint(
             cooldown, path, quiet, output_format
         )
 
-        # Apply validation method override if specified
-        if validation_method is not None:
-            config.validation_method = validation_method
-
-        # Handle cache options
-        if no_cache:
-            config.cache.enabled = False
-            logger.debug("Cache disabled via --no-cache")
-
-        if cache_ttl is not None:
-            config.cache.default_ttl_seconds = cache_ttl
-            logger.debug(f"Cache TTL overridden to {cache_ttl} seconds")
-
         logger.debug(f"Starting gha-workflow-linter {__version__}")
 
-        # Skip GitHub token operations if Git method is explicitly chosen
-        effective_token = None
-        if config.validation_method != ValidationMethod.GIT:
-            # Resolve GitHub token with CLI fallback
-            effective_token = get_github_token_with_fallback(
-                explicit_token=github_token or config.github_api.token,
-                console=console,
-                quiet=quiet,
-            )
-
-            # Update config with resolved token
-            if effective_token:
-                config.github_api.token = effective_token
-
-        # Determine validation method based on token availability and user preference
-        if not config.validation_method:
-            if effective_token:
-                config.validation_method = ValidationMethod.GITHUB_API
-            else:
-                config.validation_method = ValidationMethod.GIT
-                if not quiet:
-                    console.print(
-                        "[yellow]No GitHub token available, using Git validation method ℹ️[/yellow]"
-                    )
-
-        # Display validation method being used (suppress for JSON output)
-        if not quiet and output_format != "json":
-            if config.validation_method == ValidationMethod.GITHUB_API:
-                console.print(
-                    "[blue]Using validation method: [GraphQL] 🔍[/blue]"
-                )
-            else:
-                console.print(
-                    "[blue]Using validation method: [Git/SSH] 🔍[/blue]"
-                )
-
-            # Display number of parallel workers
-            worker_source = "auto-detected" if workers is None else "configured"
-            console.print(
-                f"[blue]Using {config.parallel_workers} parallel worker(s) ({worker_source}) ⚙️[/blue]"
-            )
-
-        # Only check rate limits if using GitHub API
-        if config.validation_method == ValidationMethod.GITHUB_API:
-            from .github_api import GitHubGraphQLClient
-
-            github_client = GitHubGraphQLClient(config.github_api)
-
-            try:
-                github_client.check_rate_limit_and_exit_if_needed()
-                # If we get here, we're not rate limited
-                if not effective_token and not quiet:
-                    logger.warning(
-                        "No GitHub token available; API requests may be rate-limited ⚠️"
-                    )
-            except SystemExit:
-                # Rate limit check triggered exit, re-raise to exit cleanly
-                raise
+        # Resolve token, select validation method, and pre-flight it
+        _configure_validation_backend(
+            config, cli_options, github_token, workers
+        )
 
         # Only show scanning path if we're actually going to proceed
         logger.debug(f"Scanning path: {path}")
 
-        # Run the linting process
         exit_code = run_linter(config, cli_options)
 
     except typer.Exit:
@@ -828,7 +863,6 @@ def cache(
     ),
 ) -> None:
     """Manage local validation cache."""
-    # Load configuration
     from .config import ConfigManager
 
     config_manager = ConfigManager()
@@ -915,41 +949,98 @@ def cache(
     console.print(f"Cache file: {cache_info['cache_file']}")
 
 
-def run_linter(config: Config, options: CLIOptions) -> int:  # noqa: PLR0911
+@dataclass(frozen=True)
+class _ValidationOutcome:
+    """Results of scanning and validating a workflow tree."""
+
+    workflow_calls: dict[Path, dict[int, ActionCall]]
+    validation_errors: list[ValidationError]
+    validator: ActionCallValidator
+    total_calls: int
+
+
+@dataclass(frozen=True)
+class _AutoFixOutcome:
+    """Files changed and statistics produced by the auto-fixer."""
+
+    fixed_files: dict[Path, list[dict[str, str]]]
+    redirect_stats: dict[str, int]
+    stale_actions_summary: dict[str, list[dict[str, Any]]]
+
+
+def _handle_validation_aborted(
+    e: ValidationAbortedError, *, suppress_console: bool = False
+) -> int:
+    """Print actionable guidance for an aborted validation.
+
+    Returns the linter exit code (always 1) so callers can return it
+    directly. When ``suppress_console`` is set (quiet or JSON output
+    modes) only the logger is used, so stdout is not polluted and JSON
+    output is not corrupted.
     """
-    Run the main linting process.
+    logger = logging.getLogger(__name__)
+    logger.error(f"Validation aborted: {e.message}")
 
-    Args:
-        config: Configuration object
-        options: CLI options
+    if suppress_console:
+        return 1
 
-    Returns:
-        Exit code (0 for success, 1 for failure)
+    # Provide specific guidance based on the error type
+    if isinstance(e.original_error, NetworkError):
+        console.print(
+            "\n[yellow]❌ Network connectivity issue detected[/yellow]"
+        )
+        console.print("[dim]• Check your internet connection")
+        console.print("[dim]• Verify DNS resolution is working")
+        console.print("[dim]• Try again in a few moments[/dim]")
+    elif isinstance(e.original_error, AuthenticationError):
+        console.print("\n[yellow]❌ GitHub API authentication failed[/yellow]")
+        from .github_auth import get_github_cli_suggestions
+
+        for suggestion in get_github_cli_suggestions():
+            console.print(f"[dim]• {suggestion}")
+        console.print("[dim]• Ensure token has 'public_repo' scope[/dim]")
+    elif isinstance(e.original_error, RateLimitError):
+        console.print("\n[yellow]❌ GitHub API rate limit exceeded[/yellow]")
+        console.print("[dim]• Wait for rate limit to reset")
+        from .github_auth import get_github_cli_suggestions
+
+        for suggestion in get_github_cli_suggestions():
+            console.print(f"[dim]• {suggestion}")
+        console.print("[dim]• Try again later[/dim]")
+    elif isinstance(e.original_error, (GitHubAPIError, TemporaryAPIError)):
+        console.print("\n[yellow]❌ GitHub API error[/yellow]")
+        console.print("[dim]• This may be a temporary GitHub service issue")
+        console.print("[dim]• Try again in a few minutes")
+        console.print(
+            "[dim]• Check GitHub status at https://status.github.com/[/dim]"
+        )
+    else:
+        console.print("\n[yellow]❌ Validation could not be completed[/yellow]")
+        console.print(f"[dim]• {e.reason}[/dim]")
+
+    console.print(
+        "\n[red]Cannot determine if action calls are valid or invalid.[/red]"
+    )
+    console.print(
+        "[red]Validation was not performed due to the above issue.[/red]"
+    )
+    return 1
+
+
+def _scan_and_validate(
+    config: Config,
+    options: CLIOptions,
+    scanner: WorkflowScanner,
+    shared_cache: ValidationCache,
+) -> int | _ValidationOutcome:
+    """Scan workflows and validate their action calls.
+
+    Returns an ``int`` exit code when the run short-circuits (scan error,
+    nothing to validate, or aborted validation); otherwise returns a
+    :class:`_ValidationOutcome` for downstream processing.
     """
     logger = logging.getLogger(__name__)
 
-    # ------------------------------------------------------------------
-    # Phase 1 — prepare. Free to print: no Progress / Live UI is active.
-    # ------------------------------------------------------------------
-    scanner = WorkflowScanner(config)
-
-    # Build a single ValidationCache and share it across the validator
-    # and (later) the auto-fixer to avoid duplicate disk I/O and
-    # competing save() calls.
-    shared_cache = ValidationCache(config.cache)
-
-    # Eagerly load the cache and run all startup-time checks so any
-    # banners render *before* opening the Rich Progress UI (printing
-    # inside the progress block would interleave with the active
-    # spinner and corrupt output).
-    _render_cache_prime_banners(shared_cache.prime(), quiet=options.quiet)
-
-    # ------------------------------------------------------------------
-    # Phase 2 — scan + validate. Progress / Live UI is active. No
-    # out-of-band console.print calls below until the Progress block
-    # closes (banners, errors, and tables print after the ``with``
-    # exits in phase 3).
-    # ------------------------------------------------------------------
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -977,7 +1068,6 @@ def run_linter(config: Config, options: CLIOptions) -> int:  # noqa: PLR0911
         # Count total calls for progress tracking
         total_calls = sum(len(calls) for calls in workflow_calls.values())
 
-        # Validate action calls
         validate_task = progress.add_task(
             "Validating action calls...", total=total_calls
         )
@@ -988,238 +1078,271 @@ def run_linter(config: Config, options: CLIOptions) -> int:  # noqa: PLR0911
                 workflow_calls, progress, validate_task
             )
         except ValidationAbortedError as e:
-            logger.error(f"Validation aborted: {e.message}")
-
-            # Provide specific guidance based on the error type
-            if isinstance(e.original_error, NetworkError):
-                console.print(
-                    "\n[yellow]❌ Network connectivity issue detected[/yellow]"
-                )
-                console.print("[dim]• Check your internet connection")
-                console.print("[dim]• Verify DNS resolution is working")
-                console.print("[dim]• Try again in a few moments[/dim]")
-            elif isinstance(e.original_error, AuthenticationError):
-                console.print(
-                    "\n[yellow]❌ GitHub API authentication failed[/yellow]"
-                )
-                from .github_auth import get_github_cli_suggestions
-
-                suggestions = get_github_cli_suggestions()
-                for suggestion in suggestions:
-                    console.print(f"[dim]• {suggestion}")
-                console.print(
-                    "[dim]• Ensure token has 'public_repo' scope[/dim]"
-                )
-            elif isinstance(e.original_error, RateLimitError):
-                console.print(
-                    "\n[yellow]❌ GitHub API rate limit exceeded[/yellow]"
-                )
-                console.print("[dim]• Wait for rate limit to reset")
-                from .github_auth import get_github_cli_suggestions
-
-                suggestions = get_github_cli_suggestions()
-                for suggestion in suggestions:
-                    console.print(f"[dim]• {suggestion}")
-                console.print("[dim]• Try again later[/dim]")
-            elif isinstance(
-                e.original_error, (GitHubAPIError, TemporaryAPIError)
-            ):
-                console.print("\n[yellow]❌ GitHub API error[/yellow]")
-                console.print(
-                    "[dim]• This may be a temporary GitHub service issue"
-                )
-                console.print("[dim]• Try again in a few minutes")
-                console.print(
-                    "[dim]• Check GitHub status at https://status.github.com/[/dim]"
-                )
-            else:
-                console.print(
-                    "\n[yellow]❌ Validation could not be completed[/yellow]"
-                )
-                console.print(f"[dim]• {e.reason}[/dim]")
-
-            console.print(
-                "\n[red]Cannot determine if action calls are valid or invalid.[/red]"
+            return _handle_validation_aborted(
+                e,
+                suppress_console=options.quiet
+                or options.output_format == "json",
             )
-            console.print(
-                "[red]Validation was not performed due to the above issue.[/red]"
-            )
-            return 1
         except Exception as e:
             logger.error(f"Unexpected error validating action calls: {e}")
             return 1
 
-    # ------------------------------------------------------------------
-    # Phase 3 — report + auto-fix. Progress / Live UI has closed; we
-    # are free to console.print again.
-    # ------------------------------------------------------------------
+    return _ValidationOutcome(
+        workflow_calls, validation_errors, validator, total_calls
+    )
+
+
+def _run_auto_fix_stage(
+    config: Config,
+    options: CLIOptions,
+    shared_cache: ValidationCache,
+    validation: _ValidationOutcome,
+) -> _AutoFixOutcome:
+    """Run the auto-fixer and report the resulting changes.
+
+    Auto-fix failures are logged and swallowed so the linter can still
+    report validation results.
+    """
+    logger = logging.getLogger(__name__)
+
     fixed_files: dict[Path, list[dict[str, str]]] = {}
     redirect_stats: dict[str, int] = {"actions_moved": 0, "calls_updated": 0}
     stale_actions_summary: dict[str, list[dict[str, Any]]] = {}
 
     # Determine if we should run auto-fix:
-    # - If auto_fix is enabled, fix validation errors and check for outdated versions
-    # - If auto_latest is also enabled, update to latest versions
+    # - If auto_fix is enabled, fix validation errors and check for outdated
+    #   versions.
+    # - If auto_latest is also enabled, update to latest versions.
     should_run_auto_fix = (config.auto_fix or not config.fix_test_calls) and (
-        validation_errors or config.auto_fix
+        validation.validation_errors or config.auto_fix
     )
-    if should_run_auto_fix:
-        try:
+    if not should_run_auto_fix:
+        return _AutoFixOutcome(
+            fixed_files, redirect_stats, stale_actions_summary
+        )
 
-            async def run_auto_fix() -> tuple[
-                dict[Path, list[dict[str, str]]],
-                dict[str, int],
-                dict[str, list[dict[str, Any]]],
-            ]:
-                async with AutoFixer(
-                    config,
-                    base_path=options.path,
-                    cache=shared_cache,
-                ) as auto_fixer:
-                    # When auto_fix is enabled, always pass all action calls to check
-                    # check_for_updates=True only when auto_latest is enabled (update to latest versions)
-                    # check_for_updates=False means: fix validation errors, report outdated versions
-                    all_calls = workflow_calls if config.auto_fix else {}
-                    check_for_updates = config.auto_latest
-                    return await auto_fixer.fix_validation_errors(
-                        validation_errors,
-                        all_calls,
-                        check_for_updates=check_for_updates,
-                    )
+    try:
 
-            fixed_files, redirect_stats, stale_actions_summary = asyncio.run(
-                run_auto_fix()
-            )
+        async def run_auto_fix() -> tuple[
+            dict[Path, list[dict[str, str]]],
+            dict[str, int],
+            dict[str, list[dict[str, Any]]],
+        ]:
+            async with AutoFixer(
+                config,
+                base_path=options.path,
+                cache=shared_cache,
+            ) as auto_fixer:
+                # When auto_fix is enabled, always pass all action calls to
+                # check. check_for_updates=True only when auto_latest is
+                # enabled (update to latest versions); False means: fix
+                # validation errors, report outdated versions.
+                all_calls = validation.workflow_calls if config.auto_fix else {}
+                check_for_updates = config.auto_latest
+                return await auto_fixer.fix_validation_errors(
+                    validation.validation_errors,
+                    all_calls,
+                    check_for_updates=check_for_updates,
+                )
 
-            if fixed_files and not options.quiet:
-                # Separate skipped items from actual fixes
-                files_with_fixes = {}
-                files_with_skipped = {}
+        fixed_files, redirect_stats, stale_actions_summary = asyncio.run(
+            run_auto_fix()
+        )
 
-                for file_path, changes in fixed_files.items():
-                    has_fixes = False
-                    has_skipped = False
+        if fixed_files and not options.quiet:
+            _display_auto_fix_changes(fixed_files, options)
 
-                    for change in changes:
-                        if change.get("skipped") == "true":
-                            has_skipped = True
-                        else:
-                            has_fixes = True
+    except Exception as e:
+        logger.warning(f"Auto-fix failed: {e}")
+        if not options.quiet:
+            console.print(f"[yellow]Auto-fix failed: {e} ⚠️[/yellow]")
 
-                    if has_fixes:
-                        files_with_fixes[file_path] = [
-                            c for c in changes if c.get("skipped") != "true"
-                        ]
-                    if has_skipped:
-                        files_with_skipped[file_path] = [
-                            c for c in changes if c.get("skipped") == "true"
-                        ]
+    return _AutoFixOutcome(fixed_files, redirect_stats, stale_actions_summary)
 
-                # Display skipped testing items first
-                if files_with_skipped:
-                    console.print(
-                        f"\n[cyan]Skipped {sum(len(v) for v in files_with_skipped.values())} testing action(s) in {len(files_with_skipped)} file(s): ⏩[/cyan]"
-                    )
-                    for file_path, changes in files_with_skipped.items():
-                        console.print(
-                            f"\n[bold]{_get_relative_path(file_path, options.path)} 📄[/bold]"
-                        )
-                        for change in changes:
-                            # Extract just the uses: part from the raw line
-                            line = change["old_line"].strip()
-                            # Remove leading "- " if present
-                            if line.startswith("- "):
-                                line = line[2:]
-                            console.print(f"  ⏩ {line}")
 
-                # Display actual fixes
-                if files_with_fixes:
-                    total_workflow_calls_updated = sum(
-                        len(changes) for changes in files_with_fixes.values()
-                    )
-                    console.print(
-                        f"\n[yellow]Updated {total_workflow_calls_updated} workflow call(s) in {len(files_with_fixes)} file(s): 🔧[/yellow]"
-                    )
-                    for file_path, changes in files_with_fixes.items():
-                        console.print(
-                            f"\n[bold]{_get_relative_path(file_path, options.path)} 📄[/bold]"
-                        )
-                        for change in changes:
-                            console.print(
-                                f"[red]  - {change['old_line'].strip()}[/red]"
-                            )
-                            console.print(
-                                f"[green]  + {change['new_line'].strip()}[/green]"
-                            )
-                    console.print()  # Add blank line after changes
+def _display_auto_fix_changes(
+    fixed_files: dict[Path, list[dict[str, str]]],
+    options: CLIOptions,
+) -> None:
+    """Render skipped testing actions and applied fixes to the console."""
+    # Separate skipped items from actual fixes
+    files_with_fixes: dict[Path, list[dict[str, str]]] = {}
+    files_with_skipped: dict[Path, list[dict[str, str]]] = {}
 
-        except Exception as e:
-            logger.warning(f"Auto-fix failed: {e}")
-            if not options.quiet:
-                console.print(f"[yellow]Auto-fix failed: {e} ⚠️[/yellow]")
+    for file_path, changes in fixed_files.items():
+        skipped = [c for c in changes if c.get("skipped") == "true"]
+        fixes = [c for c in changes if c.get("skipped") != "true"]
+        if fixes:
+            files_with_fixes[file_path] = fixes
+        if skipped:
+            files_with_skipped[file_path] = skipped
 
-    # Generate and display results
-    scan_summary = scanner.get_scan_summary(workflow_calls)
+    if files_with_skipped:
+        _display_skipped_testing_actions(files_with_skipped, options)
+    if files_with_fixes:
+        _display_applied_fixes(files_with_fixes, options)
+
+
+def _display_skipped_testing_actions(
+    files_with_skipped: dict[Path, list[dict[str, str]]],
+    options: CLIOptions,
+) -> None:
+    """Render the list of testing actions that were skipped."""
+    total_skipped = sum(len(v) for v in files_with_skipped.values())
+    console.print(
+        f"\n[cyan]Skipped {total_skipped} testing action(s) in "
+        f"{len(files_with_skipped)} file(s): ⏩[/cyan]"
+    )
+    for file_path, changes in files_with_skipped.items():
+        console.print(
+            f"\n[bold]{_get_relative_path(file_path, options.path)} 📄[/bold]"
+        )
+        for change in changes:
+            line = change["old_line"].strip()
+            # Remove leading "- " if present
+            if line.startswith("- "):
+                line = line[2:]
+            console.print(f"  ⏩ {line}")
+
+
+def _display_applied_fixes(
+    files_with_fixes: dict[Path, list[dict[str, str]]],
+    options: CLIOptions,
+) -> None:
+    """Render the workflow calls that were rewritten by auto-fix."""
+    total_updated = sum(len(changes) for changes in files_with_fixes.values())
+    console.print(
+        f"\n[yellow]Updated {total_updated} workflow call(s) in "
+        f"{len(files_with_fixes)} file(s): 🔧[/yellow]"
+    )
+    for file_path, changes in files_with_fixes.items():
+        console.print(
+            f"\n[bold]{_get_relative_path(file_path, options.path)} 📄[/bold]"
+        )
+        for change in changes:
+            console.print(f"[red]  - {change['old_line'].strip()}[/red]")
+            console.print(f"[green]  + {change['new_line'].strip()}[/green]")
+    console.print()  # Add blank line after changes
+
+
+def _emit_results(
+    options: CLIOptions,
+    scanner: WorkflowScanner,
+    validation: _ValidationOutcome,
+    autofix: _AutoFixOutcome,
+) -> None:
+    """Generate and display the scan/validation results."""
+    scan_summary = scanner.get_scan_summary(validation.workflow_calls)
 
     # Calculate unique calls for statistics
-    unique_calls = set()
-    for calls in workflow_calls.values():
+    unique_calls: set[str] = set()
+    for calls in validation.workflow_calls.values():
         for call in calls.values():
             call_key = f"{call.organization}/{call.repository}@{call.reference}"
             unique_calls.add(call_key)
 
-    validation_summary = validator.get_validation_summary(
-        validation_errors, total_calls, len(unique_calls)
+    validation_summary = validation.validator.get_validation_summary(
+        validation.validation_errors, validation.total_calls, len(unique_calls)
     )
 
     if options.output_format == "json":
         output_json_results(
-            scan_summary, validation_summary, validation_errors, options.path
+            scan_summary,
+            validation_summary,
+            validation.validation_errors,
+            options.path,
         )
     else:
         output_text_results(
             scan_summary,
             validation_summary,
-            validation_errors,
+            validation.validation_errors,
             options.path,
             options.quiet,
-            fixed_files,
-            redirect_stats,
-            stale_actions_summary,
+            autofix.fixed_files,
+            autofix.redirect_stats,
+            autofix.stale_actions_summary,
         )
 
-    # When auto_fix is enabled but auto_latest is not, display outdated actions report
-    # (validation errors were fixed, but version updates are only reported)
-    if stale_actions_summary and not config.auto_latest and not options.quiet:
-        _display_stale_actions_from_summary(stale_actions_summary, options)
-        return 0
 
-    # Determine exit code
-    # If we auto-fixed files (not just skipped testing items), always exit with error to indicate changes were made
-    if fixed_files:
-        # Check if there are any actual fixes (not just skipped items)
-        has_actual_fixes = False
-        for changes in fixed_files.values():
-            for change in changes:
-                if change.get("skipped") != "true":
-                    has_actual_fixes = True
-                    break
-            if has_actual_fixes:
-                break
-
+def _determine_exit_code(
+    options: CLIOptions,
+    validation: _ValidationOutcome,
+    autofix: _AutoFixOutcome,
+) -> int:
+    """Compute the process exit code from fixes and validation errors."""
+    # If we auto-fixed files (not just skipped testing items), always exit
+    # with an error to indicate changes were made.
+    if autofix.fixed_files:
+        has_actual_fixes = any(
+            change.get("skipped") != "true"
+            for changes in autofix.fixed_files.values()
+            for change in changes
+        )
         if has_actual_fixes:
             return 1
 
-    # Otherwise, exit with error only if there are validation errors (excluding test references) and fail_on_error is enabled
+    # Otherwise, exit with error only if there are validation errors
+    # (excluding test references) and fail_on_error is enabled.
     if options.fail_on_error:
-        # Count actual errors (excluding test references)
         actual_errors = [
-            e for e in validation_errors if not has_test_comment(e.action_call)
+            e
+            for e in validation.validation_errors
+            if not has_test_comment(e.action_call)
         ]
         if actual_errors:
             return 1
 
     return 0
+
+
+def run_linter(config: Config, options: CLIOptions) -> int:
+    """
+    Run the main linting process.
+
+    Args:
+        config: Configuration object
+        options: CLI options
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    scanner = WorkflowScanner(config)
+
+    # Build a single ValidationCache and share it across the validator
+    # and (later) the auto-fixer to avoid duplicate disk I/O and
+    # competing save() calls.
+    shared_cache = ValidationCache(config.cache)
+
+    # Eagerly load the cache and run all startup-time checks so any
+    # banners render *before* opening the Rich Progress UI (printing
+    # inside the progress block would interleave with the active
+    # spinner and corrupt output).
+    _render_cache_prime_banners(shared_cache.prime(), quiet=options.quiet)
+
+    scan_result = _scan_and_validate(config, options, scanner, shared_cache)
+    if isinstance(scan_result, int):
+        return scan_result
+    validation = scan_result
+
+    autofix = _run_auto_fix_stage(config, options, shared_cache, validation)
+
+    _emit_results(options, scanner, validation, autofix)
+
+    # When auto_fix is enabled but auto_latest is not, display outdated
+    # actions report (validation errors were fixed, but version updates are
+    # only reported).
+    if (
+        autofix.stale_actions_summary
+        and not config.auto_latest
+        and not options.quiet
+    ):
+        _display_stale_actions_from_summary(
+            autofix.stale_actions_summary, options
+        )
+        return 0
+
+    return _determine_exit_code(options, validation, autofix)
 
 
 def _create_scan_summary_table(

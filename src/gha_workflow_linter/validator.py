@@ -8,13 +8,12 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from rich.progress import Progress, TaskID
-
 
 from .cache import ValidationCache
 from .exceptions import (
@@ -111,7 +110,6 @@ class ActionCallValidator:
 
         # Merge cache stats into API stats
         self.api_stats.cache_hits += self._cache.stats.hits
-        # Save cache before exiting
         self._cache.save()
 
     async def validate_action_calls_async(
@@ -251,27 +249,9 @@ class ActionCallValidator:
         """
         errors: list[ValidationError] = []
 
-        # Flatten and deduplicate action calls
-        all_calls: list[tuple[Path, ActionCall]] = []
-        unique_calls: dict[str, ActionCall] = {}
-        call_locations: dict[str, list[tuple[Path, ActionCall]]] = defaultdict(
-            list
+        all_calls, unique_calls, call_locations = self._flatten_action_calls(
+            action_calls
         )
-
-        for file_path, calls in action_calls.items():
-            for action_call in calls.values():
-                all_calls.append((file_path, action_call))
-
-                # For reusable workflows, extract the actual repository name for validation
-                repo_for_validation = self._extract_repository_for_validation(
-                    action_call
-                )
-
-                # Create unique key for deduplication using the repo name for validation
-                call_key = f"{action_call.organization}/{repo_for_validation}@{action_call.reference}"
-                unique_calls[call_key] = action_call
-                call_locations[call_key].append((file_path, action_call))
-
         total_calls = len(all_calls)
         unique_count = len(unique_calls)
 
@@ -279,6 +259,101 @@ class ActionCallValidator:
             self.logger.info("No action calls to validate")
             return errors
 
+        self._log_validation_plan(total_calls, unique_count, use_github_api)
+
+        _unique_repos, repo_refs = self._collect_repo_refs(unique_calls)
+        cached_results, cache_misses = self._cache.get_batch(repo_refs)
+        if cached_results:
+            self.logger.debug(
+                f"Found {len(cached_results)} cached validation results"
+            )
+
+        repos_to_validate, refs_to_validate = self._prepare_validation_targets(
+            cache_misses, progress, task_id
+        )
+
+        repo_results = await self._validate_repositories_stage(
+            repos_to_validate, use_github_api
+        )
+        self._merge_cached_repo_results(repo_results, cached_results)
+        # Progress is scaled to cache misses (see _prepare_validation_targets),
+        # so advance by the number of repositories actually validated here,
+        # not len(unique_repos), which would include cached repos and could
+        # push completed beyond total.
+        self._advance_progress(
+            progress,
+            task_id,
+            len(repos_to_validate),
+            "Validating references...",
+        )
+
+        valid_repo_refs_to_validate = self._select_valid_repo_refs(
+            refs_to_validate, repo_results
+        )
+        ref_results = await self._validate_references_stage(
+            valid_repo_refs_to_validate, use_github_api
+        )
+
+        subpath_refs_to_validate = self._select_subpath_refs(
+            valid_repo_refs_to_validate, ref_results
+        )
+        (
+            subpath_results,
+            inconclusive_subpaths,
+        ) = await self._validate_subpaths_stage(
+            subpath_refs_to_validate, use_github_api
+        )
+
+        self._merge_cached_ref_results(ref_results, cached_results)
+        self._advance_progress(
+            progress,
+            task_id,
+            len(repos_to_validate) + len(valid_repo_refs_to_validate),
+            "Processing validation results...",
+        )
+
+        cache_entries_to_store = self._build_cache_entries(
+            refs_to_validate,
+            inconclusive_subpaths,
+            repo_results,
+            ref_results,
+            subpath_results,
+            use_github_api,
+        )
+        if cache_entries_to_store:
+            self._cache.put_batch(cache_entries_to_store)
+
+        all_repo_results, all_ref_results, all_subpath_results = (
+            self._merge_all_results(
+                repo_results, ref_results, subpath_results, cached_results
+            )
+        )
+
+        validation_results = self._combine_validation_results(
+            unique_calls,
+            all_repo_results,
+            all_ref_results,
+            all_subpath_results,
+        )
+
+        errors = self._build_validation_errors(
+            validation_results, call_locations, unique_calls
+        )
+
+        self.logger.debug(
+            f"Validation complete: {len(errors)} errors out of "
+            f"{total_calls} calls ({unique_count} unique calls validated)"
+        )
+
+        self._log_final_statistics(use_github_api)
+        self._finalize_progress(progress, task_id)
+
+        return errors
+
+    def _log_validation_plan(
+        self, total_calls: int, unique_count: int, use_github_api: bool
+    ) -> None:
+        """Log the validation method and deduplication savings."""
         validation_method_str = (
             "GitHub GraphQL API" if use_github_api else "Git operations"
         )
@@ -286,8 +361,6 @@ class ActionCallValidator:
             f"Validating {total_calls} action calls "
             f"({unique_count} unique calls) using {validation_method_str}"
         )
-
-        # Deduplication savings
         saved_validations = total_calls - unique_count
         if saved_validations > 0:
             self.logger.debug(
@@ -295,31 +368,15 @@ class ActionCallValidator:
                 f"({saved_validations / total_calls * 100:.1f}% reduction)"
             )
 
-        # Extract unique repositories and references
-        unique_repos = set()
-        repo_refs: list[tuple[str, str]] = []
-
-        for _call_key, action_call in unique_calls.items():
-            # Use the extracted repository name for validation
-            repo_for_validation = self._extract_repository_for_validation(
-                action_call
-            )
-            repo_key = f"{action_call.organization}/{repo_for_validation}"
-            unique_repos.add(repo_key)
-            repo_refs.append((repo_key, action_call.reference))
-
-        # Check cache for existing validation results
-        cached_results, cache_misses = self._cache.get_batch(repo_refs)
-
-        if cached_results:
-            self.logger.debug(
-                f"Found {len(cached_results)} cached validation results"
-            )
-
-        # Filter out cached results from what needs to be validated
-        repos_to_validate = set()
-        refs_to_validate = []
-
+    def _prepare_validation_targets(
+        self,
+        cache_misses: list[tuple[str, str]],
+        progress: Progress | None,
+        task_id: TaskID | None,
+    ) -> tuple[set[str], list[tuple[str, str]]]:
+        """Split cache misses into repos/refs to validate and size progress."""
+        repos_to_validate: set[str] = set()
+        refs_to_validate: list[tuple[str, str]] = []
         for repo, ref in cache_misses:
             repos_to_validate.add(repo)
             refs_to_validate.append((repo, ref))
@@ -342,262 +399,133 @@ class ActionCallValidator:
                     description="Validation complete (all cached)",
                 )
 
-        # Step 1: Validate repositories in batch (only for cache misses)
         self.logger.debug(
             f"Validating {len(repos_to_validate)} unique repositories (after cache)"
         )
+        return repos_to_validate, refs_to_validate
 
-        repo_results: dict[str, bool] = {}
-
-        if repos_to_validate:
-            try:
-                if use_github_api:
-                    assert self._github_client is not None
-                    repo_results = (
-                        await self._github_client.validate_repositories_batch(
-                            list(repos_to_validate)
-                        )
-                    )
-                    # Merge API stats
-                    self._merge_api_stats(self._github_client.get_api_stats())
-                else:
-                    assert self._git_client is not None
-                    git_repo_results = (
-                        await self._git_client.validate_repositories_batch(
-                            list(repos_to_validate)
-                        )
-                    )
-                    # Convert ValidationResult enum to boolean for consistency with GitHub API
-                    repo_results = {
-                        repo: result == ValidationResult.VALID
-                        for repo, result in git_repo_results.items()
-                    }
-
-                method_stats = "GraphQL" if use_github_api else "Git"
-                self.logger.debug(
-                    f"Repository validation complete. API calls so far: "
-                    f"{self.api_stats.total_calls} ({method_stats}: {self.api_stats.graphql_calls if use_github_api else self.api_stats.git_calls}, "
-                    f"Cache hits: {self.api_stats.cache_hits})"
-                )
-
-            except (
-                NetworkError,
-                GitHubAPIError,
-                AuthenticationError,
-                RateLimitError,
-                TemporaryAPIError,
-            ) as e:
-                error_context = (
-                    "GitHub API/Network" if use_github_api else "Git/Network"
-                )
-                self.logger.error(
-                    f"{error_context} error during repository validation: {e}"
-                )
-                raise ValidationAbortedError(
-                    "Unable to validate GitHub Actions due to API/network issues",
-                    reason=str(e),
-                    original_error=e,
-                ) from e
-            except Exception as e:
-                self.logger.error(
-                    f"Unexpected error during repository validation: {e}"
-                )
-                raise ValidationAbortedError(
-                    "Validation failed due to unexpected error",
-                    reason=str(e),
-                    original_error=e,
-                ) from e
-
-        # Merge cached repository results
+    def _merge_cached_repo_results(
+        self,
+        repo_results: dict[str, bool],
+        cached_results: dict[tuple[str, str], Any],
+    ) -> None:
+        """Fold cached repository verdicts into the fresh repo results."""
         for repo, ref in cached_results:
             if repo not in repo_results:
-                # Assume cached results are for valid repositories if they were cached
+                # Cached entries imply the repository was reachable.
                 repo_results[repo] = cached_results[(repo, ref)].result not in [
                     ValidationResult.INVALID_REPOSITORY
                 ]
 
-        # Update progress
-        if progress and task_id:
-            progress.update(
-                task_id,
-                completed=len(unique_repos),
-                description="Validating references...",
+    def _merge_cached_ref_results(
+        self,
+        ref_results: dict[tuple[str, str], bool],
+        cached_results: dict[tuple[str, str], Any],
+    ) -> None:
+        """Fold cached reference verdicts into the fresh reference results."""
+        for (repo, ref), cached_entry in cached_results.items():
+            ref_results[(repo, ref)] = (
+                cached_entry.result == ValidationResult.VALID
             )
 
-        # Step 2: Validate references for valid repositories only (excluding cached results)
-        valid_repo_refs_to_validate = [
+    def _advance_progress(
+        self,
+        progress: Progress | None,
+        task_id: TaskID | None,
+        completed: int,
+        description: str,
+    ) -> None:
+        """Advance the progress task when progress reporting is enabled."""
+        if progress and task_id:
+            progress.update(
+                task_id, completed=completed, description=description
+            )
+
+    def _select_valid_repo_refs(
+        self,
+        refs_to_validate: list[tuple[str, str]],
+        repo_results: dict[str, bool],
+    ) -> list[tuple[str, str]]:
+        """Keep only the refs whose repository validated successfully."""
+        valid = [
             (repo_key, ref)
             for repo_key, ref in refs_to_validate
             if repo_results.get(repo_key, False)
         ]
-
         self.logger.debug(
-            f"Validating {len(valid_repo_refs_to_validate)} references for valid repositories (after cache)"
+            f"Validating {len(valid)} references for valid repositories "
+            f"(after cache)"
         )
+        return valid
 
-        ref_results: dict[tuple[str, str], bool] = {}
-
-        if valid_repo_refs_to_validate:
-            try:
-                if use_github_api:
-                    assert self._github_client is not None
-                    ref_results = (
-                        await self._github_client.validate_references_batch(
-                            valid_repo_refs_to_validate
-                        )
-                    )
-                    # Merge API stats again
-                    self._merge_api_stats(self._github_client.get_api_stats())
-                else:
-                    assert self._git_client is not None
-                    git_ref_results = (
-                        await self._git_client.validate_references_batch(
-                            valid_repo_refs_to_validate
-                        )
-                    )
-                    # Convert ValidationResult enum to boolean for consistency with GitHub API
-                    ref_results = {
-                        repo_ref: result == ValidationResult.VALID
-                        for repo_ref, result in git_ref_results.items()
-                    }
-
-                method_stats = "GraphQL" if use_github_api else "Git"
-                self.logger.debug(
-                    f"Reference validation complete. Total API calls: "
-                    f"{self.api_stats.total_calls} ({method_stats}: {self.api_stats.graphql_calls if use_github_api else self.api_stats.git_calls}, "
-                    f"Cache hits: {self.api_stats.cache_hits})"
-                )
-
-            except (
-                NetworkError,
-                GitHubAPIError,
-                AuthenticationError,
-                RateLimitError,
-                TemporaryAPIError,
-            ) as e:
-                error_context = (
-                    "GitHub API/Network" if use_github_api else "Git/Network"
-                )
-                self.logger.error(
-                    f"{error_context} error during reference validation: {e}"
-                )
-                raise ValidationAbortedError(
-                    "Unable to validate GitHub Actions due to API/network issues",
-                    reason=str(e),
-                    original_error=e,
-                ) from e
-            except Exception as e:
-                self.logger.error(
-                    f"Unexpected error during reference validation: {e}"
-                )
-                raise ValidationAbortedError(
-                    "Validation failed due to unexpected error",
-                    reason=str(e),
-                    original_error=e,
-                ) from e
-
-        # Step 2.5: Validate subdirectory (monorepo) action subpaths.
-        #
-        # Both validation methods strip any subpath to ``owner/repo`` for the
-        # repository and reference checks above. For subdirectory actions
-        # (``owner/repo/path@ref``) we additionally confirm that ``path``
-        # exists in the repository tree at ``ref``; otherwise an action with a
-        # valid base repo and ref but a bogus subpath would pass. This work is
-        # gated to subdirectory actions whose repo + ref already validated, so
-        # plain ``owner/repo`` calls add no extra network work.
-        subpath_results: dict[tuple[str, str], bool] = {}
-        # Subpath checks that could not be decided (e.g. a transient Git fetch
-        # failure on an already-valid ref). These are given the benefit of the
-        # doubt for the current run's surfaced result, but must NOT be cached
-        # so a transient failure cannot persist as a false VALID that masks a
-        # bogus subpath; the next run re-checks them instead.
-        inconclusive_subpaths: set[tuple[str, str]] = set()
-        subpath_refs_to_validate = [
+    def _select_subpath_refs(
+        self,
+        valid_repo_refs_to_validate: list[tuple[str, str]],
+        ref_results: dict[tuple[str, str], bool],
+    ) -> list[tuple[str, str]]:
+        """Keep only valid refs that carry an action subpath to check."""
+        return [
             (repo_key, ref)
             for (repo_key, ref) in valid_repo_refs_to_validate
             if has_action_subpath(repo_key)
             and ref_results.get((repo_key, ref), False)
         ]
 
-        if subpath_refs_to_validate:
-            self.logger.debug(
-                f"Validating {len(subpath_refs_to_validate)} subdirectory "
-                f"action subpaths (after cache)"
-            )
-            try:
-                if use_github_api:
-                    assert self._github_client is not None
-                    subpath_results = (
-                        await self._github_client.validate_subpaths_batch(
-                            subpath_refs_to_validate
-                        )
-                    )
-                    self._merge_api_stats(self._github_client.get_api_stats())
-                else:
-                    assert self._git_client is not None
-                    git_subpath_results = (
-                        await self._git_client.validate_subpaths_batch(
-                            subpath_refs_to_validate
-                        )
-                    )
-                    # Classify into three states. A definitive INVALID_PATH
-                    # marks the subpath bogus; VALID marks it present; any
-                    # other (e.g. NETWORK_ERROR/TIMEOUT) is inconclusive --
-                    # given the benefit of the doubt for this run but recorded
-                    # so it is excluded from caching.
-                    for key, result in git_subpath_results.items():
-                        if result == ValidationResult.INVALID_PATH:
-                            subpath_results[key] = False
-                        elif result == ValidationResult.VALID:
-                            subpath_results[key] = True
-                        else:
-                            subpath_results[key] = True
-                            inconclusive_subpaths.add(key)
-            except (
-                NetworkError,
-                GitHubAPIError,
-                AuthenticationError,
-                RateLimitError,
-                TemporaryAPIError,
-            ) as e:
-                error_context = (
-                    "GitHub API/Network" if use_github_api else "Git/Network"
+    def _flatten_action_calls(
+        self, action_calls: dict[Path, dict[int, ActionCall]]
+    ) -> tuple[
+        list[tuple[Path, ActionCall]],
+        dict[str, ActionCall],
+        dict[str, list[tuple[Path, ActionCall]]],
+    ]:
+        """Flatten per-file action calls and deduplicate by repo@ref."""
+        all_calls: list[tuple[Path, ActionCall]] = []
+        unique_calls: dict[str, ActionCall] = {}
+        call_locations: dict[str, list[tuple[Path, ActionCall]]] = defaultdict(
+            list
+        )
+        for file_path, calls in action_calls.items():
+            for action_call in calls.values():
+                all_calls.append((file_path, action_call))
+                repo_for_validation = self._extract_repository_for_validation(
+                    action_call
                 )
-                self.logger.error(
-                    f"{error_context} error during subpath validation: {e}"
-                )
-                raise ValidationAbortedError(
-                    "Unable to validate GitHub Actions due to API/network issues",
-                    reason=str(e),
-                    original_error=e,
-                ) from e
-            except Exception as e:
-                self.logger.error(
-                    f"Unexpected error during subpath validation: {e}"
-                )
-                raise ValidationAbortedError(
-                    "Validation failed due to unexpected error",
-                    reason=str(e),
-                    original_error=e,
-                ) from e
+                call_key = f"{action_call.organization}/{repo_for_validation}@{action_call.reference}"
+                unique_calls[call_key] = action_call
+                call_locations[call_key].append((file_path, action_call))
+        return all_calls, unique_calls, call_locations
 
-        # Merge cached reference results
-        for (repo, ref), cached_entry in cached_results.items():
-            ref_results[(repo, ref)] = (
-                cached_entry.result == ValidationResult.VALID
+    def _collect_repo_refs(
+        self, unique_calls: dict[str, ActionCall]
+    ) -> tuple[set[str], list[tuple[str, str]]]:
+        """Collect the unique repositories and (repo, ref) pairs to validate."""
+        unique_repos: set[str] = set()
+        repo_refs: list[tuple[str, str]] = []
+        for action_call in unique_calls.values():
+            repo_for_validation = self._extract_repository_for_validation(
+                action_call
             )
+            repo_key = f"{action_call.organization}/{repo_for_validation}"
+            unique_repos.add(repo_key)
+            repo_refs.append((repo_key, action_call.reference))
+        return unique_repos, repo_refs
 
-        # Update progress
-        if progress and task_id:
-            progress.update(
-                task_id,
-                completed=len(repos_to_validate)
-                + len(valid_repo_refs_to_validate),
-                description="Processing validation results...",
-            )
-
-        # Cache new validation results
-        cache_entries_to_store = []
+    def _build_cache_entries(
+        self,
+        refs_to_validate: list[tuple[str, str]],
+        inconclusive_subpaths: set[tuple[str, str]],
+        repo_results: dict[str, bool],
+        ref_results: dict[tuple[str, str], bool],
+        subpath_results: dict[tuple[str, str], bool],
+        use_github_api: bool,
+    ) -> list[
+        tuple[str, str, ValidationResult, str, ValidationMethod, str | None]
+    ]:
+        """Build the cache entries to persist for freshly validated refs."""
+        api_call_type = "graphql" if use_github_api else "git"
+        cache_entries: list[
+            tuple[str, str, ValidationResult, str, ValidationMethod, str | None]
+        ] = []
         for repo, ref in refs_to_validate:
             # Skip caching entries whose subpath check was inconclusive so a
             # transient failure is retried next run rather than persisted as a
@@ -613,27 +541,23 @@ class ActionCallValidator:
 
             if repo_valid and ref_valid and subpath_valid:
                 result = ValidationResult.VALID
-                api_call_type = "graphql" if use_github_api else "git"
                 error_message = None
             elif not repo_valid:
                 result = ValidationResult.INVALID_REPOSITORY
-                api_call_type = "graphql" if use_github_api else "git"
                 error_message = f"Repository {repo} not found or not accessible"
             elif not ref_valid:
                 result = ValidationResult.INVALID_REFERENCE
-                api_call_type = "graphql" if use_github_api else "git"
                 error_message = (
                     f"Reference {ref} not found in repository {repo}"
                 )
             else:
                 result = ValidationResult.INVALID_PATH
-                api_call_type = "graphql" if use_github_api else "git"
                 error_message = (
                     f"Subdirectory path '{action_subpath(repo)}' not found in "
                     f"{base_repository(repo)} at {ref}"
                 )
 
-            cache_entries_to_store.append(
+            cache_entries.append(
                 (
                     repo,
                     ref,
@@ -643,21 +567,28 @@ class ActionCallValidator:
                     error_message,
                 )
             )
+        return cache_entries
 
-        if cache_entries_to_store:
-            self._cache.put_batch(cache_entries_to_store)
+    def _merge_all_results(
+        self,
+        repo_results: dict[str, bool],
+        ref_results: dict[tuple[str, str], bool],
+        subpath_results: dict[tuple[str, str], bool],
+        cached_results: dict[tuple[str, str], Any],
+    ) -> tuple[
+        dict[str, bool],
+        dict[tuple[str, str], bool],
+        dict[tuple[str, str], bool],
+    ]:
+        """Combine freshly validated results with cached results.
 
-        # Step 3: Map results back to all occurrences (including cached results)
-        # Reconstruct full repo_refs list for _combine_validation_results
-        # all_repo_refs = repo_refs  # Not needed since we use repo_refs directly
+        A cached INVALID_PATH means the base repo and ref are valid but the
+        subdirectory subpath is bogus, so it must be reflected as repo-valid
+        + ref-valid + subpath-invalid (not as an invalid ref).
+        """
         all_repo_results = repo_results.copy()
         all_ref_results = ref_results.copy()
         all_subpath_results = dict(subpath_results)
-
-        # Add cached results to the full results dictionaries. A cached
-        # INVALID_PATH means the base repo and ref are valid but the
-        # subdirectory subpath is bogus, so it must be reflected as
-        # repo-valid + ref-valid + subpath-invalid (not as an invalid ref).
         for (repo, ref), cached_entry in cached_results.items():
             all_repo_results[repo] = cached_entry.result not in [
                 ValidationResult.INVALID_REPOSITORY
@@ -669,53 +600,51 @@ class ActionCallValidator:
             all_subpath_results[(repo, ref)] = (
                 cached_entry.result != ValidationResult.INVALID_PATH
             )
+        return all_repo_results, all_ref_results, all_subpath_results
 
-        validation_results = self._combine_validation_results(
-            unique_calls,
-            all_repo_results,
-            all_ref_results,
-            all_subpath_results,
-        )
-
+    def _build_validation_errors(
+        self,
+        validation_results: dict[str, ValidationResult],
+        call_locations: dict[str, list[tuple[Path, ActionCall]]],
+        unique_calls: dict[str, ActionCall],
+    ) -> list[ValidationError]:
+        """Turn per-call validation results into ``ValidationError`` records."""
+        errors: list[ValidationError] = []
         for call_key, result in validation_results.items():
             if result != ValidationResult.VALID:
                 for file_path, action_call in call_locations[call_key]:
-                    error = ValidationError(
-                        file_path=file_path,
-                        action_call=action_call,
-                        result=result,
-                        error_message=self._get_error_message(result),
+                    errors.append(
+                        ValidationError(
+                            file_path=file_path,
+                            action_call=action_call,
+                            result=result,
+                            error_message=self._get_error_message(result),
+                        )
                     )
-                    errors.append(error)
 
-        # Step 4: Check SHA pinning requirements if enabled
         if self.config.require_pinned_sha:
             for call_key, action_call in unique_calls.items():
-                # Only check if the call passed other validations
                 if (
                     validation_results.get(call_key) == ValidationResult.VALID
                     and action_call.reference_type != ReferenceType.COMMIT_SHA
                 ):
-                    # Add error for each occurrence of this unpinned call
                     for file_path, actual_action_call in call_locations[
                         call_key
                     ]:
-                        error = ValidationError(
-                            file_path=file_path,
-                            action_call=actual_action_call,
-                            result=ValidationResult.NOT_PINNED_TO_SHA,
-                            error_message=self._get_error_message(
-                                ValidationResult.NOT_PINNED_TO_SHA
-                            ),
+                        errors.append(
+                            ValidationError(
+                                file_path=file_path,
+                                action_call=actual_action_call,
+                                result=ValidationResult.NOT_PINNED_TO_SHA,
+                                error_message=self._get_error_message(
+                                    ValidationResult.NOT_PINNED_TO_SHA
+                                ),
+                            )
                         )
-                        errors.append(error)
+        return errors
 
-        # Log final statistics
-        self.logger.debug(
-            f"Validation complete: {len(errors)} errors out of "
-            f"{total_calls} calls ({unique_count} unique calls validated)"
-        )
-
+    def _log_final_statistics(self, use_github_api: bool) -> None:
+        """Emit end-of-run API/Git statistics at debug level."""
         if use_github_api and self._github_client:
             rate_limit_info = self._github_client.get_rate_limit_info()
             self.logger.debug(
@@ -743,11 +672,12 @@ class ActionCallValidator:
                 f"Rate limit delays encountered: {self.api_stats.rate_limit_delays}"
             )
 
-        # Mark progress as complete by getting the task's current total
+    def _finalize_progress(
+        self, progress: Progress | None, task_id: TaskID | None
+    ) -> None:
+        """Mark the progress task complete if it is not already."""
         if progress and task_id:
-            # Get the task to find its total
             task = progress.tasks[task_id]
-            # Only update if not already completed
             if task.total is not None and task.completed < task.total:
                 progress.update(
                     task_id,
@@ -755,7 +685,170 @@ class ActionCallValidator:
                     description="Validation complete",
                 )
 
-        return errors
+    _ABORT_ERRORS: tuple[type[Exception], ...] = (
+        NetworkError,
+        GitHubAPIError,
+        AuthenticationError,
+        RateLimitError,
+        TemporaryAPIError,
+    )
+
+    def _abort_validation(
+        self, stage: str, use_github_api: bool, error: Exception
+    ) -> NoReturn:
+        """Wrap a stage failure in ``ValidationAbortedError`` and raise."""
+        if isinstance(error, self._ABORT_ERRORS):
+            context = "GitHub API/Network" if use_github_api else "Git/Network"
+            self.logger.error(
+                f"{context} error during {stage} validation: {error}"
+            )
+            raise ValidationAbortedError(
+                "Unable to validate GitHub Actions due to API/network issues",
+                reason=str(error),
+                original_error=error,
+            ) from error
+        self.logger.error(
+            f"Unexpected error during {stage} validation: {error}"
+        )
+        raise ValidationAbortedError(
+            "Validation failed due to unexpected error",
+            reason=str(error),
+            original_error=error,
+        ) from error
+
+    async def _validate_repositories_stage(
+        self, repos_to_validate: set[str], use_github_api: bool
+    ) -> dict[str, bool]:
+        """Validate a batch of repositories via the API or Git backend."""
+        repo_results: dict[str, bool] = {}
+        if not repos_to_validate:
+            return repo_results
+        try:
+            if use_github_api:
+                assert self._github_client is not None
+                repo_results = (
+                    await self._github_client.validate_repositories_batch(
+                        list(repos_to_validate)
+                    )
+                )
+                self._merge_api_stats(self._github_client.get_api_stats())
+            else:
+                assert self._git_client is not None
+                git_repo_results = (
+                    await self._git_client.validate_repositories_batch(
+                        list(repos_to_validate)
+                    )
+                )
+                repo_results = {
+                    repo: result == ValidationResult.VALID
+                    for repo, result in git_repo_results.items()
+                }
+            self._log_stage_stats("Repository", use_github_api)
+        except Exception as e:
+            self._abort_validation("repository", use_github_api, e)
+        return repo_results
+
+    async def _validate_references_stage(
+        self,
+        valid_repo_refs_to_validate: list[tuple[str, str]],
+        use_github_api: bool,
+    ) -> dict[tuple[str, str], bool]:
+        """Validate a batch of references for already-valid repositories."""
+        ref_results: dict[tuple[str, str], bool] = {}
+        if not valid_repo_refs_to_validate:
+            return ref_results
+        try:
+            if use_github_api:
+                assert self._github_client is not None
+                ref_results = (
+                    await self._github_client.validate_references_batch(
+                        valid_repo_refs_to_validate
+                    )
+                )
+                self._merge_api_stats(self._github_client.get_api_stats())
+            else:
+                assert self._git_client is not None
+                git_ref_results = (
+                    await self._git_client.validate_references_batch(
+                        valid_repo_refs_to_validate
+                    )
+                )
+                ref_results = {
+                    repo_ref: result == ValidationResult.VALID
+                    for repo_ref, result in git_ref_results.items()
+                }
+            self._log_stage_stats("Reference", use_github_api)
+        except Exception as e:
+            self._abort_validation("reference", use_github_api, e)
+        return ref_results
+
+    async def _validate_subpaths_stage(
+        self,
+        subpath_refs_to_validate: list[tuple[str, str]],
+        use_github_api: bool,
+    ) -> tuple[dict[tuple[str, str], bool], set[tuple[str, str]]]:
+        """Validate action subpaths, returning results and inconclusive keys.
+
+        Inconclusive subpaths (e.g. a transient Git fetch failure on an
+        already-valid ref) are given the benefit of the doubt for the
+        current run's surfaced result but must NOT be cached, so a
+        transient failure cannot persist as a false VALID that masks a
+        bogus subpath; the next run re-checks them instead.
+        """
+        subpath_results: dict[tuple[str, str], bool] = {}
+        inconclusive_subpaths: set[tuple[str, str]] = set()
+        if not subpath_refs_to_validate:
+            return subpath_results, inconclusive_subpaths
+        self.logger.debug(
+            f"Validating {len(subpath_refs_to_validate)} subdirectory "
+            f"action subpaths (after cache)"
+        )
+        try:
+            if use_github_api:
+                assert self._github_client is not None
+                subpath_results = (
+                    await self._github_client.validate_subpaths_batch(
+                        subpath_refs_to_validate
+                    )
+                )
+                self._merge_api_stats(self._github_client.get_api_stats())
+            else:
+                assert self._git_client is not None
+                git_subpath_results = (
+                    await self._git_client.validate_subpaths_batch(
+                        subpath_refs_to_validate
+                    )
+                )
+                # Classify into three states. A definitive INVALID_PATH
+                # marks the subpath bogus; VALID marks it present; any
+                # other (e.g. NETWORK_ERROR/TIMEOUT) is inconclusive --
+                # given the benefit of the doubt for this run but recorded
+                # so it is excluded from caching.
+                for key, result in git_subpath_results.items():
+                    if result == ValidationResult.INVALID_PATH:
+                        subpath_results[key] = False
+                    elif result == ValidationResult.VALID:
+                        subpath_results[key] = True
+                    else:
+                        subpath_results[key] = True
+                        inconclusive_subpaths.add(key)
+        except Exception as e:
+            self._abort_validation("subpath", use_github_api, e)
+        return subpath_results, inconclusive_subpaths
+
+    def _log_stage_stats(self, stage: str, use_github_api: bool) -> None:
+        """Emit a debug line summarising API-call counts after a stage."""
+        method_stats = "GraphQL" if use_github_api else "Git"
+        backend_calls = (
+            self.api_stats.graphql_calls
+            if use_github_api
+            else self.api_stats.git_calls
+        )
+        self.logger.debug(
+            f"{stage} validation complete. API calls so far: "
+            f"{self.api_stats.total_calls} ({method_stats}: {backend_calls}, "
+            f"Cache hits: {self.api_stats.cache_hits})"
+        )
 
     def _extract_repository_for_validation(
         self, action_call: ActionCall
@@ -863,14 +956,12 @@ class ActionCallValidator:
             )
             repo_key = f"{action_call.organization}/{repo_for_validation}"
 
-            # Check repository validity
             if not repo_results.get(repo_key, False):
                 validation_results[call_key] = (
                     ValidationResult.INVALID_REPOSITORY
                 )
                 continue
 
-            # Check reference validity
             ref_key = (repo_key, action_call.reference)
             if not ref_results.get(ref_key, False):
                 validation_results[call_key] = (

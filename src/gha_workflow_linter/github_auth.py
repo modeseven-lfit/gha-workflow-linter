@@ -38,12 +38,10 @@ def get_github_token_with_fallback(
     Returns:
         GitHub token if found, None otherwise
     """
-    # Step 1: Use explicit token if provided
     if explicit_token:
         logger.debug("Using explicitly provided GitHub token")
         return explicit_token
 
-    # Step 2: Check environment variable
     env_token = os.environ.get("GITHUB_TOKEN")
     if env_token:
         logger.debug(
@@ -51,7 +49,6 @@ def get_github_token_with_fallback(
         )
         return env_token
 
-    # Step 3: Try GitHub CLI fallback
     if not quiet and console:
         console.print(
             "No GitHub token found; attempting to obtain using GitHub CLI ⚠️"
