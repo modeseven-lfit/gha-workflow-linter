@@ -171,7 +171,11 @@ repos:
       - id: pytest
         name: pytest
         entry: uv
-        args: [run, pytest, --tb=short, -q]
+        # pytest lives in the dev EXTRA, not a dependency group, so
+        # plain 'uv run' does not install it and the hook fails with
+        # exit 127. pre-commit.ci skips this hook, so the breakage was
+        # only ever visible locally.
+        args: [run, --extra, dev, pytest, --tb=short, -q]
         language: system
         pass_filenames: false
         always_run: true
