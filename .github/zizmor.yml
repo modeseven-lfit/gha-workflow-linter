@@ -13,6 +13,10 @@
 # unique to these fixtures and do not collide with the real workflows
 # (build-test.yaml, build-test-release.yaml, testing.yaml).
 rules:
+  anonymous-definition:
+    ignore:
+      - test.yaml
+      - test-skip-testing.yaml
   artipacked:
     ignore:
       - test.yaml
