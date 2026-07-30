@@ -100,10 +100,34 @@ ignore = [
     "E501",   # line too long, handled by formatter
     "B008",   # do not perform function calls in argument defaults
     "PLR0913", # too many arguments
+    "PLR0917", # too many positional arguments — see note below
     "PLR2004", # magic value used in comparison
     "PLR0912", # too many branches
     "PLR0915", # too many statements
 ]
+
+# PLR0917 was stabilised in ruff 0.16.0.  This project already selects
+# the "PLR" category, so the rule began firing the moment a routine
+# pre-commit autoupdate crossed that release, on code nobody had
+# touched.
+#
+# It is ignored globally, not scoped to tests, because every occurrence
+# is in src/ — there are none in the test suite, so a per-file-ignore
+# would fix nothing.  The signatures it flags are Typer command
+# definitions and internal constructors:
+#
+#   - cli.py:512 is the `lint` command, with 23 parameters carrying
+#     typer.Argument()/typer.Option() defaults.  Typer builds the CLI
+#     from that signature, and callers supply the values as command-line
+#     flags, never positionally from Python.  A keyword-only signature
+#     is not an option: it is how the framework works.  Note B008 is
+#     already ignored directly above for the same reason.
+#   - the remaining sites (auto_fix.py, cache.py, validator.py) are
+#     internal helpers whose breadth PLR0913 already tolerates.
+#
+# PLR0917 counts only those arguments that may be passed positionally,
+# so it is the narrower of the two; ignoring PLR0913 while enforcing
+# PLR0917 would be inconsistent.
 
 [tool.ruff.lint.isort]
 known-first-party = ["gha_workflow_linter"]
