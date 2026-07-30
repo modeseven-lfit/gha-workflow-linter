@@ -3,6 +3,7 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 ci:
+  autofix_prs: false
   # pre-commit.ci sandbox prevents network calls; aislop runs engines
   # that can call the network at scan time, so it cannot run there
   # either. gha-workflow-linter validates action calls over the
