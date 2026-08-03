@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -528,7 +529,9 @@ class TestActionCallValidator:
         workflow_calls = {Path("test.yml"): {1: action_call}}
 
         # Mock the async method
-        async def mock_async_validate(*_args, **_kwargs):
+        async def mock_async_validate(
+            *_args: Any, **_kwargs: Any
+        ) -> dict[Any, Any]:
             return {}
 
         with patch.object(

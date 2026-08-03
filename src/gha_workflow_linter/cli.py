@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import json
 import logging
 from pathlib import Path
+import textwrap
 from typing import Any
 
 from rich.logging import RichHandler
@@ -33,6 +34,7 @@ from rich.progress import (
 from rich.table import Table
 import typer
 
+from . import exit_codes
 from ._version import __version__
 from .auto_fix import AutoFixer
 from .cache import CachePrimeReport, ValidationCache
@@ -56,6 +58,7 @@ from .models import (
     LogLevel,
     ValidationError,
     ValidationMethod,
+    ValidationResult,
 )
 from .scanner import WorkflowScanner
 from .system_utils import get_default_workers
@@ -649,6 +652,15 @@ def lint(
         "--files",
         help="Specific files to scan (supports wildcards, can be specified multiple times)",
     ),
+    verify_actions: bool = typer.Option(
+        False,
+        "--verify-actions",
+        help=(
+            "Treat outdated action calls as errors and exit with status 5. "
+            "Without this flag outdated actions are reported but do not "
+            "fail the run"
+        ),
+    ),
     _help: bool = typer.Option(
         False,
         "--help",
@@ -742,7 +754,9 @@ def lint(
         console.print(
             "[red]Error: --verbose and --quiet cannot be used together[/red]"
         )
-        raise typer.Exit(1)
+        # Arguably a usage error (code 2), but this has always exited 1 and
+        # changing it would break callers; see exit_codes.RUNTIME_ERROR.
+        raise typer.Exit(exit_codes.RUNTIME_ERROR)
 
     # JSON format implies quiet mode (suppress console output)
     if output_format == "json":
@@ -789,6 +803,7 @@ def lint(
             fix_test_calls=fix_test_calls,
             cooldown=cooldown,
             files=files,
+            verify_actions=verify_actions,
         )
 
         # Apply CLI overrides to config
@@ -819,17 +834,17 @@ def lint(
     except ValidationAbortedError as e:
         # These errors should already be handled in run_linter, but catch here as fallback
         logger.error(f"Validation aborted: {e.message}")
-        raise typer.Exit(1) from None
+        raise typer.Exit(exit_codes.RUNTIME_ERROR) from None
     except (ValueError, ConfigurationError) as e:
         logger.error(f"Configuration error: {e}")
         if verbose:
             logger.exception("Full traceback:")
-        raise typer.Exit(1) from None
+        raise typer.Exit(exit_codes.RUNTIME_ERROR) from None
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         if verbose:
             logger.exception("Full traceback:")
-        raise typer.Exit(1) from None
+        raise typer.Exit(exit_codes.RUNTIME_ERROR) from None
 
     raise typer.Exit(exit_code)
 
@@ -1270,9 +1285,25 @@ def _determine_exit_code(
     validation: _ValidationOutcome,
     autofix: _AutoFixOutcome,
 ) -> int:
-    """Compute the process exit code from fixes and validation errors."""
-    # If we auto-fixed files (not just skipped testing items), always exit
-    # with an error to indicate changes were made.
+    """Compute the process exit code from fixes and validation errors.
+
+    This is the single decision point for the process exit status. It is
+    deliberately independent of reporting: presentation flags such as
+    ``--quiet`` and ``--format json`` must never change the code a given
+    repository state produces.
+
+    Args:
+        options: Resolved CLI options.
+        validation: Outcome of the scan/validate stage.
+        autofix: Outcome of the auto-fix stage.
+
+    Returns:
+        A code from :mod:`gha_workflow_linter.exit_codes`.
+    """
+    codes: list[int] = []
+
+    # Files modified on disk are reported as a failure so a CI job or a
+    # pre-commit hook notices that the tree changed underneath it.
     if autofix.fixed_files:
         has_actual_fixes = any(
             change.get("skipped") != "true"
@@ -1280,10 +1311,10 @@ def _determine_exit_code(
             for change in changes
         )
         if has_actual_fixes:
-            return 1
+            codes.append(exit_codes.DEFECTS_FOUND)
 
-    # Otherwise, exit with error only if there are validation errors
-    # (excluding test references) and fail_on_error is enabled.
+    # Validation errors (excluding test references, which are advisory by
+    # convention) count when the caller has not disabled failure.
     if options.fail_on_error:
         actual_errors = [
             e
@@ -1291,9 +1322,29 @@ def _determine_exit_code(
             if not has_test_comment(e.action_call)
         ]
         if actual_errors:
-            return 1
+            codes.append(exit_codes.DEFECTS_FOUND)
 
-    return 0
+    # Outdated action calls are a CURRENCY finding: advisory unless the
+    # caller opted in with --verify-actions.
+    if options.verify_actions and _has_outdated_actions(autofix):
+        codes.append(exit_codes.ACTIONS_OUTDATED)
+
+    return exit_codes.combine(*codes) if codes else exit_codes.SUCCESS
+
+
+def _has_outdated_actions(autofix: _AutoFixOutcome) -> bool:
+    """Report whether any action call has a newer release available.
+
+    Args:
+        autofix: Outcome of the auto-fix stage.
+
+    Returns:
+        True when at least one outdated (but otherwise valid) action call
+        was detected.
+    """
+    return any(
+        items for items in autofix.stale_actions_summary.values() if items
+    )
 
 
 def run_linter(config: Config, options: CLIOptions) -> int:
@@ -1305,7 +1356,7 @@ def run_linter(config: Config, options: CLIOptions) -> int:
         options: CLI options
 
     Returns:
-        Exit code (0 for success, 1 for failure)
+        Exit code from :mod:`gha_workflow_linter.exit_codes`.
     """
     scanner = WorkflowScanner(config)
 
@@ -1329,9 +1380,11 @@ def run_linter(config: Config, options: CLIOptions) -> int:
 
     _emit_results(options, scanner, validation, autofix)
 
-    # When auto_fix is enabled but auto_latest is not, display outdated
-    # actions report (validation errors were fixed, but version updates are
-    # only reported).
+    # Report outdated actions when auto-fix repaired validation errors but
+    # version bumps were only detected, not applied. This is presentation
+    # only: it must not short-circuit exit-code determination, or a real
+    # defect elsewhere in the run would be masked (and the exit code would
+    # depend on --quiet, which also gates this block).
     if (
         autofix.stale_actions_summary
         and not config.auto_latest
@@ -1340,7 +1393,6 @@ def run_linter(config: Config, options: CLIOptions) -> int:
         _display_stale_actions_from_summary(
             autofix.stale_actions_summary, options
         )
-        return 0
 
     return _determine_exit_code(options, validation, autofix)
 
@@ -1613,6 +1665,12 @@ def _display_stale_actions_from_summary(
     )
 
 
+#: Results whose error message carries actionable remediation that the
+#: action reference alone does not convey. Messages for other results
+#: restate what the reader can already see, so they stay unrendered.
+_REMEDIABLE_RESULTS = frozenset({ValidationResult.ANNOTATED_TAG_SHA})
+
+
 def _print_deduplicated_action_refs(items: list[dict[str, Any]]) -> None:
     """
     Print a list of action references, collapsing duplicates per file.
@@ -1621,17 +1679,26 @@ def _print_deduplicated_action_refs(items: list[dict[str, Any]]) -> None:
     same ``action_ref`` appears more than once for a file, a single entry is
     printed annotated with the number of occurrences and the sorted set of
     distinct source line numbers, instead of repeating the same line N times.
+
+    An optional ``message`` key carrying remediation advice (for example the
+    peeled commit SHA behind an annotated tag object) is printed beneath the
+    reference. Only results whose message tells the reader something the
+    reference itself does not are rendered, so the common cases stay terse.
     """
     # Preserve first-seen order while grouping by action_ref. Use a set so
     # that repeated (ref, line) pairs collapse to a single line number, then
     # render in sorted order for stable output.
     grouped: dict[str, set[int]] = {}
     occurrences: dict[str, int] = {}
+    messages: dict[str, str] = {}
     for item in items:
         ref = item["action_ref"]
         line = item["line"]
         grouped.setdefault(ref, set()).add(line)
         occurrences[ref] = occurrences.get(ref, 0) + 1
+        message = item.get("message")
+        if message and item.get("result") in _REMEDIABLE_RESULTS:
+            messages.setdefault(ref, message)
 
     for ref, line_set in grouped.items():
         count = occurrences[ref]
@@ -1645,6 +1712,18 @@ def _print_deduplicated_action_refs(items: list[dict[str, Any]]) -> None:
                 f"   {ref} [dim](x{count})[/dim] "
                 f"[dim][{label} {line_list}][/dim]"
             )
+        remediation = messages.get(ref)
+        if remediation:
+            # Wrap explicitly with a hanging indent: letting the console
+            # wrap a long single-line message flushes continuations to
+            # column 0, which reads as unrelated output.
+            for text in textwrap.wrap(
+                " ".join(remediation.split()),
+                width=72,
+                initial_indent="     ",
+                subsequent_indent="     ",
+            ):
+                console.print(f"[yellow]{text}[/yellow]")
 
 
 def output_text_results(
@@ -1737,6 +1816,7 @@ def output_text_results(
                 "action_ref": action_ref,
                 "line": error.action_call.line_number,
                 "result": error.result,
+                "message": error.error_message,
             }
 
             # Check if this is a test reference based on comment

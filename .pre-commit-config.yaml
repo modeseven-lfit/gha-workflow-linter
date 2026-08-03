@@ -83,13 +83,30 @@ repos:
     rev: d55eabd2531b4f4a4c49c30fba627ce3a636ab79  # frozen: 1.39.9
     hooks:
       - id: basedpyright
-        files: ^src/.+\.py$
+        # No `files:` filter on purpose. This hook previously carried
+        # `^src/.+\.py$`, so tests/, scripts/ and examples/ were never
+        # type-checked and real findings (dead isinstance narrowing in
+        # tests/conftest.py, 49 unannotated mock parameters) went
+        # unnoticed. Relying on the hook's default python file matching
+        # means a new top-level Python directory is covered the day it
+        # appears, with no config change to forget. Keep
+        # [tool.basedpyright] include in pyproject.toml in step for the
+        # benefit of editors and bare invocations.
 
   - repo: https://github.com/btford/write-good
     rev: ab66ce10136dfad5146e69e70f82a3efac8842c1 # frozen: v1.0.8
     hooks:
       - id: write-good
         files: "\\.(rst|md|markdown|mdown|mkdn)$"
+        # write-good targets reader-facing prose, where passive voice and
+        # hedging genuinely cost clarity. ALLOW_LIST_FEATURE.md is a dense
+        # technical specification of a different genre: there "only",
+        # "deliberately" and "silently" carry precise meaning, and passive
+        # constructions ("the SHA is peeled to a commit") read more clearly
+        # than forced active ones. Enforcing the same style rules on it
+        # produced ~200 findings, none of them real. Excluded by name
+        # rather than by directory so future docs/ prose stays covered.
+        exclude: ^docs/ALLOW_LIST_FEATURE\.md$
 
   - repo: https://github.com/shellcheck-py/shellcheck-py
     rev: 745eface02aef23e168a8afb6b5737818efbea95 # frozen: v0.11.0.1

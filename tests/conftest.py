@@ -162,7 +162,8 @@ def mock_git_commands(monkeypatch: pytest.MonkeyPatch) -> None:
         if not isinstance(cmd, list):
             cmd = []
 
-        if not isinstance(cmd, list) or len(cmd) < 2 or cmd[0] != "git":
+        # cmd is a list by now, so no further isinstance check is needed.
+        if len(cmd) < 2 or cmd[0] != "git":
             # Pass through non-git commands
             return subprocess.CompletedProcess(
                 args=cmd, returncode=1, stdout=b"", stderr=b"Not a git command"

@@ -304,7 +304,9 @@ class TestValidatorErrorHandling:
             # Mock the GitHub client - first call succeeds, second call fails
             with patch.object(validator, "_github_client") as mock_client:
                 # Repository validation succeeds
-                async def mock_repo_validation(*_args, **_kwargs):
+                async def mock_repo_validation(
+                    *_args: Any, **_kwargs: Any
+                ) -> dict[str, bool]:
                     return {"actions/checkout": True}  # Repository exists
 
                 mock_client.validate_repositories_batch = mock_repo_validation

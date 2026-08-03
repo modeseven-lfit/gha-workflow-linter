@@ -151,7 +151,9 @@ class TestGitHubGraphQLClient:
         ]
 
         # Mock method returns results for each repository separately
-        def mock_validate_refs(repo_key, _refs):
+        def mock_validate_refs(
+            repo_key: str, _refs: list[str]
+        ) -> dict[str, bool]:
             if repo_key == "actions/checkout":
                 return {"v4": True}
             elif repo_key == "actions/setup-node":
@@ -733,7 +735,9 @@ class TestGitHubGraphQLClientIntegration:
         ]
 
         # Mock method returns results for each repository separately
-        def mock_validate_refs(repo_key, _refs):
+        def mock_validate_refs(
+            repo_key: str, _refs: list[str]
+        ) -> dict[str, bool]:
             if repo_key == "actions/checkout":
                 return {"v4": True}
             elif repo_key == "actions/setup-node":

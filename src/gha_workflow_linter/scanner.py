@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path, PurePath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -19,6 +19,20 @@ if TYPE_CHECKING:
 import yaml
 
 from .patterns import ActionCallPatterns
+
+
+class _ComposeResult(NamedTuple):
+    """
+    Outcome of composing a single YAML document.
+
+    Attributes:
+        valid: True when the document parsed without a YAML error.
+        node: Root of the composed node tree, or None when the document
+            was invalid or empty.
+    """
+
+    valid: bool
+    node: yaml.nodes.Node | None
 
 
 class WorkflowScanner:
@@ -230,6 +244,52 @@ class WorkflowScanner:
 
         return action_calls
 
+    def compose_workflow_file(self, file_path: Path) -> yaml.nodes.Node | None:
+        """
+        Return the composed YAML node tree for a workflow file.
+
+        Where :meth:`parse_workflow_file` returns action calls recovered
+        by the line-oriented pattern matcher, this returns PyYAML's node
+        tree. Every node carries ``start_mark`` and ``end_mark`` with
+        0-based ``line`` and ``column`` attributes, so a caller can map
+        document structure back onto source positions without reading and
+        parsing the workflow a second time.
+
+        Composition uses ``yaml.SafeLoader``, so no arbitrary Python
+        objects are constructed from the document.
+
+        Note:
+            An empty document composes to ``None``. That is
+            indistinguishable from the failure result, so a caller that
+            must tell the two apart has to check the file separately.
+
+        Note:
+            Comments are lexical, not structural: PyYAML discards them
+            while scanning, and they are absent from the returned tree.
+            Version-pin comments such as ``# v5.0.0`` cannot be recovered
+            from these nodes.
+
+        Note:
+            Under YAML 1.1 resolution, which ``SafeLoader`` implements, a
+            bare ``on:`` key resolves to the boolean ``True`` rather than
+            the string ``"on"``. Callers walking a workflow's top-level
+            mapping must accept both.
+
+        Args:
+            file_path: Path to the workflow file
+
+        Returns:
+            Root node of the composed tree, or None when the file cannot
+            be read, is not valid YAML, or is empty. Never raises.
+        """
+        try:
+            content = file_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            self.logger.warning(f"Error reading file {file_path}: {e}")
+            return None
+
+        return self._compose(content, file_path).node
+
     def _is_valid_yaml(self, content: str, file_path: Path) -> bool:
         """
         Validate YAML syntax of workflow file.
@@ -241,12 +301,39 @@ class WorkflowScanner:
         Returns:
             True if valid YAML, False otherwise
         """
+        return self._compose(content, file_path).valid
+
+    def _compose(self, content: str, file_path: Path) -> _ComposeResult:
+        """
+        Compose already-read content into a YAML node tree.
+
+        Shared by the syntax gate in :meth:`parse_workflow_file` and by
+        :meth:`compose_workflow_file`, so content that has already been
+        read is parsed once rather than once per concern.
+
+        Composing stops after the resolution stage, so unlike
+        ``yaml.safe_load`` it never reports construction failures (an
+        unknown ``!!tag``, for example). Workflow files carry no custom
+        tags, and every syntax error a workflow can realistically hold is
+        raised by the scanner, parser or composer this does run.
+
+        Args:
+            content: File content
+            file_path: Path to file (for logging)
+
+        Returns:
+            The validity verdict paired with the composed tree, which is
+            None for an empty or invalid document.
+        """
         try:
-            yaml.safe_load(content)
-            return True
+            node = yaml.compose(content, Loader=yaml.SafeLoader)
         except yaml.YAMLError as e:
             self.logger.warning(f"Invalid YAML in {file_path}: {e}")
-            return False
+            return _ComposeResult(valid=False, node=None)
+
+        return _ComposeResult(
+            valid=True, node=cast("yaml.nodes.Node | None", node)
+        )
 
     def scan_directory(
         self,

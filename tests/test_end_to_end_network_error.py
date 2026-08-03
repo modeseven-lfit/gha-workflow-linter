@@ -12,6 +12,7 @@ marking valid GitHub Actions as invalid.
 from collections.abc import Generator
 from pathlib import Path
 import tempfile
+from typing import Any, NoReturn
 from unittest.mock import Mock, patch
 
 import httpx
@@ -184,7 +185,7 @@ jobs:
         options = CLIOptions(path=sample_repo_with_workflows)
 
         # Mock the validator to capture what would have been returned
-        def capture_validation_errors(*_args, **_kwargs):
+        def capture_validation_errors(*_args: Any, **_kwargs: Any) -> NoReturn:
             # This should raise ValidationAbortedError, not return ValidationError objects
             raise ValidationAbortedError(
                 "Unable to validate GitHub Actions due to API/network issues",
@@ -209,8 +210,8 @@ jobs:
             # The old behavior would have created ValidationError objects marking actions as invalid
 
     def test_precommit_ci_scenario_reproduction(
-        self, sample_repo_with_workflows
-    ):
+        self, sample_repo_with_workflows: Path
+    ) -> None:
         """
         Exact reproduction of the pre-commit.ci scenario that failed.
 

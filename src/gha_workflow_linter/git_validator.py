@@ -11,16 +11,22 @@ import logging
 import os
 import re
 import tempfile
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from .exceptions import (
     GitError,
+)
+from .git_refs import (
+    AnnotatedTagPeel,
+    get_remote_ref_shas,
 )
 from .models import APICallStats, GitConfig, ReferenceType, ValidationResult
 from .paths import action_subpath, action_subpath_candidates
 from .paths import base_repository as _shared_base_repository
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -57,6 +63,7 @@ class GitValidationClient:
         self.config = config
         self.logger = logging.getLogger(__name__)
         self.api_stats = APICallStats()
+        self._annotated_tag_peels: dict[tuple[str, str], AnnotatedTagPeel] = {}
 
         # Determine optimal worker count
         if config.max_parallel_operations:
@@ -69,6 +76,25 @@ class GitValidationClient:
         self.logger.debug(
             f"Git client initialized with {self._max_workers} max workers"
         )
+
+    @property
+    def annotated_tag_peels(
+        self,
+    ) -> Mapping[tuple[str, str], AnnotatedTagPeel]:
+        """Annotated tag peels discovered while validating references.
+
+        ``validate_references_batch`` already runs ``git ls-remote``, which
+        advertises both the tag object and the commit it peels to, so the
+        remediation for an ``ANNOTATED_TAG_SHA`` verdict is recorded as a
+        side effect of that batch rather than costing a second network
+        round trip. Entries accumulate over the client's lifetime.
+
+        Returns:
+            Read-only mapping of ``(repository, reference)`` to the peel
+            behind that reference. Only references reported as
+            ``ANNOTATED_TAG_SHA`` are present.
+        """
+        return MappingProxyType(self._annotated_tag_peels)
 
     async def validate_repositories_batch(
         self, repositories: list[str]
@@ -157,6 +183,10 @@ class GitValidationClient:
 
         Returns:
             Dictionary mapping (repository, reference) tuples to validation results
+
+        Side effects:
+            Records any annotated tag peels discovered by the underlying
+            ``ls-remote`` calls; see :attr:`annotated_tag_peels`.
         """
         if not repo_refs:
             return {}
@@ -198,7 +228,7 @@ class GitValidationClient:
                 self.logger.error(
                     f"Unexpected error in reference validation: {e}"
                 )
-                validation_results = [{}] * len(futures)
+                validation_results = [({}, {})] * len(futures)
 
             for (repo, refs), repo_results in zip(
                 repo_ref_list, validation_results, strict=True
@@ -211,12 +241,16 @@ class GitValidationClient:
                     for ref in refs:
                         results[(repo, ref)] = ValidationResult.NETWORK_ERROR
                         self.api_stats.increment_failed_call()
-                elif isinstance(repo_results, dict):
+                elif isinstance(repo_results, tuple):
                     # Map results back to the expected format
+                    ref_results, peels = repo_results
                     for ref in refs:
-                        results[(repo, ref)] = repo_results.get(
+                        results[(repo, ref)] = ref_results.get(
                             ref, ValidationResult.INVALID_REFERENCE
                         )
+                        peel = peels.get(ref)
+                        if peel is not None:
+                            self._annotated_tag_peels[(repo, ref)] = peel
                         self.api_stats.increment_git()
 
                     self.api_stats.git_clone_operations += 1
@@ -388,7 +422,7 @@ def _validate_repository_exists(
 
 def _validate_repository_references(
     repository: str, references: list[str], config: GitConfig
-) -> dict[str, ValidationResult]:
+) -> tuple[dict[str, ValidationResult], dict[str, AnnotatedTagPeel]]:
     """
     Validate multiple references for a single repository.
 
@@ -400,9 +434,12 @@ def _validate_repository_references(
         config: Git configuration
 
     Returns:
-        Dictionary mapping references to validation results
+        Tuple of (results, peels): results maps each reference to its
+        validation result, and peels maps each reference reported as
+        ``ANNOTATED_TAG_SHA`` to the tag and commit behind it.
     """
     results = {}
+    peels: dict[str, AnnotatedTagPeel] = {}
 
     # Try both HTTPS and SSH URLs
     # Strip any action subpath (e.g. anchore/scan-action/download-grype)
@@ -432,10 +469,11 @@ def _validate_repository_references(
     for url in [https_url, ssh_url]:
         try:
             if commit_shas:
-                sha_results = _validate_commit_shas_git(
+                sha_results, sha_peels = _validate_commit_shas_with_peels(
                     url, commit_shas, config
                 )
                 results.update(sha_results)
+                peels.update(sha_peels)
 
             if branches:
                 branch_results = _validate_branches_git(url, branches, config)
@@ -465,7 +503,7 @@ def _validate_repository_references(
         if ref not in results:
             results[ref] = ValidationResult.INVALID_REFERENCE
 
-    return results
+    return results, peels
 
 
 def _run_git_ls_remote(url: str, config: GitConfig) -> bool:
@@ -510,6 +548,12 @@ def _validate_commit_shas_git(
     """
     Validate commit SHAs by checking if they exist in remote refs.
 
+    A SHA that names an annotated *tag object* rather than a commit is
+    reported as ``ANNOTATED_TAG_SHA``: ``git ls-remote`` advertises it, but
+    GitHub Actions cannot check it out, so treating it as valid is a false
+    pass. Use :func:`_validate_commit_shas_with_peels` when the commit SHA
+    to recommend in its place is needed too.
+
     Args:
         url: Git repository URL
         commit_shas: List of commit SHAs to validate
@@ -518,14 +562,44 @@ def _validate_commit_shas_git(
     Returns:
         Dictionary mapping commit SHAs to validation results
     """
+    return _validate_commit_shas_with_peels(url, commit_shas, config)[0]
+
+
+def _validate_commit_shas_with_peels(
+    url: str, commit_shas: list[str], config: GitConfig
+) -> tuple[dict[str, ValidationResult], dict[str, AnnotatedTagPeel]]:
+    """
+    Validate commit SHAs, keeping the peel behind any tag-object SHA.
+
+    The single ``ls-remote`` this performs already carries the peeled
+    commit for every annotated tag, so the remediation for an
+    ``ANNOTATED_TAG_SHA`` verdict is returned alongside the verdict rather
+    than re-fetched later.
+
+    Args:
+        url: Git repository URL
+        commit_shas: List of commit SHAs to validate
+        config: Git configuration
+
+    Returns:
+        Tuple of (results, peels): results maps each SHA to its validation
+        result, and peels maps each tag-object SHA to the tag name and
+        commit SHA behind it.
+    """
     results = {}
+    peels: dict[str, AnnotatedTagPeel] = {}
 
     try:
-        # Get all remote refs (heads and tags) to find commit SHAs
-        remote_refs = _get_all_remote_refs(url, config)
+        # Get all remote refs (heads and tags), keeping annotated tag
+        # objects distinguishable from the commits they peel to.
+        remote_refs = get_remote_ref_shas(url, config)
 
         for sha in commit_shas:
-            if sha in remote_refs:
+            peel = remote_refs.tag_objects.get(sha)
+            if peel is not None:
+                results[sha] = ValidationResult.ANNOTATED_TAG_SHA
+                peels[sha] = peel
+            elif sha in remote_refs.commit_shas:
                 results[sha] = ValidationResult.VALID
             else:
                 results[sha] = ValidationResult.INVALID_REFERENCE
@@ -535,8 +609,9 @@ def _validate_commit_shas_git(
         # Mark all SHAs as invalid
         for sha in commit_shas:
             results[sha] = ValidationResult.INVALID_REFERENCE
+        peels.clear()
 
-    return results
+    return results, peels
 
 
 def _validate_branches_git(
@@ -726,52 +801,6 @@ def _commit_exists_in_repo(
 
     except Exception:
         return False
-
-
-def _get_all_remote_refs(url: str, config: GitConfig) -> set[str]:
-    """
-    Get all commit SHAs from remote refs (heads and tags).
-
-    Args:
-        url: Git repository URL
-        config: Git configuration
-
-    Returns:
-        Set of commit SHAs
-
-    Raises:
-        GitError: If operation fails
-    """
-    import subprocess
-
-    cmd = ["git", "ls-remote", "--heads", "--tags", url]
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=config.timeout_seconds,
-            check=True,
-        )
-
-        shas = set()
-        for line in result.stdout.strip().split("\n"):
-            if line:
-                # Format: "commit_sha\tref_name"
-                parts = line.split("\t")
-                if len(parts) == 2:
-                    commit_sha = parts[0]
-                    shas.add(commit_sha)
-
-        return shas
-
-    except subprocess.TimeoutExpired:
-        raise GitError(f"Git ls-remote timed out for {url}") from None
-    except subprocess.CalledProcessError as e:
-        raise GitError(f"Git ls-remote failed for {url}: {e.stderr}") from e
-    except Exception as e:
-        raise GitError(f"Git ls-remote failed for {url}: {e}") from e
 
 
 def _get_remote_branches(url: str, config: GitConfig) -> set[str]:

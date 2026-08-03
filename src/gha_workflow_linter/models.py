@@ -43,6 +43,63 @@ class ValidationResult(str, Enum):
     TIMEOUT = "timeout"
     NOT_PINNED_TO_SHA = "not_pinned_to_sha"
     TEST_REFERENCE = "test_reference"
+    ANNOTATED_TAG_SHA = "annotated_tag_sha"
+
+
+class Severity(str, Enum):
+    """Reporting severity for a linter finding.
+
+    Severity governs presentation. Whether a finding fails the run is
+    decided by its :class:`Category` together with the relevant
+    ``--verify-*`` flag; see :mod:`gha_workflow_linter.exit_codes`.
+    """
+
+    ERROR = "error"
+    WARNING = "warning"
+    NOTICE = "notice"
+
+
+class Category(str, Enum):
+    """Whether a finding reports breakage, staleness, or a failed check.
+
+    ``DEFECT`` findings are wrong *now* and always count towards the exit
+    code. ``CURRENCY`` findings are correct but could be newer, and are
+    advisory unless the caller opts in with a ``--verify-*`` flag.
+    ``INFRASTRUCTURE`` means the check itself could not run, which must
+    never be silently reported as a pass.
+    """
+
+    DEFECT = "defect"
+    CURRENCY = "currency"
+    INFRASTRUCTURE = "infrastructure"
+
+
+# Classification of every validation result. Results absent from this
+# mapping (only VALID) are not findings at all.
+_RESULT_CATEGORIES: dict[ValidationResult, Category] = {
+    ValidationResult.INVALID_REPOSITORY: Category.DEFECT,
+    ValidationResult.INVALID_REFERENCE: Category.DEFECT,
+    ValidationResult.INVALID_PATH: Category.DEFECT,
+    ValidationResult.INVALID_SYNTAX: Category.DEFECT,
+    ValidationResult.ANNOTATED_TAG_SHA: Category.DEFECT,
+    ValidationResult.NOT_PINNED_TO_SHA: Category.CURRENCY,
+    ValidationResult.TEST_REFERENCE: Category.CURRENCY,
+    ValidationResult.NETWORK_ERROR: Category.INFRASTRUCTURE,
+    ValidationResult.TIMEOUT: Category.INFRASTRUCTURE,
+}
+
+
+def result_category(result: ValidationResult) -> Category | None:
+    """Return the category of a validation result.
+
+    Args:
+        result: The validation result to classify.
+
+    Returns:
+        The finding category, or None when the result is not a finding
+        (that is, ``ValidationResult.VALID``).
+    """
+    return _RESULT_CATEGORIES.get(result)
 
 
 class ActionCallType(str, Enum):
@@ -529,6 +586,13 @@ class CLIOptions(BaseModel):
     )
     files: list[str] | None = Field(
         default=None, description="Specific files to scan (supports wildcards)"
+    )
+    verify_actions: bool = Field(
+        default=False,
+        description=(
+            "Treat outdated action calls as errors and exit with the "
+            "ACTIONS_OUTDATED status"
+        ),
     )
 
     @field_validator("output_format")
