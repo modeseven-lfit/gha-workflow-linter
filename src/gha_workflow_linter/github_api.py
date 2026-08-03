@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import time
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import httpx
@@ -21,6 +22,7 @@ from .exceptions import (
     RateLimitError,
     TemporaryAPIError,
 )
+from .git_refs import AnnotatedTagPeel
 from .models import (
     APICallStats,
     GitHubAPIConfig,
@@ -69,11 +71,35 @@ class GitHubGraphQLClient:
         # Cache for subdirectory-action subpath existence, keyed by
         # (full action identifier including subpath, ref).
         self._subpath_cache: dict[tuple[str, str], bool] = {}
+        # Peels behind any reference resolved to an annotated tag object,
+        # keyed by (repo_key, reference); see annotated_tag_peels.
+        self._annotated_tag_peels: dict[tuple[str, str], AnnotatedTagPeel] = {}
 
         # Parallel workers for concurrent operations (set by validator)
         self.parallel_workers: int = (
             get_default_workers()
         )  # Default, will be overridden
+
+    @property
+    def annotated_tag_peels(
+        self,
+    ) -> Mapping[tuple[str, str], AnnotatedTagPeel]:
+        """Annotated tag peels discovered while validating references.
+
+        A pinned SHA that resolves to a ``Tag`` object rather than a
+        ``Commit`` is not checkout-able by GitHub Actions. The commit-SHA
+        query peels such objects in the same request, so the remediation is
+        recorded here as a side effect instead of costing a second query.
+        Mirrors :attr:`GitValidationClient.annotated_tag_peels` so both
+        backends report the same verdict with the same context. Entries
+        accumulate over the client's lifetime.
+
+        Returns:
+            Read-only mapping of ``(repo_key, reference)`` to the peel
+            behind that reference. Only references naming a tag object are
+            present.
+        """
+        return MappingProxyType(self._annotated_tag_peels)
 
     async def __aenter__(self) -> GitHubGraphQLClient:
         """Async context manager entry."""
@@ -471,6 +497,10 @@ class GitHubGraphQLClient:
 
         Returns:
             Dictionary mapping references to validation results
+
+        Side effects:
+            Records any reference that resolves to an annotated tag object;
+            see :attr:`annotated_tag_peels`.
         """
         try:
             owner, name = repo_key.split("/", 1)
@@ -494,10 +524,14 @@ class GitHubGraphQLClient:
         results = {}
 
         if commit_shas:
-            sha_results = await self._validate_commit_shas_graphql(
+            sha_results, peels = await self._resolve_commit_shas_graphql(
                 owner, base_name, commit_shas
             )
             results.update(sha_results)
+            # Key peels by the caller's repo_key, which may carry an action
+            # subpath that base_name has stripped.
+            for sha, peel in peels.items():
+                self._annotated_tag_peels[(repo_key, sha)] = peel
 
         if branch_tag_names:
             ref_results = await self._validate_branch_tag_names_graphql(
@@ -521,6 +555,34 @@ class GitHubGraphQLClient:
         Returns:
             Dictionary mapping SHAs to validation results
         """
+        results, _peels = await self._resolve_commit_shas_graphql(
+            owner, name, shas
+        )
+        return results
+
+    async def _resolve_commit_shas_graphql(
+        self, owner: str, name: str, shas: list[str]
+    ) -> tuple[dict[str, bool], dict[str, AnnotatedTagPeel]]:
+        """
+        Resolve commit SHAs, distinguishing commits from tag objects.
+
+        ``object(oid: ...)`` resolves any Git object, so a SHA naming an
+        annotated tag object resolves successfully but is not checkout-able
+        by GitHub Actions. Narrowing on ``Tag`` as well as ``Commit`` peels
+        it in the same request, which lets this backend agree with the Git
+        backend on both the verdict (invalid) and the remediation (use the
+        peeled commit).
+
+        Args:
+            owner: Repository owner
+            name: Repository name
+            shas: List of commit SHAs
+
+        Returns:
+            Tuple of (results, peels): results maps each SHA to whether it
+            names a real commit, and peels maps each SHA naming an
+            annotated tag object to the tag and commit behind it.
+        """
         query_parts = []
         aliases = {}
 
@@ -530,8 +592,15 @@ class GitHubGraphQLClient:
 
             query_parts.append(f"""
                 {alias}: object(oid: "{sha}") {{
+                    __typename
                     ... on Commit {{
                         oid
+                    }}
+                    ... on Tag {{
+                        name
+                        target {{
+                            oid
+                        }}
                     }}
                 }}
             """)
@@ -546,20 +615,57 @@ class GitHubGraphQLClient:
 
         response_data = await self._execute_graphql_query(query)
 
-        results = {}
+        results: dict[str, bool] = {}
+        peels: dict[str, AnnotatedTagPeel] = {}
         response_root = response_data.get("data") or {}
         repo_data = response_root.get("repository") or {}
 
         for alias, sha in aliases.items():
             commit_data = repo_data.get(alias)
-            results[sha] = commit_data is not None
+            peel = self._annotated_tag_peel(commit_data)
 
-            if commit_data:
+            if peel is not None:
+                results[sha] = False
+                peels[sha] = peel
+                self.logger.debug(
+                    f"SHA names an annotated tag object: "
+                    f"{owner}/{name}@{sha} -> {peel.tag} ({peel.commit_sha})"
+                )
+            elif commit_data:
+                results[sha] = True
                 self.logger.debug(f"Commit SHA exists: {owner}/{name}@{sha}")
             else:
+                results[sha] = False
                 self.logger.debug(f"Commit SHA not found: {owner}/{name}@{sha}")
 
-        return results
+        return results, peels
+
+    @staticmethod
+    def _annotated_tag_peel(object_data: Any) -> AnnotatedTagPeel | None:
+        """Extract the peel from a GraphQL ``Tag`` object payload.
+
+        Args:
+            object_data: The ``object(oid: ...)`` payload, or None when the
+                SHA resolved to nothing.
+
+        Returns:
+            The tag and commit behind an annotated tag object, or None when
+            the payload is absent, is not a tag, or lacks a peeled target.
+        """
+        if not isinstance(object_data, dict):
+            return None
+        if object_data.get("__typename") != "Tag":
+            return None
+
+        target = object_data.get("target") or {}
+        commit_sha = target.get("oid") if isinstance(target, dict) else None
+        if not commit_sha:
+            return None
+
+        return AnnotatedTagPeel(
+            tag=str(object_data.get("name") or ""),
+            commit_sha=str(commit_sha),
+        )
 
     async def _validate_branch_tag_names_graphql(
         self, owner: str, name: str, refs: list[str]

@@ -760,17 +760,27 @@ is exactly the class of bug that erodes trust in a linter.
 
 ### 8.3 New issue kinds
 
-Add three kinds, all of which fall out of work already planned:
+Add `ANNOTATED_TAG_SHA` in this phase, and two further kinds in the
+later phases that emit them:
 
 ```python
-ANNOTATED_TAG_SHA   # pin is a tag object SHA; the commit SHA is <peeled>
+ANNOTATED_TAG_SHA    # pin is a tag object SHA; the commit SHA is <peeled>
 SHA_COMMENT_MISMATCH # pinned SHA is valid but '# vX.Y.Z' names another version
 OUTDATED_ACTION      # valid and correctly pinned, but a newer release exists
 ```
 
-`ANNOTATED_TAG_SHA` is the highest-value addition. `_get_remote_tag_shas`
-(Phase 0) gives both backends the tag-object → commit map, so the git
-backend stops false-passing **and** the message becomes actionable:
+`SHA_COMMENT_MISMATCH` and `OUTDATED_ACTION` are **deliberately not added
+until something emits them**. The condition behind each is already
+detected (`auto_fix` repairs comment mismatches; outdated actions travel
+via `stale_actions_summary`), but promoting them to first-class results
+means routing them through the validator, which belongs with the work
+that consumes them. Adding the enum members early would leave dead
+branches in the message table and summary counters.
+
+`ANNOTATED_TAG_SHA` is the highest-value addition and lands now.
+`_get_remote_tag_shas` gives both backends the tag-object to commit map,
+so the git backend stops false-passing **and** the message becomes
+actionable:
 
 ```text
 .github/workflows/build.yaml
@@ -822,14 +832,14 @@ is preserved.
 
 <!-- markdownlint-disable MD013 -->
 
-| Code | Name                    | Meaning                                                                         |
-| ---- | ----------------------- | ------------------------------------------------------------------------------- |
-| `0`  | `SUCCESS`               | No failing findings                                                             |
-| `1`  | `DEFECTS_FOUND`         | `DEFECT`-category findings, or files modified by any fixer (existing behaviour) |
-| `2`  | *reserved*              | Click/Typer CLI usage error — **do not assign**                                 |
-| `3`  | `ALLOW_LIST_STALE`      | `--verify-allow-list` and unsuppressed allow-list `CURRENCY` findings remain    |
-| `4`  | `ALLOW_LIST_UNRESOLVED` | `--verify-allow-list` and the latest release could not be resolved              |
-| `5`  | `ACTIONS_OUTDATED`      | `--verify-actions` and outdated action calls remain (§8.7)                      |
+| Code | Name                              | Meaning                                                                                                                                                                                                              |
+| ---- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0`  | `SUCCESS`                         | No failing findings                                                                                                                                                                                                  |
+| `1`  | `DEFECTS_FOUND` / `RUNTIME_ERROR` | Defect findings, files modified by a fixer, or the run itself failed. The two share a value because the tool has always exited `1` for both; splitting them would break callers, so it is deferred to a future major |
+| `2`  | *reserved*                        | Click/Typer CLI usage error — **do not assign**                                                                                                                                                                      |
+| `3`  | `ALLOW_LIST_STALE`                | `--verify-allow-list` and unsuppressed allow-list `CURRENCY` findings remain                                                                                                                                         |
+| `4`  | `ALLOW_LIST_UNRESOLVED`           | `--verify-allow-list` and the latest release could not be resolved                                                                                                                                                   |
+| `5`  | `ACTIONS_OUTDATED`                | `--verify-actions` and outdated action calls remain (§8.7)                                                                                                                                                           |
 
 <!-- markdownlint-enable MD013 -->
 

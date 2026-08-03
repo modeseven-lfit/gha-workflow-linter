@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import json
 import logging
 from pathlib import Path
+import textwrap
 from typing import Any
 
 from rich.logging import RichHandler
@@ -57,6 +58,7 @@ from .models import (
     LogLevel,
     ValidationError,
     ValidationMethod,
+    ValidationResult,
 )
 from .scanner import WorkflowScanner
 from .system_utils import get_default_workers
@@ -752,7 +754,9 @@ def lint(
         console.print(
             "[red]Error: --verbose and --quiet cannot be used together[/red]"
         )
-        raise typer.Exit(1)
+        # Arguably a usage error (code 2), but this has always exited 1 and
+        # changing it would break callers; see exit_codes.RUNTIME_ERROR.
+        raise typer.Exit(exit_codes.RUNTIME_ERROR)
 
     # JSON format implies quiet mode (suppress console output)
     if output_format == "json":
@@ -830,17 +834,17 @@ def lint(
     except ValidationAbortedError as e:
         # These errors should already be handled in run_linter, but catch here as fallback
         logger.error(f"Validation aborted: {e.message}")
-        raise typer.Exit(1) from None
+        raise typer.Exit(exit_codes.RUNTIME_ERROR) from None
     except (ValueError, ConfigurationError) as e:
         logger.error(f"Configuration error: {e}")
         if verbose:
             logger.exception("Full traceback:")
-        raise typer.Exit(1) from None
+        raise typer.Exit(exit_codes.RUNTIME_ERROR) from None
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         if verbose:
             logger.exception("Full traceback:")
-        raise typer.Exit(1) from None
+        raise typer.Exit(exit_codes.RUNTIME_ERROR) from None
 
     raise typer.Exit(exit_code)
 
@@ -1661,6 +1665,12 @@ def _display_stale_actions_from_summary(
     )
 
 
+#: Results whose error message carries actionable remediation that the
+#: action reference alone does not convey. Messages for other results
+#: restate what the reader can already see, so they stay unrendered.
+_REMEDIABLE_RESULTS = frozenset({ValidationResult.ANNOTATED_TAG_SHA})
+
+
 def _print_deduplicated_action_refs(items: list[dict[str, Any]]) -> None:
     """
     Print a list of action references, collapsing duplicates per file.
@@ -1669,17 +1679,26 @@ def _print_deduplicated_action_refs(items: list[dict[str, Any]]) -> None:
     same ``action_ref`` appears more than once for a file, a single entry is
     printed annotated with the number of occurrences and the sorted set of
     distinct source line numbers, instead of repeating the same line N times.
+
+    An optional ``message`` key carrying remediation advice (for example the
+    peeled commit SHA behind an annotated tag object) is printed beneath the
+    reference. Only results whose message tells the reader something the
+    reference itself does not are rendered, so the common cases stay terse.
     """
     # Preserve first-seen order while grouping by action_ref. Use a set so
     # that repeated (ref, line) pairs collapse to a single line number, then
     # render in sorted order for stable output.
     grouped: dict[str, set[int]] = {}
     occurrences: dict[str, int] = {}
+    messages: dict[str, str] = {}
     for item in items:
         ref = item["action_ref"]
         line = item["line"]
         grouped.setdefault(ref, set()).add(line)
         occurrences[ref] = occurrences.get(ref, 0) + 1
+        message = item.get("message")
+        if message and item.get("result") in _REMEDIABLE_RESULTS:
+            messages.setdefault(ref, message)
 
     for ref, line_set in grouped.items():
         count = occurrences[ref]
@@ -1693,6 +1712,18 @@ def _print_deduplicated_action_refs(items: list[dict[str, Any]]) -> None:
                 f"   {ref} [dim](x{count})[/dim] "
                 f"[dim][{label} {line_list}][/dim]"
             )
+        remediation = messages.get(ref)
+        if remediation:
+            # Wrap explicitly with a hanging indent: letting the console
+            # wrap a long single-line message flushes continuations to
+            # column 0, which reads as unrelated output.
+            for text in textwrap.wrap(
+                " ".join(remediation.split()),
+                width=72,
+                initial_indent="     ",
+                subsequent_indent="     ",
+            ):
+                console.print(f"[yellow]{text}[/yellow]")
 
 
 def output_text_results(
@@ -1785,6 +1816,7 @@ def output_text_results(
                 "action_ref": action_ref,
                 "line": error.action_call.line_number,
                 "result": error.result,
+                "message": error.error_message,
             }
 
             # Check if this is a test reference based on comment

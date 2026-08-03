@@ -143,7 +143,6 @@ class TestResultCategory:
             ValidationResult.INVALID_PATH,
             ValidationResult.INVALID_SYNTAX,
             ValidationResult.ANNOTATED_TAG_SHA,
-            ValidationResult.SHA_COMMENT_MISMATCH,
         ],
     )
     def test_defects(self, result: ValidationResult) -> None:
@@ -153,7 +152,6 @@ class TestResultCategory:
         "result",
         [
             ValidationResult.NOT_PINNED_TO_SHA,
-            ValidationResult.OUTDATED_ACTION,
             ValidationResult.TEST_REFERENCE,
         ],
     )

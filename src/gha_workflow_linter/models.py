@@ -44,8 +44,6 @@ class ValidationResult(str, Enum):
     NOT_PINNED_TO_SHA = "not_pinned_to_sha"
     TEST_REFERENCE = "test_reference"
     ANNOTATED_TAG_SHA = "annotated_tag_sha"
-    SHA_COMMENT_MISMATCH = "sha_comment_mismatch"
-    OUTDATED_ACTION = "outdated_action"
 
 
 class Severity(str, Enum):
@@ -84,9 +82,7 @@ _RESULT_CATEGORIES: dict[ValidationResult, Category] = {
     ValidationResult.INVALID_PATH: Category.DEFECT,
     ValidationResult.INVALID_SYNTAX: Category.DEFECT,
     ValidationResult.ANNOTATED_TAG_SHA: Category.DEFECT,
-    ValidationResult.SHA_COMMENT_MISMATCH: Category.DEFECT,
     ValidationResult.NOT_PINNED_TO_SHA: Category.CURRENCY,
-    ValidationResult.OUTDATED_ACTION: Category.CURRENCY,
     ValidationResult.TEST_REFERENCE: Category.CURRENCY,
     ValidationResult.NETWORK_ERROR: Category.INFRASTRUCTURE,
     ValidationResult.TIMEOUT: Category.INFRASTRUCTURE,

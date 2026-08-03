@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable
     from pathlib import Path
 
     from rich.progress import Progress, TaskID
@@ -37,6 +37,7 @@ from gha_workflow_linter.models import (
     ValidationMethod,
     ValidationResult,
 )
+from gha_workflow_linter.validator import ActionCallValidator
 
 
 def parse_json_output(stdout: str) -> dict[str, Any]:
@@ -83,6 +84,72 @@ def build_all_action_calls_from_errors(
             error.action_call
         )
     return all_calls
+
+
+def stub_validator_class(
+    validate: Callable[
+        [dict[Path, dict[int, ActionCall]]], list[ValidationError]
+    ],
+) -> type[ActionCallValidator]:
+    """Build a validator class whose validation step is replaced.
+
+    ``cli.py`` does ``from .validator import ActionCallValidator`` at
+    import time, so patching ``gha_workflow_linter.validator``'s attribute
+    has no effect on the CLI: the name has to be replaced where it is
+    looked up, ``gha_workflow_linter.cli.ActionCallValidator``.
+
+    Subclassing the real validator, rather than substituting a bare mock,
+    keeps every other method genuine. That matters for
+    ``get_validation_summary``, which the CLI calls on the same instance
+    to produce the error counts these tests assert on; a mock would return
+    a mock and the assertions would be meaningless.
+
+    Args:
+        validate: Callable invoked with the scanner's action calls, keyed
+            by file path then by line number, returning the validation
+            errors the CLI should see.
+
+    Returns:
+        A drop-in replacement for ``ActionCallValidator`` that performs no
+        network access.
+    """
+
+    class StubValidator(ActionCallValidator):
+        """Validator reporting pre-computed errors, without network use."""
+
+        def validate_action_calls(
+            self,
+            action_calls: dict[Path, dict[int, ActionCall]],
+            progress: Progress | None = None,
+            task_id: TaskID | None = None,
+        ) -> list[ValidationError]:
+            """Return the errors supplied by the enclosing factory."""
+            return validate(action_calls)
+
+    return StubValidator
+
+
+def iter_calls(
+    action_calls: dict[Path, dict[int, ActionCall]],
+) -> list[tuple[Path, ActionCall]]:
+    """Flatten scanner results into ``(file_path, action_call)`` pairs.
+
+    ``validate_action_calls`` receives a mapping of file path to a mapping
+    of line number to action call. Stubs want the individual calls, paired
+    with the file they came from so the resulting ``ValidationError``
+    points at the right file.
+
+    Args:
+        action_calls: Scanner results as passed to the validator.
+
+    Returns:
+        One ``(file_path, action_call)`` pair per action call.
+    """
+    return [
+        (file_path, call)
+        for file_path, calls in action_calls.items()
+        for call in calls.values()
+    ]
 
 
 class TestAutoFixBehaviorWithPinnedSHA:
@@ -541,114 +608,109 @@ jobs:
 
         runner = CliRunner()
 
-        # Mock git operations for CLI test
-        with patch(
-            "gha_workflow_linter.validator.ActionCallValidator"
-        ) as mock_validator_class:
-            mock_validator = AsyncMock()
-            mock_validator_class.return_value = mock_validator
-
-            # Configure mock to return validation errors for all non-SHA references
-            def mock_validate_calls(
-                calls: Iterable[ActionCall],
-                _progress: Progress | None = None,
-                _task: TaskID | None = None,
-            ) -> list[ValidationError]:
-                errors = []
-                for call in calls:
-                    if call.reference in [
-                        "invalid-branch",
-                        "master",
-                        "v4",
-                        "v3.8.1",
-                        "v2",
-                    ]:
-                        errors.append(
-                            ValidationError(
-                                file_path=workflow_file,
-                                action_call=call,
-                                result=ValidationResult.INVALID_REFERENCE
-                                if call.reference == "invalid-branch"
-                                else ValidationResult.NOT_PINNED_TO_SHA,
-                                error_message="Invalid action call"
-                                if call.reference == "invalid-branch"
-                                else "Action not pinned to SHA",
-                            )
+        # Configure the validator to report errors for all non-SHA
+        # references, so the run exercises auto-fix rather than the
+        # network.
+        def mock_validate_calls(
+            action_calls: dict[Path, dict[int, ActionCall]],
+        ) -> list[ValidationError]:
+            errors: list[ValidationError] = []
+            for file_path, call in iter_calls(action_calls):
+                if call.reference in [
+                    "invalid-branch",
+                    "master",
+                    "v4",
+                    "v3.8.1",
+                    "v2",
+                ]:
+                    errors.append(
+                        ValidationError(
+                            file_path=file_path,
+                            action_call=call,
+                            result=ValidationResult.INVALID_REFERENCE
+                            if call.reference == "invalid-branch"
+                            else ValidationResult.NOT_PINNED_TO_SHA,
+                            error_message="Invalid action call"
+                            if call.reference == "invalid-branch"
+                            else "Action not pinned to SHA",
                         )
-                return errors
+                    )
+            return errors
 
-            mock_validator.validate_action_calls = mock_validate_calls
-
-            # Mock auto-fixer
-            with patch(
+        # Mock git operations and the auto-fixer for this CLI test
+        with (
+            patch(
+                "gha_workflow_linter.cli.ActionCallValidator",
+                stub_validator_class(mock_validate_calls),
+            ),
+            patch(
                 "gha_workflow_linter.auto_fix.AutoFixer"
-            ) as mock_auto_fixer_class:
-                mock_auto_fixer = AsyncMock()
-                mock_auto_fixer_class.return_value.__aenter__.return_value = (
-                    mock_auto_fixer
-                )
+            ) as mock_auto_fixer_class,
+        ):
+            mock_auto_fixer = AsyncMock()
+            mock_auto_fixer_class.return_value.__aenter__.return_value = (
+                mock_auto_fixer
+            )
 
-                # Mock that it fixes all 5 issues
-                mock_auto_fixer.fix_validation_errors.return_value = (
-                    {
-                        workflow_file: [
-                            {
-                                "line_number": "9",
-                                "old_line": "uses: actions/checkout@invalid-branch",
-                                "new_line": "uses: actions/checkout@abc123",
-                            },
-                            {
-                                "line_number": "12",
-                                "old_line": "uses: actions/checkout@master",
-                                "new_line": "uses: actions/checkout@def456",
-                            },
-                            {
-                                "line_number": "15",
-                                "old_line": "uses: actions/setup-python@v4",
-                                "new_line": "uses: actions/setup-python@ghi789",
-                            },
-                            {
-                                "line_number": "18",
-                                "old_line": "uses: actions/setup-node@v3.8.1",
-                                "new_line": "uses: actions/setup-node@jkl012",
-                            },
-                            {
-                                "line_number": "21",
-                                "old_line": "uses: actions/upload-artifact@v2",
-                                "new_line": "uses: actions/upload-artifact@mno345",
-                            },
-                        ]
-                    },
-                    {"actions_moved": 0, "calls_updated": 0},
-                    {},
-                )
+            # Mock that it fixes all 5 issues
+            mock_auto_fixer.fix_validation_errors.return_value = (
+                {
+                    workflow_file: [
+                        {
+                            "line_number": "9",
+                            "old_line": "uses: actions/checkout@invalid-branch",
+                            "new_line": "uses: actions/checkout@abc123",
+                        },
+                        {
+                            "line_number": "12",
+                            "old_line": "uses: actions/checkout@master",
+                            "new_line": "uses: actions/checkout@def456",
+                        },
+                        {
+                            "line_number": "15",
+                            "old_line": "uses: actions/setup-python@v4",
+                            "new_line": "uses: actions/setup-python@ghi789",
+                        },
+                        {
+                            "line_number": "18",
+                            "old_line": "uses: actions/setup-node@v3.8.1",
+                            "new_line": "uses: actions/setup-node@jkl012",
+                        },
+                        {
+                            "line_number": "21",
+                            "old_line": "uses: actions/upload-artifact@v2",
+                            "new_line": "uses: actions/upload-artifact@mno345",
+                        },
+                    ]
+                },
+                {"actions_moved": 0, "calls_updated": 0},
+                {},
+            )
 
-                # Run CLI with require-pinned-sha (default is True)
-                result = runner.invoke(
-                    app,
-                    [
-                        "lint",
-                        str(temp_dir),
-                        "--auto-fix",
-                        "--auto-latest",
-                        "--validation-method",
-                        "git",
-                        "--format",
-                        "json",
-                    ],
-                )
+            # Run CLI with require-pinned-sha (default is True)
+            result = runner.invoke(
+                app,
+                [
+                    "lint",
+                    str(temp_dir),
+                    "--auto-fix",
+                    "--auto-latest",
+                    "--validation-method",
+                    "git",
+                    "--format",
+                    "json",
+                ],
+            )
 
-                # Should exit with code 1 (files were modified)
-                assert result.exit_code == 1
+            # Should exit with code 1 (files were modified)
+            assert result.exit_code == 1
 
-                # Parse JSON output for structured validation
-                output_data = parse_json_output(result.stdout)
-                assert output_data["validation_summary"]["total_errors"] == 5
+            # Parse JSON output for structured validation
+            output_data = parse_json_output(result.stdout)
+            assert output_data["validation_summary"]["total_errors"] == 5
 
-                # Verify the file was actually modified
-                assert (
-                    workflow_file.read_text() != workflow_with_mixed_references
-                )
+            # Verify the file was actually modified
+            assert workflow_file.read_text() != workflow_with_mixed_references
 
     def test_cli_auto_fix_with_pinned_sha_not_required(
         self,
@@ -673,105 +735,94 @@ validation_method: git
 
         runner = CliRunner()
 
-        with patch(
-            "gha_workflow_linter.validator.ActionCallValidator"
-        ) as mock_validator_class:
-            mock_validator = AsyncMock()
-            mock_validator_class.return_value = mock_validator
+        # When require_pinned_sha=False, only invalid references are errors
+        def mock_validate_calls(
+            action_calls: dict[Path, dict[int, ActionCall]],
+        ) -> list[ValidationError]:
+            return [
+                ValidationError(
+                    file_path=file_path,
+                    action_call=call,
+                    result=ValidationResult.INVALID_REFERENCE,
+                    error_message="Invalid action call",
+                )
+                for file_path, call in iter_calls(action_calls)
+                if call.reference == "invalid-branch"
+            ]
 
-            # When require_pinned_sha=False, only invalid references are errors
-            def mock_validate_calls(
-                calls: Iterable[ActionCall],
-                _progress: Progress | None = None,
-                _task: TaskID | None = None,
-            ) -> list[ValidationError]:
-                errors = []
-                for call in calls:
-                    if (
-                        call.reference == "invalid-branch"
-                    ):  # Only invalid refs are errors
-                        errors.append(
-                            ValidationError(
-                                file_path=workflow_file,
-                                action_call=call,
-                                result=ValidationResult.INVALID_REFERENCE,
-                                error_message="Invalid action call",
-                            )
-                        )
-                return errors
-
-            mock_validator.validate_action_calls = mock_validate_calls
-
-            with patch(
+        with (
+            patch(
+                "gha_workflow_linter.cli.ActionCallValidator",
+                stub_validator_class(mock_validate_calls),
+            ),
+            patch(
                 "gha_workflow_linter.auto_fix.AutoFixer"
-            ) as mock_auto_fixer_class:
-                mock_auto_fixer = AsyncMock()
-                mock_auto_fixer_class.return_value.__aenter__.return_value = (
-                    mock_auto_fixer
+            ) as mock_auto_fixer_class,
+        ):
+            mock_auto_fixer = AsyncMock()
+            mock_auto_fixer_class.return_value.__aenter__.return_value = (
+                mock_auto_fixer
+            )
+
+            # Mock that it fixes all 5 issues (1 invalid ref + 4 version updates due to auto_latest)
+            mock_auto_fixer.fix_validation_errors.return_value = (
+                {
+                    workflow_file: [
+                        {
+                            "line_number": "9",
+                            "old_line": "uses: actions/checkout@invalid-branch",
+                            "new_line": "uses: actions/checkout@abc123",
+                        },
+                        {
+                            "line_number": "12",
+                            "old_line": "uses: actions/checkout@master",
+                            "new_line": "uses: actions/checkout@def456",
+                        },
+                        {
+                            "line_number": "15",
+                            "old_line": "uses: actions/setup-python@v4",
+                            "new_line": "uses: actions/setup-python@ghi789",
+                        },
+                        {
+                            "line_number": "18",
+                            "old_line": "uses: actions/setup-node@v3.8.1",
+                            "new_line": "uses: actions/setup-node@jkl012",
+                        },
+                        {
+                            "line_number": "21",
+                            "old_line": "uses: actions/upload-artifact@v2",
+                            "new_line": "uses: actions/upload-artifact@mno345",
+                        },
+                    ]
+                },
+                {"actions_moved": 0, "calls_updated": 0},
+                {},
+            )
+
+            result = runner.invoke(
+                app,
+                [
+                    "lint",
+                    str(temp_dir),
+                    "--config",
+                    str(config_file),
+                    "--format",
+                    "json",
+                ],
+            )
+
+            # Should complete successfully
+            if result.exit_code in (0, 1):
+                # Parse JSON output for structured validation
+                output_data = parse_json_output(result.stdout)
+                # Only 1 validation error (require_pinned_sha=False, so tags/branches are valid)
+                # But auto_latest=True updates all actions to latest versions
+                assert output_data["validation_summary"]["total_errors"] >= 1
+
+                # Verify the file was modified
+                assert (
+                    workflow_file.read_text() != workflow_with_mixed_references
                 )
-
-                # Mock that it fixes all 5 issues (1 invalid ref + 4 version updates due to auto_latest)
-                mock_auto_fixer.fix_validation_errors.return_value = (
-                    {
-                        workflow_file: [
-                            {
-                                "line_number": "9",
-                                "old_line": "uses: actions/checkout@invalid-branch",
-                                "new_line": "uses: actions/checkout@abc123",
-                            },
-                            {
-                                "line_number": "12",
-                                "old_line": "uses: actions/checkout@master",
-                                "new_line": "uses: actions/checkout@def456",
-                            },
-                            {
-                                "line_number": "15",
-                                "old_line": "uses: actions/setup-python@v4",
-                                "new_line": "uses: actions/setup-python@ghi789",
-                            },
-                            {
-                                "line_number": "18",
-                                "old_line": "uses: actions/setup-node@v3.8.1",
-                                "new_line": "uses: actions/setup-node@jkl012",
-                            },
-                            {
-                                "line_number": "21",
-                                "old_line": "uses: actions/upload-artifact@v2",
-                                "new_line": "uses: actions/upload-artifact@mno345",
-                            },
-                        ]
-                    },
-                    {"actions_moved": 0, "calls_updated": 0},
-                    {},
-                )
-
-                result = runner.invoke(
-                    app,
-                    [
-                        "lint",
-                        str(temp_dir),
-                        "--config",
-                        str(config_file),
-                        "--format",
-                        "json",
-                    ],
-                )
-
-                # Should complete successfully
-                if result.exit_code in (0, 1):
-                    # Parse JSON output for structured validation
-                    output_data = parse_json_output(result.stdout)
-                    # Only 1 validation error (require_pinned_sha=False, so tags/branches are valid)
-                    # But auto_latest=True updates all actions to latest versions
-                    assert (
-                        output_data["validation_summary"]["total_errors"] >= 1
-                    )
-
-                    # Verify the file was modified
-                    assert (
-                        workflow_file.read_text()
-                        != workflow_with_mixed_references
-                    )
 
     def test_error_count_summary_with_pinned_sha_required(
         self,
@@ -785,89 +836,81 @@ validation_method: git
 
         runner = CliRunner()
 
-        with patch(
-            "gha_workflow_linter.validator.ActionCallValidator"
-        ) as mock_validator_class:
-            mock_validator = AsyncMock()
-            mock_validator_class.return_value = mock_validator
-
-            # All non-SHA references should be errors when require_pinned_sha=True
-            def mock_validate_calls(
-                calls: Iterable[ActionCall],
-                _progress: Progress | None = None,
-                _task: TaskID | None = None,
-            ) -> list[ValidationError]:
-                errors = []
-                for call in calls:
-                    if call.reference in [
-                        "invalid-branch",
-                        "master",
-                        "v4",
-                        "v3.8.1",
-                        "v2",
-                    ]:
-                        if call.reference == "invalid-branch":
-                            errors.append(
-                                ValidationError(
-                                    file_path=workflow_file,
-                                    action_call=call,
-                                    result=ValidationResult.INVALID_REFERENCE,
-                                    error_message="Invalid action call",
-                                )
+        # All non-SHA references should be errors when require_pinned_sha=True
+        def mock_validate_calls(
+            action_calls: dict[Path, dict[int, ActionCall]],
+        ) -> list[ValidationError]:
+            errors: list[ValidationError] = []
+            for file_path, call in iter_calls(action_calls):
+                if call.reference in [
+                    "invalid-branch",
+                    "master",
+                    "v4",
+                    "v3.8.1",
+                    "v2",
+                ]:
+                    if call.reference == "invalid-branch":
+                        errors.append(
+                            ValidationError(
+                                file_path=file_path,
+                                action_call=call,
+                                result=ValidationResult.INVALID_REFERENCE,
+                                error_message="Invalid action call",
                             )
-                        else:
-                            errors.append(
-                                ValidationError(
-                                    file_path=workflow_file,
-                                    action_call=call,
-                                    result=ValidationResult.NOT_PINNED_TO_SHA,
-                                    error_message="Action not pinned to SHA",
-                                )
+                        )
+                    else:
+                        errors.append(
+                            ValidationError(
+                                file_path=file_path,
+                                action_call=call,
+                                result=ValidationResult.NOT_PINNED_TO_SHA,
+                                error_message="Action not pinned to SHA",
                             )
-                return errors
+                        )
+            return errors
 
-            mock_validator.validate_action_calls = mock_validate_calls
-
-            with patch(
+        with (
+            patch(
+                "gha_workflow_linter.cli.ActionCallValidator",
+                stub_validator_class(mock_validate_calls),
+            ),
+            patch(
                 "gha_workflow_linter.auto_fix.AutoFixer"
-            ) as mock_auto_fixer_class:
-                mock_auto_fixer = AsyncMock()
-                mock_auto_fixer_class.return_value.__aenter__.return_value = (
-                    mock_auto_fixer
-                )
-                mock_auto_fixer.fix_validation_errors.return_value = (
-                    {},
-                    {"actions_moved": 0, "calls_updated": 0},
-                    {},
-                )
+            ) as mock_auto_fixer_class,
+        ):
+            mock_auto_fixer = AsyncMock()
+            mock_auto_fixer_class.return_value.__aenter__.return_value = (
+                mock_auto_fixer
+            )
+            mock_auto_fixer.fix_validation_errors.return_value = (
+                {},
+                {"actions_moved": 0, "calls_updated": 0},
+                {},
+            )
 
-                result = runner.invoke(
-                    app,
-                    [
-                        "lint",
-                        str(temp_dir),
-                        "--auto-fix",
-                        "--validation-method",
-                        "git",
-                        "--format",
-                        "json",
-                    ],
-                )
+            result = runner.invoke(
+                app,
+                [
+                    "lint",
+                    str(temp_dir),
+                    "--auto-fix",
+                    "--validation-method",
+                    "git",
+                    "--format",
+                    "json",
+                ],
+            )
 
-                if result.exit_code in (0, 1):
-                    # Parse JSON output for structured validation
-                    output_data = parse_json_output(result.stdout)
-                    assert (
-                        output_data["validation_summary"]["total_errors"] == 5
-                    )
-                    assert (
-                        output_data["validation_summary"]["invalid_references"]
-                        == 1
-                    )
-                    assert (
-                        output_data["validation_summary"]["not_pinned_to_sha"]
-                        == 4
-                    )
+            if result.exit_code in (0, 1):
+                # Parse JSON output for structured validation
+                output_data = parse_json_output(result.stdout)
+                assert output_data["validation_summary"]["total_errors"] == 5
+                assert (
+                    output_data["validation_summary"]["invalid_references"] == 1
+                )
+                assert (
+                    output_data["validation_summary"]["not_pinned_to_sha"] == 4
+                )
 
     def test_error_count_summary_with_pinned_sha_not_required(
         self,
@@ -1276,67 +1319,59 @@ jobs:
 
         runner = CliRunner()
 
-        with patch(
-            "gha_workflow_linter.validator.ActionCallValidator"
-        ) as mock_validator_class:
-            mock_validator = AsyncMock()
-            mock_validator_class.return_value = mock_validator
+        # Only action calls should be validated for SHA pinning
+        def mock_validate_calls(
+            action_calls: dict[Path, dict[int, ActionCall]],
+        ) -> list[ValidationError]:
+            return [
+                ValidationError(
+                    file_path=file_path,
+                    action_call=call,
+                    result=ValidationResult.NOT_PINNED_TO_SHA,
+                    error_message="Action not pinned to SHA",
+                )
+                for file_path, call in iter_calls(action_calls)
+                if call.call_type == ActionCallType.ACTION
+                and call.reference in ["v3", "v4"]
+            ]
 
-            # Only action calls should be validated for SHA pinning
-            def mock_validate_calls(
-                calls: Iterable[ActionCall],
-                _progress: Progress | None = None,
-                _task: TaskID | None = None,
-            ) -> list[ValidationError]:
-                errors = []
-                for call in calls:
-                    if (
-                        call.call_type == ActionCallType.ACTION
-                        and call.reference in ["v3", "v4"]
-                    ):
-                        errors.append(
-                            ValidationError(
-                                file_path=workflow_file,
-                                action_call=call,
-                                result=ValidationResult.NOT_PINNED_TO_SHA,
-                                error_message="Action not pinned to SHA",
-                            )
-                        )
-                return errors
-
-            mock_validator.validate_action_calls = mock_validate_calls
-
-            with patch(
+        with (
+            patch(
+                "gha_workflow_linter.cli.ActionCallValidator",
+                stub_validator_class(mock_validate_calls),
+            ),
+            patch(
                 "gha_workflow_linter.auto_fix.AutoFixer"
-            ) as mock_auto_fixer_class:
-                mock_auto_fixer = AsyncMock()
-                mock_auto_fixer_class.return_value.__aenter__.return_value = (
-                    mock_auto_fixer
-                )
-                mock_auto_fixer.fix_validation_errors.return_value = (
-                    {},
-                    {"actions_moved": 0, "calls_updated": 0},
-                    {},
-                )
+            ) as mock_auto_fixer_class,
+        ):
+            mock_auto_fixer = AsyncMock()
+            mock_auto_fixer_class.return_value.__aenter__.return_value = (
+                mock_auto_fixer
+            )
+            mock_auto_fixer.fix_validation_errors.return_value = (
+                {},
+                {"actions_moved": 0, "calls_updated": 0},
+                {},
+            )
 
-                result = runner.invoke(
-                    app,
-                    [
-                        "lint",
-                        str(temp_dir),
-                        "--auto-fix",
-                        "--validation-method",
-                        "git",
-                    ],
-                )
+            result = runner.invoke(
+                app,
+                [
+                    "lint",
+                    str(temp_dir),
+                    "--auto-fix",
+                    "--validation-method",
+                    "git",
+                ],
+            )
 
-                # Should only flag action calls, not reusable workflows
-                assert (
-                    "Found" in result.stdout
-                    and "2" in result.stdout
-                    and "validation errors" in result.stdout
-                )
-                assert "2 actions not pinned to SHA" in result.stdout
+            # Should only flag action calls, not reusable workflows
+            assert (
+                "Found" in result.stdout
+                and "2" in result.stdout
+                and "validation errors" in result.stdout
+            )
+            assert "2 actions not pinned to SHA" in result.stdout
 
     def test_auto_fix_with_large_workflow_file(self, temp_dir: Path) -> None:
         """Test auto-fix performance with large workflow files."""
@@ -1362,61 +1397,57 @@ jobs:
 
         runner = CliRunner()
 
-        with patch(
-            "gha_workflow_linter.validator.ActionCallValidator"
-        ) as mock_validator_class:
-            mock_validator = AsyncMock()
-            mock_validator_class.return_value = mock_validator
+        # All should be validation errors (not pinned to SHA)
+        def mock_validate_calls(
+            action_calls: dict[Path, dict[int, ActionCall]],
+        ) -> list[ValidationError]:
+            return [
+                ValidationError(
+                    file_path=file_path,
+                    action_call=call,
+                    result=ValidationResult.NOT_PINNED_TO_SHA,
+                    error_message="Action not pinned to SHA",
+                )
+                for file_path, call in iter_calls(action_calls)
+            ]
 
-            # All should be validation errors (not pinned to SHA)
-            def mock_validate_calls(
-                calls: Iterable[ActionCall],
-                _progress: Progress | None = None,
-                _task: TaskID | None = None,
-            ) -> list[ValidationError]:
-                return [
-                    ValidationError(
-                        file_path=workflow_file,
-                        action_call=call,
-                        result=ValidationResult.NOT_PINNED_TO_SHA,
-                        error_message="Action not pinned to SHA",
-                    )
-                    for call in calls
-                ]
-
-            mock_validator.validate_action_calls = mock_validate_calls
-
-            with patch(
+        with (
+            patch(
+                "gha_workflow_linter.cli.ActionCallValidator",
+                stub_validator_class(mock_validate_calls),
+            ),
+            patch(
                 "gha_workflow_linter.auto_fix.AutoFixer"
-            ) as mock_auto_fixer_class:
-                mock_auto_fixer = AsyncMock()
-                mock_auto_fixer_class.return_value.__aenter__.return_value = (
-                    mock_auto_fixer
-                )
-                mock_auto_fixer.fix_validation_errors.return_value = (
-                    {},
-                    {"actions_moved": 0, "calls_updated": 0},
-                    {},
-                )
+            ) as mock_auto_fixer_class,
+        ):
+            mock_auto_fixer = AsyncMock()
+            mock_auto_fixer_class.return_value.__aenter__.return_value = (
+                mock_auto_fixer
+            )
+            mock_auto_fixer.fix_validation_errors.return_value = (
+                {},
+                {"actions_moved": 0, "calls_updated": 0},
+                {},
+            )
 
-                result = runner.invoke(
-                    app,
-                    [
-                        "lint",
-                        str(temp_dir),
-                        "--auto-fix",
-                        "--validation-method",
-                        "git",
-                    ],
-                )
+            result = runner.invoke(
+                app,
+                [
+                    "lint",
+                    str(temp_dir),
+                    "--auto-fix",
+                    "--validation-method",
+                    "git",
+                ],
+            )
 
-                # Should handle all 50 action calls
-                assert (
-                    "Found" in result.stdout
-                    and "50" in result.stdout
-                    and "validation errors" in result.stdout
-                )
-                assert "50 actions not pinned to SHA" in result.stdout
+            # Should handle all 50 action calls
+            assert (
+                "Found" in result.stdout
+                and "50" in result.stdout
+                and "validation errors" in result.stdout
+            )
+            assert "50 actions not pinned to SHA" in result.stdout
 
     def test_auto_fix_with_syntax_errors(self, temp_dir: Path) -> None:
         """Test auto-fix behavior with workflows that have YAML syntax errors."""
@@ -1581,78 +1612,75 @@ jobs:
 
         runner = CliRunner()
 
-        with patch(
-            "gha_workflow_linter.validator.ActionCallValidator"
-        ) as mock_validator_class:
-            mock_validator = AsyncMock()
-            mock_validator_class.return_value = mock_validator
+        # Return errors for all workflows. The file path comes from the
+        # scanner results, so each error points at the file its call was
+        # found in rather than at whichever directory the loop above
+        # happened to leave behind.
+        def mock_validate_calls(
+            action_calls: dict[Path, dict[int, ActionCall]],
+        ) -> list[ValidationError]:
+            return [
+                ValidationError(
+                    file_path=file_path,
+                    action_call=call,
+                    result=ValidationResult.NOT_PINNED_TO_SHA,
+                    error_message="Action not pinned to SHA",
+                )
+                for file_path, call in iter_calls(action_calls)
+            ]
 
-            # Return errors for all workflows
-            def mock_validate_calls(
-                calls: Iterable[ActionCall],
-                _progress: Progress | None = None,
-                _task: TaskID | None = None,
-            ) -> list[ValidationError]:
-                return [
-                    ValidationError(
-                        file_path=workflow_dir / "test.yaml",
-                        action_call=call,
-                        result=ValidationResult.NOT_PINNED_TO_SHA,
-                        error_message="Action not pinned to SHA",
-                    )
-                    for call in calls
+        with (
+            patch(
+                "gha_workflow_linter.cli.ActionCallValidator",
+                stub_validator_class(mock_validate_calls),
+            ),
+            patch(
+                "gha_workflow_linter.auto_fix.AutoFixer"
+            ) as mock_auto_fixer_class,
+        ):
+            mock_auto_fixer = AsyncMock()
+            mock_auto_fixer_class.return_value.__aenter__.return_value = (
+                mock_auto_fixer
+            )
+
+            # Mock fixes for all files
+            fixed_files = {}
+            for workflow_dir in dirs:
+                workflow_file = workflow_dir / "test.yaml"
+                fixed_files[workflow_file] = [
+                    {
+                        "line_number": "7",
+                        "old_line": "uses: actions/checkout@v3",
+                        "new_line": "uses: actions/checkout@sha123",
+                    }
                 ]
 
-            mock_validator.validate_action_calls = mock_validate_calls
+            mock_auto_fixer.fix_validation_errors.return_value = (
+                fixed_files,
+                {"actions_moved": 0, "calls_updated": 0},
+                {},
+            )
 
-            with patch(
-                "gha_workflow_linter.auto_fix.AutoFixer"
-            ) as mock_auto_fixer_class:
-                mock_auto_fixer = AsyncMock()
-                mock_auto_fixer_class.return_value.__aenter__.return_value = (
-                    mock_auto_fixer
-                )
+            result = runner.invoke(
+                app,
+                [
+                    "lint",
+                    str(temp_dir),
+                    "--auto-fix",
+                    "--auto-latest",
+                    "--validation-method",
+                    "git",
+                ],
+            )
 
-                # Mock fixes for all files
-                fixed_files = {}
-                for workflow_dir in dirs:
-                    workflow_file = workflow_dir / "test.yaml"
-                    fixed_files[workflow_file] = [
-                        {
-                            "line_number": "7",
-                            "old_line": "uses: actions/checkout@v3",
-                            "new_line": "uses: actions/checkout@sha123",
-                        }
-                    ]
-
-                mock_auto_fixer.fix_validation_errors.return_value = (
-                    fixed_files,
-                    {"actions_moved": 0, "calls_updated": 0},
-                    {},
-                )
-
-                result = runner.invoke(
-                    app,
-                    [
-                        "lint",
-                        str(temp_dir),
-                        "--auto-fix",
-                        "--auto-latest",
-                        "--validation-method",
-                        "git",
-                    ],
-                )
-
-                # Should find and fix all 3 workflow files
-                assert (
-                    "Found" in result.stdout
-                    and "3" in result.stdout
-                    and "validation errors" in result.stdout
-                )
-                assert (
-                    "Updated 3 workflow call(s) in 3 file(s)" in result.stdout
-                )
-                assert result.exit_code == 1
+            # Should find and fix all 3 workflow files
+            assert (
+                "Found" in result.stdout
+                and "3" in result.stdout
+                and "validation errors" in result.stdout
+            )
+            assert "Updated 3 workflow call(s) in 3 file(s)" in result.stdout
+            assert result.exit_code == 1
 
 
 class TestYAMLStructurePreservation:

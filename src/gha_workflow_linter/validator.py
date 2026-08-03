@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+import dataclasses
 import logging
 from typing import TYPE_CHECKING, Any, NoReturn
 
@@ -30,18 +31,46 @@ from .github_auth import get_github_token_with_fallback
 from .models import (
     ActionCall,
     APICallStats,
+    Category,
     Config,
-    ReferenceType,
     ValidationError,
     ValidationMethod,
     ValidationResult,
+    result_category,
 )
-from .paths import (
-    action_subpath,
-    base_repository,
-    has_action_subpath,
-)
+from .paths import has_action_subpath
 from .utils import has_test_comment
+from .validator_findings import (
+    ReferenceFinding,
+    build_validation_errors,
+    cache_verdict,
+    client_peels,
+    get_error_message,
+    merge_cached_findings,
+    peel_findings,
+    specific_ref_result,
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class _StageResults:
+    """Combined output of the repository, reference and subpath stages.
+
+    Attributes:
+        repo_results: Whether each repository exists.
+        ref_results: Whether each ``(repo, ref)`` pair resolves.
+        ref_findings: Specific verdicts and remediation context for refs
+            that did not resolve cleanly.
+        subpath_results: Whether each subdirectory action path exists.
+        inconclusive_subpaths: Subpath checks that failed transiently and
+            so must not be cached as a verdict.
+    """
+
+    repo_results: dict[str, bool]
+    ref_results: dict[tuple[str, str], bool]
+    ref_findings: dict[tuple[str, str], ReferenceFinding]
+    subpath_results: dict[tuple[str, str], bool]
+    inconclusive_subpaths: set[tuple[str, str]]
 
 
 class ActionCallValidator:
@@ -272,6 +301,89 @@ class ActionCallValidator:
             cache_misses, progress, task_id
         )
 
+        stages = await self._run_validation_stages(
+            repos_to_validate,
+            refs_to_validate,
+            cached_results,
+            progress,
+            task_id,
+            use_github_api,
+        )
+
+        cache_entries_to_store = self._build_cache_entries(
+            refs_to_validate,
+            stages.inconclusive_subpaths,
+            stages.repo_results,
+            stages.ref_results,
+            stages.subpath_results,
+            use_github_api,
+            stages.ref_findings,
+        )
+        if cache_entries_to_store:
+            self._cache.put_batch(cache_entries_to_store)
+
+        all_repo_results, all_ref_results, all_subpath_results = (
+            self._merge_all_results(
+                stages.repo_results,
+                stages.ref_results,
+                stages.subpath_results,
+                cached_results,
+            )
+        )
+
+        validation_results = self._combine_validation_results(
+            unique_calls,
+            all_repo_results,
+            all_ref_results,
+            all_subpath_results,
+            stages.ref_findings,
+        )
+
+        errors = build_validation_errors(
+            validation_results,
+            call_locations,
+            unique_calls,
+            self._ref_key,
+            self.config.require_pinned_sha,
+            stages.ref_findings,
+        )
+
+        self.logger.debug(
+            f"Validation complete: {len(errors)} errors out of "
+            f"{total_calls} calls ({unique_count} unique calls validated)"
+        )
+
+        self._log_final_statistics(use_github_api)
+        self._finalize_progress(progress, task_id)
+
+        return errors
+
+    async def _run_validation_stages(
+        self,
+        repos_to_validate: set[str],
+        refs_to_validate: list[tuple[str, str]],
+        cached_results: dict[tuple[str, str], Any],
+        progress: Progress | None,
+        task_id: TaskID | None,
+        use_github_api: bool,
+    ) -> _StageResults:
+        """Run the repository, reference and subpath validation stages.
+
+        Each stage narrows the work for the next: only references whose
+        repository resolved are looked up, and only subdirectory actions
+        whose reference resolved have their path checked.
+
+        Args:
+            repos_to_validate: Repositories not satisfied from cache
+            refs_to_validate: ``(repo, ref)`` pairs not satisfied from cache
+            cached_results: Previously cached entries, merged back in
+            progress: Optional progress bar
+            task_id: Optional task ID for progress updates
+            use_github_api: Whether to use the GitHub API or Git operations
+
+        Returns:
+            The combined results of all three stages.
+        """
         repo_results = await self._validate_repositories_stage(
             repos_to_validate, use_github_api
         )
@@ -290,7 +402,7 @@ class ActionCallValidator:
         valid_repo_refs_to_validate = self._select_valid_repo_refs(
             refs_to_validate, repo_results
         )
-        ref_results = await self._validate_references_stage(
+        ref_results, ref_findings = await self._validate_references_stage(
             valid_repo_refs_to_validate, use_github_api
         )
 
@@ -305,6 +417,7 @@ class ActionCallValidator:
         )
 
         self._merge_cached_ref_results(ref_results, cached_results)
+        merge_cached_findings(ref_findings, cached_results)
         self._advance_progress(
             progress,
             task_id,
@@ -312,43 +425,13 @@ class ActionCallValidator:
             "Processing validation results...",
         )
 
-        cache_entries_to_store = self._build_cache_entries(
-            refs_to_validate,
-            inconclusive_subpaths,
-            repo_results,
-            ref_results,
-            subpath_results,
-            use_github_api,
+        return _StageResults(
+            repo_results=repo_results,
+            ref_results=ref_results,
+            ref_findings=ref_findings,
+            subpath_results=subpath_results,
+            inconclusive_subpaths=inconclusive_subpaths,
         )
-        if cache_entries_to_store:
-            self._cache.put_batch(cache_entries_to_store)
-
-        all_repo_results, all_ref_results, all_subpath_results = (
-            self._merge_all_results(
-                repo_results, ref_results, subpath_results, cached_results
-            )
-        )
-
-        validation_results = self._combine_validation_results(
-            unique_calls,
-            all_repo_results,
-            all_ref_results,
-            all_subpath_results,
-        )
-
-        errors = self._build_validation_errors(
-            validation_results, call_locations, unique_calls
-        )
-
-        self.logger.debug(
-            f"Validation complete: {len(errors)} errors out of "
-            f"{total_calls} calls ({unique_count} unique calls validated)"
-        )
-
-        self._log_final_statistics(use_github_api)
-        self._finalize_progress(progress, task_id)
-
-        return errors
 
     def _log_validation_plan(
         self, total_calls: int, unique_count: int, use_github_api: bool
@@ -518,11 +601,31 @@ class ActionCallValidator:
         ref_results: dict[tuple[str, str], bool],
         subpath_results: dict[tuple[str, str], bool],
         use_github_api: bool,
+        ref_findings: dict[tuple[str, str], ReferenceFinding] | None = None,
     ) -> list[
         tuple[str, str, ValidationResult, str, ValidationMethod, str | None]
     ]:
-        """Build the cache entries to persist for freshly validated refs."""
+        """Build the cache entries to persist for freshly validated refs.
+
+        Args:
+            refs_to_validate: The ``(repo, ref)`` pairs validated this run.
+            inconclusive_subpaths: Pairs whose subpath check was
+                inconclusive and so must not be cached.
+            repo_results: Repository verdicts.
+            ref_results: Reference verdicts.
+            subpath_results: Subpath verdicts.
+            use_github_api: Whether the API backend produced the results.
+            ref_findings: Specific reference failures. A definite verdict
+                such as ``ANNOTATED_TAG_SHA`` is cached with its rendered
+                remediation message; an infrastructure failure (network,
+                timeout) is skipped so the next run retries it instead of
+                inheriting a false ``INVALID_REFERENCE``.
+
+        Returns:
+            List of cache-entry tuples to hand to ``ValidationCache``.
+        """
         api_call_type = "graphql" if use_github_api else "git"
+        findings = ref_findings or {}
         cache_entries: list[
             tuple[str, str, ValidationResult, str, ValidationMethod, str | None]
         ] = []
@@ -533,29 +636,28 @@ class ActionCallValidator:
             if (repo, ref) in inconclusive_subpaths:
                 continue
 
+            finding = findings.get((repo, ref))
+            # Never persist a verdict the check could not actually reach.
+            if (
+                finding is not None
+                and result_category(finding.result) is Category.INFRASTRUCTURE
+            ):
+                continue
+
             repo_valid = repo_results.get(repo, False)
             ref_valid = ref_results.get((repo, ref), False)
             # Subpath is considered valid unless we explicitly determined it is
             # bogus. Entries without a subpath never populate subpath_results.
             subpath_valid = subpath_results.get((repo, ref), True)
 
-            if repo_valid and ref_valid and subpath_valid:
-                result = ValidationResult.VALID
-                error_message = None
-            elif not repo_valid:
-                result = ValidationResult.INVALID_REPOSITORY
-                error_message = f"Repository {repo} not found or not accessible"
-            elif not ref_valid:
-                result = ValidationResult.INVALID_REFERENCE
-                error_message = (
-                    f"Reference {ref} not found in repository {repo}"
-                )
-            else:
-                result = ValidationResult.INVALID_PATH
-                error_message = (
-                    f"Subdirectory path '{action_subpath(repo)}' not found in "
-                    f"{base_repository(repo)} at {ref}"
-                )
+            result, error_message = cache_verdict(
+                repo,
+                ref,
+                finding,
+                repo_valid=repo_valid,
+                ref_valid=ref_valid,
+                subpath_valid=subpath_valid,
+            )
 
             cache_entries.append(
                 (
@@ -601,47 +703,6 @@ class ActionCallValidator:
                 cached_entry.result != ValidationResult.INVALID_PATH
             )
         return all_repo_results, all_ref_results, all_subpath_results
-
-    def _build_validation_errors(
-        self,
-        validation_results: dict[str, ValidationResult],
-        call_locations: dict[str, list[tuple[Path, ActionCall]]],
-        unique_calls: dict[str, ActionCall],
-    ) -> list[ValidationError]:
-        """Turn per-call validation results into ``ValidationError`` records."""
-        errors: list[ValidationError] = []
-        for call_key, result in validation_results.items():
-            if result != ValidationResult.VALID:
-                for file_path, action_call in call_locations[call_key]:
-                    errors.append(
-                        ValidationError(
-                            file_path=file_path,
-                            action_call=action_call,
-                            result=result,
-                            error_message=self._get_error_message(result),
-                        )
-                    )
-
-        if self.config.require_pinned_sha:
-            for call_key, action_call in unique_calls.items():
-                if (
-                    validation_results.get(call_key) == ValidationResult.VALID
-                    and action_call.reference_type != ReferenceType.COMMIT_SHA
-                ):
-                    for file_path, actual_action_call in call_locations[
-                        call_key
-                    ]:
-                        errors.append(
-                            ValidationError(
-                                file_path=file_path,
-                                action_call=actual_action_call,
-                                result=ValidationResult.NOT_PINNED_TO_SHA,
-                                error_message=self._get_error_message(
-                                    ValidationResult.NOT_PINNED_TO_SHA
-                                ),
-                            )
-                        )
-        return errors
 
     def _log_final_statistics(self, use_github_api: bool) -> None:
         """Emit end-of-run API/Git statistics at debug level."""
@@ -752,11 +813,27 @@ class ActionCallValidator:
         self,
         valid_repo_refs_to_validate: list[tuple[str, str]],
         use_github_api: bool,
-    ) -> dict[tuple[str, str], bool]:
-        """Validate a batch of references for already-valid repositories."""
+    ) -> tuple[
+        dict[tuple[str, str], bool],
+        dict[tuple[str, str], ReferenceFinding],
+    ]:
+        """Validate a batch of references for already-valid repositories.
+
+        Args:
+            valid_repo_refs_to_validate: ``(repo_key, ref)`` pairs whose
+                repository already validated.
+            use_github_api: Whether to use the API or the Git backend.
+
+        Returns:
+            Tuple of (results, findings): results is the pass/fail verdict
+            per pair, and findings carries the specific reason for each
+            failure (plus any remediation context) so a caller can report
+            something better than a generic invalid reference.
+        """
         ref_results: dict[tuple[str, str], bool] = {}
+        ref_findings: dict[tuple[str, str], ReferenceFinding] = {}
         if not valid_repo_refs_to_validate:
-            return ref_results
+            return ref_results, ref_findings
         try:
             if use_github_api:
                 assert self._github_client is not None
@@ -764,6 +841,12 @@ class ActionCallValidator:
                     await self._github_client.validate_references_batch(
                         valid_repo_refs_to_validate
                     )
+                )
+                # The API backend reports a bare boolean; a recorded peel
+                # is what distinguishes a tag-object SHA from a reference
+                # that simply does not exist.
+                ref_findings = peel_findings(
+                    ref_results, client_peels(self._github_client)
                 )
                 self._merge_api_stats(self._github_client.get_api_stats())
             else:
@@ -777,10 +860,18 @@ class ActionCallValidator:
                     repo_ref: result == ValidationResult.VALID
                     for repo_ref, result in git_ref_results.items()
                 }
+                peels = client_peels(self._git_client)
+                ref_findings = {
+                    repo_ref: ReferenceFinding(
+                        result=result, peel=peels.get(repo_ref)
+                    )
+                    for repo_ref, result in git_ref_results.items()
+                    if result != ValidationResult.VALID
+                }
             self._log_stage_stats("Reference", use_github_api)
         except Exception as e:
             self._abort_validation("reference", use_github_api, e)
-        return ref_results
+        return ref_results, ref_findings
 
     async def _validate_subpaths_stage(
         self,
@@ -926,12 +1017,30 @@ class ActionCallValidator:
 
         return asyncio.run(_run_validation())
 
+    def _ref_key(self, action_call: ActionCall) -> tuple[str, str]:
+        """Return the ``(repo_key, reference)`` a call is validated under.
+
+        Args:
+            action_call: The call whose reference key is wanted.
+
+        Returns:
+            The key used throughout the validation stages for this call.
+        """
+        repo_for_validation = self._extract_repository_for_validation(
+            action_call
+        )
+        return (
+            f"{action_call.organization}/{repo_for_validation}",
+            action_call.reference,
+        )
+
     def _combine_validation_results(
         self,
         unique_calls: dict[str, ActionCall],
         repo_results: dict[str, bool],
         ref_results: dict[tuple[str, str], bool],
         subpath_results: dict[tuple[str, str], bool] | None = None,
+        ref_findings: dict[tuple[str, str], ReferenceFinding] | None = None,
     ) -> dict[str, ValidationResult]:
         """
         Combine repository, reference and subpath validation results.
@@ -943,18 +1052,21 @@ class ActionCallValidator:
             subpath_results: Subdirectory-action subpath validation results,
                 keyed by ``(repo_key, ref)``. Entries are present only for
                 subdirectory actions; a missing entry is treated as valid.
+            ref_findings: Specific reference failures keyed by
+                ``(repo_key, ref)``. Consulted when a reference failed, so
+                a tag-object SHA is reported as ``ANNOTATED_TAG_SHA``
+                rather than as a generic ``INVALID_REFERENCE``.
 
         Returns:
             Dictionary mapping call keys to validation results
         """
         subpath_results = subpath_results or {}
+        findings = ref_findings or {}
         validation_results = {}
 
         for call_key, action_call in unique_calls.items():
-            repo_for_validation = self._extract_repository_for_validation(
-                action_call
-            )
-            repo_key = f"{action_call.organization}/{repo_for_validation}"
+            ref_key = self._ref_key(action_call)
+            repo_key = ref_key[0]
 
             if not repo_results.get(repo_key, False):
                 validation_results[call_key] = (
@@ -962,10 +1074,9 @@ class ActionCallValidator:
                 )
                 continue
 
-            ref_key = (repo_key, action_call.reference)
             if not ref_results.get(ref_key, False):
-                validation_results[call_key] = (
-                    ValidationResult.INVALID_REFERENCE
+                validation_results[call_key] = specific_ref_result(
+                    findings.get(ref_key)
                 )
                 continue
 
@@ -996,38 +1107,25 @@ class ActionCallValidator:
         self.api_stats.rate_limit_delays = client_stats.rate_limit_delays
         self.api_stats.failed_calls = client_stats.failed_calls
 
-    def _get_error_message(self, result: ValidationResult) -> str:
-        """
-        Get human-readable error message for validation result.
+    def _get_error_message(
+        self,
+        result: ValidationResult,
+        finding: ReferenceFinding | None = None,
+    ) -> str:
+        """Get human-readable error message for validation result.
+
+        Thin delegation to
+        :func:`gha_workflow_linter.validator_findings.get_error_message`,
+        kept as a method because callers already reach for it here.
 
         Args:
-            result: ValidationResult enum value
+            result: ValidationResult enum value.
+            finding: Optional context for a reference-level failure.
 
         Returns:
-            Error message string
+            Error message string.
         """
-        messages = {
-            ValidationResult.INVALID_REPOSITORY: "Repository not found",
-            ValidationResult.INVALID_REFERENCE: "Invalid branch, tag, or commit SHA",
-            ValidationResult.INVALID_PATH: "Subdirectory action path not found at reference",
-            ValidationResult.INVALID_SYNTAX: "Invalid action call syntax",
-            ValidationResult.NETWORK_ERROR: "Network error during validation",
-            ValidationResult.TIMEOUT: "Timeout during validation",
-            ValidationResult.NOT_PINNED_TO_SHA: "Action not pinned to commit SHA",
-            ValidationResult.TEST_REFERENCE: "Test action reference",
-            ValidationResult.ANNOTATED_TAG_SHA: (
-                "Reference is an annotated tag object SHA, not a commit; "
-                "GitHub Actions cannot check this out"
-            ),
-            ValidationResult.SHA_COMMENT_MISMATCH: (
-                "Pinned SHA does not match the version named in its comment"
-            ),
-            ValidationResult.OUTDATED_ACTION: (
-                "A newer release of this action is available"
-            ),
-        }
-
-        return messages.get(result, "Unknown validation error")
+        return get_error_message(result, finding)
 
     def get_validation_summary(
         self,
@@ -1060,8 +1158,6 @@ class ActionCallValidator:
             "test_references": 0,
             "not_pinned_to_sha": 0,
             "annotated_tag_shas": 0,
-            "sha_comment_mismatches": 0,
-            "outdated_actions": 0,
             # API call statistics
             "api_calls_total": self.api_stats.total_calls,
             "api_calls_graphql": self.api_stats.graphql_calls,
@@ -1093,10 +1189,6 @@ class ActionCallValidator:
                 summary["not_pinned_to_sha"] += 1
             elif error.result == ValidationResult.ANNOTATED_TAG_SHA:
                 summary["annotated_tag_shas"] += 1
-            elif error.result == ValidationResult.SHA_COMMENT_MISMATCH:
-                summary["sha_comment_mismatches"] += 1
-            elif error.result == ValidationResult.OUTDATED_ACTION:
-                summary["outdated_actions"] += 1
 
         return summary
 

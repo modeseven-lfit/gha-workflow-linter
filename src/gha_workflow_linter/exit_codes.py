@@ -40,6 +40,18 @@ SUCCESS: Final = 0
 DEFECTS_FOUND: Final = 1
 """Defect findings were reported, or a fixer modified files."""
 
+RUNTIME_ERROR: Final = DEFECTS_FOUND
+"""The run itself failed: bad configuration, aborted validation, or an
+unexpected exception.
+
+Shares the value of :data:`DEFECTS_FOUND` because the tool has always
+exited ``1`` for both conditions. Separating them would break callers
+that test for ``1``, so the split is deferred to a future major release.
+The distinct name exists so call sites state which condition they mean,
+and so the eventual split is a one-line change here rather than an audit
+of every ``raise``.
+"""
+
 CLI_USAGE_ERROR: Final = 2
 """Reserved by Click/Typer for command-line usage errors.
 
@@ -121,6 +133,7 @@ __all__ = [
     "ALLOW_LIST_UNRESOLVED",
     "CLI_USAGE_ERROR",
     "DEFECTS_FOUND",
+    "RUNTIME_ERROR",
     "SUCCESS",
     "combine",
     "describe",
