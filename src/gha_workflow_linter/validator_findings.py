@@ -30,9 +30,11 @@ from typing import TYPE_CHECKING, Any
 
 from .models import (
     ActionCall,
+    Category,
     ReferenceType,
     ValidationError,
     ValidationResult,
+    result_category,
 )
 from .paths import action_subpath, base_repository
 
@@ -153,16 +155,27 @@ def specific_ref_result(
 ) -> ValidationResult:
     """Narrow a reference failure to its most specific known result.
 
+    Infrastructure failures (a network error or timeout affecting one
+    repository, rather than aborting the whole run) are surfaced as
+    themselves. Collapsing them to ``INVALID_REFERENCE`` would tell the
+    reader their reference is wrong when the check merely could not run,
+    and would leave the summary's ``network_errors`` and ``timeouts``
+    counters permanently at zero. Caching already refuses these results
+    via ``result_category(...) is Category.INFRASTRUCTURE``, so a
+    transient failure is retried rather than persisted as a verdict.
+
     Args:
         finding: The recorded failure, if any.
 
     Returns:
-        The specific result when one was recorded, otherwise the
-        generic ``INVALID_REFERENCE``. Infrastructure failures also
-        fall back to the generic result, preserving how a transient
-        error has always been surfaced.
+        The specific result when one was recorded, otherwise the generic
+        ``INVALID_REFERENCE``.
     """
-    if finding is not None and finding.result in SPECIFIC_REF_RESULTS:
+    if finding is None:
+        return ValidationResult.INVALID_REFERENCE
+    if finding.result in SPECIFIC_REF_RESULTS:
+        return finding.result
+    if result_category(finding.result) is Category.INFRASTRUCTURE:
         return finding.result
     return ValidationResult.INVALID_REFERENCE
 

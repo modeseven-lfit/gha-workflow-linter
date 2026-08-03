@@ -40,7 +40,10 @@ from gha_workflow_linter.models import (
     ValidationResult,
 )
 from gha_workflow_linter.validator import ActionCallValidator
-from gha_workflow_linter.validator_findings import ReferenceFinding
+from gha_workflow_linter.validator_findings import (
+    ReferenceFinding,
+    specific_ref_result,
+)
 
 # Real output from ``git ls-remote`` against
 # git@github.com:lfreleng-actions/.github.git. v0.12.2 is an annotated tag,
@@ -450,3 +453,43 @@ async def test_cached_annotated_tag_sha_survives_a_cache_hit(
     assert len(errors) == 1
     assert errors[0].result is ValidationResult.ANNOTATED_TAG_SHA
     assert errors[0].error_message == fresh[0].error_message
+
+
+class TestInfrastructureResultsSurvive:
+    """Transient failures must not masquerade as invalid references.
+
+    ``specific_ref_result`` previously collapsed every non-specific
+    finding to ``INVALID_REFERENCE``, so a per-repository network error
+    or timeout told the reader their reference was wrong when the check
+    had simply not run, and left the summary's ``network_errors`` and
+    ``timeouts`` counters unreachable.
+    """
+
+    @pytest.mark.parametrize(
+        "result",
+        [ValidationResult.NETWORK_ERROR, ValidationResult.TIMEOUT],
+    )
+    def test_infrastructure_results_pass_through(
+        self, result: ValidationResult
+    ) -> None:
+        finding = ReferenceFinding(result=result)
+
+        assert specific_ref_result(finding) is result
+
+    def test_annotated_tag_still_specific(self) -> None:
+        finding = ReferenceFinding(result=ValidationResult.ANNOTATED_TAG_SHA)
+
+        assert (
+            specific_ref_result(finding) is ValidationResult.ANNOTATED_TAG_SHA
+        )
+
+    def test_missing_finding_is_generic(self) -> None:
+        assert specific_ref_result(None) is ValidationResult.INVALID_REFERENCE
+
+    def test_unrelated_result_stays_generic(self) -> None:
+        """A repository-level verdict must not leak into ref reporting."""
+        finding = ReferenceFinding(result=ValidationResult.INVALID_REPOSITORY)
+
+        assert (
+            specific_ref_result(finding) is ValidationResult.INVALID_REFERENCE
+        )
