@@ -141,7 +141,20 @@ line-ending = "auto"
 
 [tool.basedpyright]
 pythonVersion = "3.10"
-include = ["src"]
+# Every tracked Python location. This list governs editor/LSP checking
+# and bare `basedpyright` invocations; the pre-commit hook deliberately
+# carries no `files:` filter, so it checks every staged Python file
+# regardless of what appears here. Keep both in step: if a new
+# top-level Python directory appears, add it here too.
+include = ["src", "tests", "scripts", "examples"]
+# Build artefacts and caches are untracked, but exclude them explicitly
+# so a bare invocation never wanders into generated code.
+exclude = [
+    "**/__pycache__",
+    "**/.*",
+    "dist",
+    "htmlcov",
+]
 typeCheckingMode = "strict"
 reportMissingImports = "none"
 reportMissingTypeStubs = "none"

@@ -153,7 +153,7 @@ class TestSetupLogging:
             mock_root_logger = Mock()
             mock_root_logger.handlers = []
 
-            def mock_logger_factory(name=None):
+            def mock_logger_factory(name: str | None = None) -> Mock:
                 if name is None or name == "":
                     return mock_root_logger
                 return Mock()
@@ -172,7 +172,7 @@ class TestSetupLogging:
             mock_root_logger = Mock()
             mock_root_logger.handlers = []
 
-            def mock_logger_factory(name=None):
+            def mock_logger_factory(name: str | None = None) -> Mock:
                 if name is None or name == "":
                     return mock_root_logger
                 return Mock()
@@ -191,7 +191,7 @@ class TestSetupLogging:
             mock_root_logger = Mock()
             mock_root_logger.handlers = []
 
-            def mock_logger_factory(name=None):
+            def mock_logger_factory(name: str | None = None) -> Mock:
                 if name is None or name == "":
                     return mock_root_logger
                 return Mock()
@@ -211,7 +211,7 @@ class TestSetupLogging:
             mock_root_logger.handlers = []
             mock_httpx_logger = Mock()
 
-            def get_logger_side_effect(name=None):
+            def get_logger_side_effect(name: str | None = None) -> Mock:
                 if name is None or name == "":  # Root logger
                     return mock_root_logger
                 return mock_httpx_logger
@@ -547,7 +547,7 @@ class TestRunLinter:
         assert result == 0
 
     @patch("gha_workflow_linter.cli.WorkflowScanner")
-    def test_run_linter_scanner_error(self, mock_scanner_class) -> None:
+    def test_run_linter_scanner_error(self, mock_scanner_class: Mock) -> None:
         """Test linter when scanner throws error."""
         mock_scanner = Mock()
         mock_scanner_class.return_value = mock_scanner
@@ -561,7 +561,7 @@ class TestRunLinter:
     @patch("gha_workflow_linter.cli.WorkflowScanner")
     @patch("gha_workflow_linter.cli.Progress")
     def test_run_linter_no_workflows(
-        self, mock_progress, mock_scanner_class
+        self, mock_progress: Mock, mock_scanner_class: Mock
     ) -> None:
         """Test linter when no workflows are found."""
         mock_scanner = Mock()
@@ -581,7 +581,10 @@ class TestRunLinter:
     @patch("gha_workflow_linter.cli.ActionCallValidator")
     @patch("gha_workflow_linter.cli.Progress")
     def test_run_linter_validation_aborted_network_error(
-        self, mock_progress, mock_validator_class, mock_scanner_class
+        self,
+        mock_progress: Mock,
+        mock_validator_class: Mock,
+        mock_scanner_class: Mock,
     ) -> None:
         """Test linter when validation is aborted due to network error."""
         # Mock scanner
@@ -912,7 +915,7 @@ class TestCLIIntegration:
 
     @patch("gha_workflow_linter.cli.ConfigManager")
     def test_lint_command_verbose_quiet_conflict(
-        self, mock_config_manager
+        self, mock_config_manager: Mock
     ) -> None:
         """Test lint command with conflicting verbose and quiet flags."""
         mock_config_manager.return_value.load_config.return_value = Config()
@@ -956,7 +959,7 @@ class TestCLIIntegration:
     @patch("gha_workflow_linter.cli.ConfigManager")
     @patch("gha_workflow_linter.cli.ValidationCache")
     def test_cache_command_info(
-        self, mock_cache_class, mock_config_manager
+        self, mock_cache_class: Mock, mock_config_manager: Mock
     ) -> None:
         """Test cache info command."""
         mock_config_manager.return_value.load_config.return_value = Config()
@@ -987,7 +990,7 @@ class TestCLIIntegration:
     @patch("gha_workflow_linter.cli.ConfigManager")
     @patch("gha_workflow_linter.cli.ValidationCache")
     def test_cache_command_cleanup(
-        self, mock_cache_class, mock_config_manager
+        self, mock_cache_class: Mock, mock_config_manager: Mock
     ) -> None:
         """Test cache cleanup command."""
         mock_config_manager.return_value.load_config.return_value = Config()
@@ -1004,7 +1007,7 @@ class TestCLIIntegration:
     @patch("gha_workflow_linter.cli.ConfigManager")
     @patch("gha_workflow_linter.cli.ValidationCache")
     def test_cache_command_purge(
-        self, mock_cache_class, mock_config_manager
+        self, mock_cache_class: Mock, mock_config_manager: Mock
     ) -> None:
         """Test cache purge command."""
         mock_config_manager.return_value.load_config.return_value = Config()
@@ -1021,7 +1024,7 @@ class TestCLIIntegration:
     @patch("gha_workflow_linter.cli.ConfigManager")
     @patch("gha_workflow_linter.cli.ValidationCache")
     def test_cache_command_default(
-        self, mock_cache_class, mock_config_manager
+        self, mock_cache_class: Mock, mock_config_manager: Mock
     ) -> None:
         """Test cache command with no specific options (default behavior)."""
         mock_config_manager.return_value.load_config.return_value = Config()
@@ -1040,7 +1043,9 @@ class TestCLIIntegration:
         mock_cache.get_cache_info.assert_called_once()
 
     @patch("gha_workflow_linter.cli.ConfigManager")
-    def test_lint_command_config_file_error(self, mock_config_manager) -> None:
+    def test_lint_command_config_file_error(
+        self, mock_config_manager: Mock
+    ) -> None:
         """Test lint command with config file that causes an error."""
         mock_config_manager.return_value.load_config.side_effect = Exception(
             "Invalid config"

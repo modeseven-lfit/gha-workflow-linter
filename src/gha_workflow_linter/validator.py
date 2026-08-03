@@ -1015,6 +1015,16 @@ class ActionCallValidator:
             ValidationResult.TIMEOUT: "Timeout during validation",
             ValidationResult.NOT_PINNED_TO_SHA: "Action not pinned to commit SHA",
             ValidationResult.TEST_REFERENCE: "Test action reference",
+            ValidationResult.ANNOTATED_TAG_SHA: (
+                "Reference is an annotated tag object SHA, not a commit; "
+                "GitHub Actions cannot check this out"
+            ),
+            ValidationResult.SHA_COMMENT_MISMATCH: (
+                "Pinned SHA does not match the version named in its comment"
+            ),
+            ValidationResult.OUTDATED_ACTION: (
+                "A newer release of this action is available"
+            ),
         }
 
         return messages.get(result, "Unknown validation error")
@@ -1049,6 +1059,9 @@ class ActionCallValidator:
             "timeouts": 0,
             "test_references": 0,
             "not_pinned_to_sha": 0,
+            "annotated_tag_shas": 0,
+            "sha_comment_mismatches": 0,
+            "outdated_actions": 0,
             # API call statistics
             "api_calls_total": self.api_stats.total_calls,
             "api_calls_graphql": self.api_stats.graphql_calls,
@@ -1078,6 +1091,12 @@ class ActionCallValidator:
                 summary["timeouts"] += 1
             elif error.result == ValidationResult.NOT_PINNED_TO_SHA:
                 summary["not_pinned_to_sha"] += 1
+            elif error.result == ValidationResult.ANNOTATED_TAG_SHA:
+                summary["annotated_tag_shas"] += 1
+            elif error.result == ValidationResult.SHA_COMMENT_MISMATCH:
+                summary["sha_comment_mismatches"] += 1
+            elif error.result == ValidationResult.OUTDATED_ACTION:
+                summary["outdated_actions"] += 1
 
         return summary
 

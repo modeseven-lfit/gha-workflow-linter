@@ -16,6 +16,9 @@ from typing import TYPE_CHECKING
 from .exceptions import (
     GitError,
 )
+from .git_refs import (
+    get_remote_ref_shas,
+)
 from .models import APICallStats, GitConfig, ReferenceType, ValidationResult
 from .paths import action_subpath, action_subpath_candidates
 from .paths import base_repository as _shared_base_repository
@@ -510,6 +513,12 @@ def _validate_commit_shas_git(
     """
     Validate commit SHAs by checking if they exist in remote refs.
 
+    A SHA that names an annotated *tag object* rather than a commit is
+    reported as ``ANNOTATED_TAG_SHA``: ``git ls-remote`` advertises it, but
+    GitHub Actions cannot check it out, so treating it as valid is a false
+    pass. Use :func:`_get_annotated_tag_peels` to recover the commit SHA to
+    recommend in its place.
+
     Args:
         url: Git repository URL
         commit_shas: List of commit SHAs to validate
@@ -521,11 +530,14 @@ def _validate_commit_shas_git(
     results = {}
 
     try:
-        # Get all remote refs (heads and tags) to find commit SHAs
-        remote_refs = _get_all_remote_refs(url, config)
+        # Get all remote refs (heads and tags), keeping annotated tag
+        # objects distinguishable from the commits they peel to.
+        remote_refs = get_remote_ref_shas(url, config)
 
         for sha in commit_shas:
-            if sha in remote_refs:
+            if sha in remote_refs.tag_objects:
+                results[sha] = ValidationResult.ANNOTATED_TAG_SHA
+            elif sha in remote_refs.commit_shas:
                 results[sha] = ValidationResult.VALID
             else:
                 results[sha] = ValidationResult.INVALID_REFERENCE
@@ -726,52 +738,6 @@ def _commit_exists_in_repo(
 
     except Exception:
         return False
-
-
-def _get_all_remote_refs(url: str, config: GitConfig) -> set[str]:
-    """
-    Get all commit SHAs from remote refs (heads and tags).
-
-    Args:
-        url: Git repository URL
-        config: Git configuration
-
-    Returns:
-        Set of commit SHAs
-
-    Raises:
-        GitError: If operation fails
-    """
-    import subprocess
-
-    cmd = ["git", "ls-remote", "--heads", "--tags", url]
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=config.timeout_seconds,
-            check=True,
-        )
-
-        shas = set()
-        for line in result.stdout.strip().split("\n"):
-            if line:
-                # Format: "commit_sha\tref_name"
-                parts = line.split("\t")
-                if len(parts) == 2:
-                    commit_sha = parts[0]
-                    shas.add(commit_sha)
-
-        return shas
-
-    except subprocess.TimeoutExpired:
-        raise GitError(f"Git ls-remote timed out for {url}") from None
-    except subprocess.CalledProcessError as e:
-        raise GitError(f"Git ls-remote failed for {url}: {e.stderr}") from e
-    except Exception as e:
-        raise GitError(f"Git ls-remote failed for {url}: {e}") from e
 
 
 def _get_remote_branches(url: str, config: GitConfig) -> set[str]:

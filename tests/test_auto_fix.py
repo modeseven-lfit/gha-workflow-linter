@@ -15,7 +15,10 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from pathlib import Path
+
+    from rich.progress import Progress, TaskID
 
 import pytest
 from typer.testing import CliRunner
@@ -546,7 +549,11 @@ jobs:
             mock_validator_class.return_value = mock_validator
 
             # Configure mock to return validation errors for all non-SHA references
-            def mock_validate_calls(calls, _progress=None, _task=None):
+            def mock_validate_calls(
+                calls: Iterable[ActionCall],
+                _progress: Progress | None = None,
+                _task: TaskID | None = None,
+            ) -> list[ValidationError]:
                 errors = []
                 for call in calls:
                     if call.reference in [
@@ -673,7 +680,11 @@ validation_method: git
             mock_validator_class.return_value = mock_validator
 
             # When require_pinned_sha=False, only invalid references are errors
-            def mock_validate_calls(calls, _progress=None, _task=None):
+            def mock_validate_calls(
+                calls: Iterable[ActionCall],
+                _progress: Progress | None = None,
+                _task: TaskID | None = None,
+            ) -> list[ValidationError]:
                 errors = []
                 for call in calls:
                     if (
@@ -781,7 +792,11 @@ validation_method: git
             mock_validator_class.return_value = mock_validator
 
             # All non-SHA references should be errors when require_pinned_sha=True
-            def mock_validate_calls(calls, _progress=None, _task=None):
+            def mock_validate_calls(
+                calls: Iterable[ActionCall],
+                _progress: Progress | None = None,
+                _task: TaskID | None = None,
+            ) -> list[ValidationError]:
                 errors = []
                 for call in calls:
                     if call.reference in [
@@ -1268,7 +1283,11 @@ jobs:
             mock_validator_class.return_value = mock_validator
 
             # Only action calls should be validated for SHA pinning
-            def mock_validate_calls(calls, _progress=None, _task=None):
+            def mock_validate_calls(
+                calls: Iterable[ActionCall],
+                _progress: Progress | None = None,
+                _task: TaskID | None = None,
+            ) -> list[ValidationError]:
                 errors = []
                 for call in calls:
                     if (
@@ -1350,7 +1369,11 @@ jobs:
             mock_validator_class.return_value = mock_validator
 
             # All should be validation errors (not pinned to SHA)
-            def mock_validate_calls(calls, _progress=None, _task=None):
+            def mock_validate_calls(
+                calls: Iterable[ActionCall],
+                _progress: Progress | None = None,
+                _task: TaskID | None = None,
+            ) -> list[ValidationError]:
                 return [
                     ValidationError(
                         file_path=workflow_file,
@@ -1565,7 +1588,11 @@ jobs:
             mock_validator_class.return_value = mock_validator
 
             # Return errors for all workflows
-            def mock_validate_calls(calls, _progress=None, _task=None):
+            def mock_validate_calls(
+                calls: Iterable[ActionCall],
+                _progress: Progress | None = None,
+                _task: TaskID | None = None,
+            ) -> list[ValidationError]:
                 return [
                     ValidationError(
                         file_path=workflow_dir / "test.yaml",

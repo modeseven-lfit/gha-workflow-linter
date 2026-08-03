@@ -33,6 +33,7 @@ from rich.progress import (
 from rich.table import Table
 import typer
 
+from . import exit_codes
 from ._version import __version__
 from .auto_fix import AutoFixer
 from .cache import CachePrimeReport, ValidationCache
@@ -649,6 +650,15 @@ def lint(
         "--files",
         help="Specific files to scan (supports wildcards, can be specified multiple times)",
     ),
+    verify_actions: bool = typer.Option(
+        False,
+        "--verify-actions",
+        help=(
+            "Treat outdated action calls as errors and exit with status 5. "
+            "Without this flag outdated actions are reported but do not "
+            "fail the run"
+        ),
+    ),
     _help: bool = typer.Option(
         False,
         "--help",
@@ -789,6 +799,7 @@ def lint(
             fix_test_calls=fix_test_calls,
             cooldown=cooldown,
             files=files,
+            verify_actions=verify_actions,
         )
 
         # Apply CLI overrides to config
@@ -1270,9 +1281,25 @@ def _determine_exit_code(
     validation: _ValidationOutcome,
     autofix: _AutoFixOutcome,
 ) -> int:
-    """Compute the process exit code from fixes and validation errors."""
-    # If we auto-fixed files (not just skipped testing items), always exit
-    # with an error to indicate changes were made.
+    """Compute the process exit code from fixes and validation errors.
+
+    This is the single decision point for the process exit status. It is
+    deliberately independent of reporting: presentation flags such as
+    ``--quiet`` and ``--format json`` must never change the code a given
+    repository state produces.
+
+    Args:
+        options: Resolved CLI options.
+        validation: Outcome of the scan/validate stage.
+        autofix: Outcome of the auto-fix stage.
+
+    Returns:
+        A code from :mod:`gha_workflow_linter.exit_codes`.
+    """
+    codes: list[int] = []
+
+    # Files modified on disk are reported as a failure so a CI job or a
+    # pre-commit hook notices that the tree changed underneath it.
     if autofix.fixed_files:
         has_actual_fixes = any(
             change.get("skipped") != "true"
@@ -1280,10 +1307,10 @@ def _determine_exit_code(
             for change in changes
         )
         if has_actual_fixes:
-            return 1
+            codes.append(exit_codes.DEFECTS_FOUND)
 
-    # Otherwise, exit with error only if there are validation errors
-    # (excluding test references) and fail_on_error is enabled.
+    # Validation errors (excluding test references, which are advisory by
+    # convention) count when the caller has not disabled failure.
     if options.fail_on_error:
         actual_errors = [
             e
@@ -1291,9 +1318,29 @@ def _determine_exit_code(
             if not has_test_comment(e.action_call)
         ]
         if actual_errors:
-            return 1
+            codes.append(exit_codes.DEFECTS_FOUND)
 
-    return 0
+    # Outdated action calls are a CURRENCY finding: advisory unless the
+    # caller opted in with --verify-actions.
+    if options.verify_actions and _has_outdated_actions(autofix):
+        codes.append(exit_codes.ACTIONS_OUTDATED)
+
+    return exit_codes.combine(*codes) if codes else exit_codes.SUCCESS
+
+
+def _has_outdated_actions(autofix: _AutoFixOutcome) -> bool:
+    """Report whether any action call has a newer release available.
+
+    Args:
+        autofix: Outcome of the auto-fix stage.
+
+    Returns:
+        True when at least one outdated (but otherwise valid) action call
+        was detected.
+    """
+    return any(
+        items for items in autofix.stale_actions_summary.values() if items
+    )
 
 
 def run_linter(config: Config, options: CLIOptions) -> int:
@@ -1305,7 +1352,7 @@ def run_linter(config: Config, options: CLIOptions) -> int:
         options: CLI options
 
     Returns:
-        Exit code (0 for success, 1 for failure)
+        Exit code from :mod:`gha_workflow_linter.exit_codes`.
     """
     scanner = WorkflowScanner(config)
 
@@ -1329,9 +1376,11 @@ def run_linter(config: Config, options: CLIOptions) -> int:
 
     _emit_results(options, scanner, validation, autofix)
 
-    # When auto_fix is enabled but auto_latest is not, display outdated
-    # actions report (validation errors were fixed, but version updates are
-    # only reported).
+    # Report outdated actions when auto-fix repaired validation errors but
+    # version bumps were only detected, not applied. This is presentation
+    # only: it must not short-circuit exit-code determination, or a real
+    # defect elsewhere in the run would be masked (and the exit code would
+    # depend on --quiet, which also gates this block).
     if (
         autofix.stale_actions_summary
         and not config.auto_latest
@@ -1340,7 +1389,6 @@ def run_linter(config: Config, options: CLIOptions) -> int:
         _display_stale_actions_from_summary(
             autofix.stale_actions_summary, options
         )
-        return 0
 
     return _determine_exit_code(options, validation, autofix)
 
