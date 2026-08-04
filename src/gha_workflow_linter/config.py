@@ -8,12 +8,158 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
+import textwrap
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 import yaml
 
 from .models import Config
+
+#: Header prepended to generated configuration files. Everything below
+#: the header comes from the configuration model, so the template cannot
+#: drift as fields are added.
+_CONFIG_HEADER = """\
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# gha-workflow-linter configuration file
+#
+# Generated from the configuration model: every setting the tool
+# understands appears below, commented with its purpose and set to its
+# default value. Delete an entry to keep the built-in default.
+#
+# Full documentation:
+# https://github.com/lfit/gha-workflow-linter#configuration
+---
+"""
+
+#: Width used for wrapped comment text and emitted YAML scalars. One
+#: below the yamllint default line-length limit of 80.
+_LINE_WIDTH = 79
+
+#: Dotted paths of fields that must never carry a value in a generated
+#: template, however the running configuration was populated.
+_REDACTED_PATHS = frozenset({"github_api.token"})
+
+#: Explanation emitted alongside every redacted field.
+_REDACTED_NOTES = {
+    "github_api.token": (
+        "Deliberately left empty: the token normally comes from the "
+        "GITHUB_TOKEN environment variable or the GitHub CLI, and a token "
+        "held in memory is never written to this file."
+    )
+}
+
+
+class _BlockDumper(yaml.SafeDumper):
+    """YAML dumper that indents sequences beneath their parent key.
+
+    PyYAML emits block sequences at the same indentation as the mapping
+    key that owns them, which yamllint rejects under its default
+    ``indent-sequences: true`` setting.
+    """
+
+    def increase_indent(
+        self, flow: bool = False, indentless: bool = False
+    ) -> None:
+        """Increase emitter indentation, never indentless.
+
+        Args:
+            flow: Whether the collection is being emitted in flow style.
+            indentless: Ignored; sequences are always indented.
+
+        Returns:
+            None.
+        """
+        del indentless
+        super().increase_indent(flow, False)
+
+
+def _comment_lines(text: str, indent: int) -> list[str]:
+    """Render descriptive text as wrapped, indented YAML comments.
+
+    Args:
+        text: Description text to render.
+        indent: Number of leading spaces for the comment block.
+
+    Returns:
+        Comment lines, each already indented and prefixed with ``# ``.
+    """
+    prefix = f"{' ' * indent}# "
+    return textwrap.wrap(
+        " ".join(text.split()),
+        width=_LINE_WIDTH,
+        initial_indent=prefix,
+        subsequent_indent=prefix,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+
+
+def _value_lines(name: str, value: Any, indent: int) -> list[str]:
+    """Render a single ``key: value`` entry as indented YAML lines.
+
+    Args:
+        name: Field name to emit as the mapping key.
+        value: JSON-compatible value produced by ``model_dump``.
+        indent: Number of leading spaces for the entry.
+
+    Returns:
+        Indented YAML lines for the entry, without a trailing newline.
+    """
+    dumped = yaml.dump(
+        {name: value},
+        Dumper=_BlockDumper,
+        sort_keys=False,
+        default_flow_style=False,
+        allow_unicode=True,
+        width=_LINE_WIDTH,
+    )
+    pad = " " * indent
+    return [f"{pad}{line}" if line else "" for line in dumped.splitlines()]
+
+
+def _model_lines(
+    model: BaseModel, indent: int = 0, path: str = ""
+) -> list[str]:
+    """Render a pydantic model as commented YAML in declaration order.
+
+    Each field is preceded by its ``Field(description=...)`` text, so the
+    generated file documents itself straight from the model.
+
+    Args:
+        model: Model instance to render.
+        indent: Number of leading spaces for this block.
+        path: Dotted path of the parent block, empty at the top level.
+
+    Returns:
+        YAML lines for the model, without trailing newlines.
+    """
+    lines: list[str] = []
+
+    dumped = model.model_dump(mode="json")
+    for name, field in type(model).model_fields.items():
+        field_path = f"{path}.{name}" if path else name
+        value = getattr(model, name)
+
+        if lines:
+            lines.append("")
+        if field.description:
+            lines.extend(_comment_lines(field.description, indent))
+
+        if isinstance(value, BaseModel):
+            lines.append(f"{' ' * indent}{name}:")
+            lines.extend(_model_lines(value, indent + 2, field_path))
+        elif field_path in _REDACTED_PATHS:
+            note = _REDACTED_NOTES.get(field_path)
+            if note:
+                lines.extend(_comment_lines(note, indent))
+            lines.append(f"{' ' * indent}{name}:")
+        else:
+            lines.extend(_value_lines(name, dumped[name], indent))
+
+    return lines
 
 
 class ConfigManager:
@@ -50,6 +196,17 @@ class ConfigManager:
             self.logger.debug("No config file found, using defaults")
 
         # Create Config object (will load from environment variables)
+        if "auto_latest" in config_data:
+            self.logger.warning(
+                "Configuration key 'auto_latest' is deprecated; rename it "
+                "to 'update_actions'. The old name still loads and will be "
+                "removed in a future major release"
+            )
+            if "update_actions" in config_data:
+                # Both present: the canonical key wins, matching how the
+                # CLI resolves --update-actions against --auto-latest.
+                del config_data["auto_latest"]
+
         try:
             config = Config(**config_data)
             self.logger.debug("Configuration loaded successfully")
@@ -138,11 +295,19 @@ class ConfigManager:
         """
         Save default configuration to file.
 
+        The template is generated from :class:`~.models.Config` rather
+        than hand-written, so every field the model gains appears here
+        automatically. The generated file round-trips: loading it back
+        yields a ``Config`` equal to the defaults.
+
         Args:
             output_path: Optional path to save config file
 
         Returns:
             Path where config was saved
+
+        Raises:
+            ValueError: If the file cannot be written
         """
         if output_path is None:
             config_dir = self._get_config_directory()
@@ -152,118 +317,9 @@ class ConfigManager:
                 config_dir.mkdir(parents=True, exist_ok=True)
                 output_path = config_dir / "config.yaml"
 
-        default_config = Config()
-
-        # Convert to dictionary for YAML serialization
-        config_dict: dict[str, object] = {
-            "log_level": default_config.log_level.value,
-            "parallel_workers": default_config.parallel_workers,
-            "scan_extensions": default_config.scan_extensions,
-            "exclude_patterns": default_config.exclude_patterns,
-            "require_pinned_sha": default_config.require_pinned_sha,
-            "auto_fix": default_config.auto_fix,
-            "auto_latest": default_config.auto_latest,
-            "two_space_comments": default_config.two_space_comments,
-            "skip_actions": default_config.skip_actions,
-            "network": {
-                "timeout_seconds": default_config.network.timeout_seconds,
-                "max_retries": default_config.network.max_retries,
-                "retry_delay_seconds": default_config.network.retry_delay_seconds,
-                "rate_limit_delay_seconds": default_config.network.rate_limit_delay_seconds,
-            },
-            "github_api": {
-                "base_url": default_config.github_api.base_url,
-                "graphql_url": default_config.github_api.graphql_url,
-                "max_repositories_per_query": default_config.github_api.max_repositories_per_query,
-                "max_references_per_query": default_config.github_api.max_references_per_query,
-                "rate_limit_threshold": default_config.github_api.rate_limit_threshold,
-                "rate_limit_reset_buffer": default_config.github_api.rate_limit_reset_buffer,
-            },
-        }
-
-        # Add comments for clarity
-        yaml_content = f"""# gha-workflow-linter configuration file
-# SPDX-License-Identifier: Apache-2.0
-
-# Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-log_level: {config_dict["log_level"]}
-
-# Number of parallel workers for validation (1-32)
-parallel_workers: {config_dict["parallel_workers"]}
-
-# File extensions to scan for workflows
-scan_extensions:
-{chr(10).join(f'  - "{ext}"' for ext in (config_dict["scan_extensions"] if isinstance(config_dict["scan_extensions"], list) else []))}
-
-# Patterns to exclude from scanning (can be empty)
-exclude_patterns: []
-
-# Require action calls to be pinned to commit SHAs
-require_pinned_sha: {config_dict["require_pinned_sha"]}
-
-# Auto-fix broken/invalid references
-auto_fix: {config_dict["auto_fix"]}
-
-# Use latest versions when auto-fixing
-auto_latest: {config_dict["auto_latest"]}
-
-# Use two spaces before inline comments when fixing
-two_space_comments: {config_dict["two_space_comments"]}
-
-# Skip scanning action.yaml/action.yml files
-skip_actions: {config_dict["skip_actions"]}
-
-# Harden-runner allow-list pin checking. These pins are an
-# lfreleng-actions convention rather than GitHub-native syntax, so the
-# check is advisory by default: it reports stale pins but never changes
-# the exit code. Set verify to true to enforce (exit status 3, or 4 when
-# the latest release cannot be resolved).
-allow_list:
-  enabled: true
-  verify: false
-  show_suppressed: false
-  # Organisation used to resolve the '@<sha>' shorthand. When empty the
-  # tool infers it from GITHUB_REPOSITORY_OWNER, then the 'upstream' git
-  # remote, then 'origin'. Forks should set this explicitly.
-  org: ""
-
-# Network configuration
-network:
-  # Timeout for network requests (seconds)
-  timeout_seconds: {config_dict["network"]["timeout_seconds"] if isinstance(config_dict["network"], dict) else 30}
-
-  # Maximum retry attempts for failed requests
-  max_retries: {config_dict["network"]["max_retries"] if isinstance(config_dict["network"], dict) else 3}
-
-  # Delay between retry attempts (seconds)
-  retry_delay_seconds: {config_dict["network"]["retry_delay_seconds"] if isinstance(config_dict["network"], dict) else 1.0}
-
-  # Delay between requests for rate limiting (seconds)
-  rate_limit_delay_seconds: {config_dict["network"]["rate_limit_delay_seconds"] if isinstance(config_dict["network"], dict) else 0.1}
-
-# GitHub API configuration
-github_api:
-  # GitHub API base URL
-  base_url: {config_dict["github_api"]["base_url"] if isinstance(config_dict["github_api"], dict) else "https://api.github.com"}
-
-  # GitHub GraphQL API URL
-  graphql_url: {config_dict["github_api"]["graphql_url"] if isinstance(config_dict["github_api"], dict) else "https://api.github.com/graphql"}
-
-  # Maximum repositories per GraphQL query
-  max_repositories_per_query: {config_dict["github_api"]["max_repositories_per_query"] if isinstance(config_dict["github_api"], dict) else 100}
-
-  # Maximum references per GraphQL query
-  max_references_per_query: {config_dict["github_api"]["max_references_per_query"] if isinstance(config_dict["github_api"], dict) else 100}
-
-  # Rate limit threshold for delays
-  rate_limit_threshold: {config_dict["github_api"]["rate_limit_threshold"] if isinstance(config_dict["github_api"], dict) else 1000}
-
-  # Buffer seconds before rate limit reset
-  rate_limit_reset_buffer: {config_dict["github_api"]["rate_limit_reset_buffer"] if isinstance(config_dict["github_api"], dict) else 60}
-
-  # GitHub API token (can also be set via GITHUB_TOKEN environment variable)
-  # token: your_github_token_here
-"""
+        lines = [_CONFIG_HEADER.rstrip("\n"), ""]
+        lines.extend(_model_lines(Config()))
+        yaml_content = "\n".join(lines) + "\n"
 
         try:
             with open(output_path, "w", encoding="utf-8") as f:

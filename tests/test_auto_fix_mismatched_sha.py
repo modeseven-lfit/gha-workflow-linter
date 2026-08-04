@@ -38,7 +38,7 @@ class TestMismatchedShaFix:
             parallel_workers=2,
             require_pinned_sha=True,
             auto_fix=True,
-            auto_latest=False,  # Should not upgrade to latest
+            update_actions=False,  # Should not upgrade to latest
             two_space_comments=True,
             skip_actions=False,
             fix_test_calls=False,
@@ -236,7 +236,7 @@ jobs:
         self, config: Config, tmp_path: Path
     ) -> None:
         """Test that mismatched SHA respects comment version even when check_for_updates=True."""
-        config.auto_latest = True
+        config.update_actions = True
 
         # Create a workflow file with a valid but mismatched SHA
         workflow_content = """
@@ -327,7 +327,7 @@ jobs:
         self, config: Config, tmp_path: Path
     ) -> None:
         """Test that INVALID_REFERENCE with comment uses comment version even with check_for_updates."""
-        config.auto_latest = True
+        config.update_actions = True
 
         workflow_content = """
 name: Test
@@ -425,7 +425,7 @@ class TestInvalidReferenceWithCommentVersion:
             parallel_workers=2,
             require_pinned_sha=True,
             auto_fix=True,
-            auto_latest=False,
+            update_actions=False,
             two_space_comments=True,
             skip_actions=False,
             fix_test_calls=False,

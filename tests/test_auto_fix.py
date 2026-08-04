@@ -269,7 +269,7 @@ class TestAutoFixBehaviorWithPinnedSHA:
             parallel_workers=2,
             require_pinned_sha=True,
             auto_fix=True,
-            auto_latest=True,
+            update_actions=True,
             two_space_comments=False,
             skip_actions=False,
             fix_test_calls=False,
@@ -291,7 +291,7 @@ class TestAutoFixBehaviorWithPinnedSHA:
             parallel_workers=2,
             require_pinned_sha=False,
             auto_fix=True,
-            auto_latest=False,
+            update_actions=False,
             two_space_comments=False,
             skip_actions=False,
             fix_test_calls=False,
@@ -803,7 +803,7 @@ jobs:
                     "lint",
                     str(temp_dir),
                     "--auto-fix",
-                    "--auto-latest",
+                    "--update-actions",
                     "--no-fail-on-error",
                     "--validation-method",
                     "git",
@@ -848,7 +848,7 @@ jobs:
         config_content = """
 require_pinned_sha: false
 auto_fix: true
-auto_latest: true
+update_actions: true
 validation_method: git
 """
         config_file = temp_dir / "gha-workflow-linter.yaml"
@@ -1082,7 +1082,7 @@ validation_method: git
                 str(temp_dir),
                 "--config",
                 str(config_file),
-                "--auto-latest",
+                "--update-actions",
             ],
         )
 
@@ -1153,7 +1153,7 @@ validation_method: git
         assert "Auto-fixed" not in result.stdout
 
     def test_auto_latest_disabled(self, temp_dir: Path) -> None:
-        """Test auto-fix with auto_latest=False uses existing versions not latest."""
+        """Test auto-fix with update_actions=False uses existing versions not latest."""
         workflow_file = temp_dir / ".github" / "workflows" / "test.yaml"
         workflow_file.parent.mkdir(parents=True)
         workflow_file.write_text("""name: Test
@@ -1168,7 +1168,7 @@ jobs:
         config_content = """
 require_pinned_sha: true
 auto_fix: true
-auto_latest: false  # Don't use latest versions
+update_actions: false  # Don't use latest versions
 validation_method: git
 """
         config_file = temp_dir / "gha-workflow-linter.yaml"
@@ -1182,14 +1182,14 @@ validation_method: git
                 "lint",
                 str(temp_dir),
                 "--auto-fix",
-                "--no-auto-latest",
+                "--no-update-actions",
                 "--format",
                 "json",
             ],
         )
 
         # Should auto-fix without upgrading to latest version
-        # When auto_latest=False, it should pin to the SHA of v4, not upgrade to v5
+        # When update_actions=False, it should pin to the SHA of v4, not upgrade to v5
         output_data = parse_json_output(result.stdout)
 
         # If there were errors, file should be modified to pin to SHA
@@ -1271,7 +1271,7 @@ jobs:
                 "lint",
                 str(temp_dir),
                 "--auto-fix",
-                "--no-auto-latest",
+                "--no-update-actions",
                 "--validation-method",
                 "git",
                 "--format",
@@ -1361,7 +1361,7 @@ jobs:
         # Test that CLI flags are accepted (actual behavior is tested elsewhere)
         test_cases = [
             (["--no-auto-fix"], "Auto-fix disabled via CLI"),
-            (["--no-auto-latest"], "Auto-latest disabled via CLI"),
+            (["--no-update-actions"], "Auto-latest disabled via CLI"),
         ]
 
         for flags, description in test_cases:
@@ -1674,7 +1674,7 @@ jobs:
                 "lint",
                 str(temp_dir),
                 "--auto-fix",
-                "--auto-latest",
+                "--update-actions",
             ],
         )
 
@@ -1801,7 +1801,7 @@ jobs:
                     "lint",
                     str(temp_dir),
                     "--auto-fix",
-                    "--auto-latest",
+                    "--update-actions",
                     "--validation-method",
                     "git",
                 ],
@@ -1839,7 +1839,7 @@ class TestYAMLStructurePreservation:
             parallel_workers=2,
             require_pinned_sha=True,
             auto_fix=True,
-            auto_latest=True,
+            update_actions=True,
             two_space_comments=True,
             skip_actions=False,
             fix_test_calls=False,

@@ -9,7 +9,13 @@ from enum import Enum
 from pathlib import Path
 import re
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+)
 
 from .system_utils import get_default_workers
 
@@ -561,7 +567,9 @@ class AllowListConfig(BaseModel):
 class Config(BaseModel):
     """Main configuration model."""
 
-    model_config = ConfigDict()
+    # populate_by_name lets update_actions be set by its own name as well
+    # as through the deprecated auto_latest alias.
+    model_config = ConfigDict(populate_by_name=True)
 
     log_level: LogLevel = Field(
         default=LogLevel.INFO, description="Logging level"
@@ -587,8 +595,13 @@ class Config(BaseModel):
     auto_fix: bool = Field(
         default=True, description="Automatically fix broken/invalid references"
     )
-    auto_latest: bool = Field(
-        default=False, description="Use latest versions when auto-fixing"
+    update_actions: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("update_actions", "auto_latest"),
+        description=(
+            "Update action calls to the latest release when auto-fixing. "
+            "The former name 'auto_latest' still loads and is deprecated"
+        ),
     )
     allow_prerelease: bool = Field(
         default=False,
@@ -689,8 +702,9 @@ class CLIOptions(BaseModel):
     auto_fix: bool | None = Field(
         default=None, description="Automatically fix broken/invalid references"
     )
-    auto_latest: bool | None = Field(
-        default=None, description="Use latest versions when auto-fixing"
+    update_actions: bool | None = Field(
+        default=None,
+        description="Update action calls to the latest release",
     )
     allow_prerelease: bool | None = Field(
         default=None,
