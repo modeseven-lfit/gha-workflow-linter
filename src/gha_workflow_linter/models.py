@@ -504,10 +504,6 @@ class AllowListConfig(BaseModel):
             "ALLOW_LIST_STALE status"
         ),
     )
-    update: bool = Field(
-        default=False,
-        description="Rewrite stale allow-list pins in place",
-    )
     show_suppressed: bool = Field(
         default=False,
         description=(
@@ -726,10 +722,6 @@ class CLIOptions(BaseModel):
     verify_allow_list: bool = Field(
         default=False,
         description="Treat stale allow-list pins as errors",
-    )
-    update_allow_list: bool = Field(
-        default=False,
-        description="Rewrite stale allow-list pins in place",
     )
     show_suppressed: bool = Field(
         default=False,

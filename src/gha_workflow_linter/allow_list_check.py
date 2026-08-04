@@ -100,6 +100,8 @@ if TYPE_CHECKING:
 __all__ = [
     "ORG_ENV_VAR",
     "REMOTE_PRECEDENCE",
+    "UNKNOWN_ORG_HOST",
+    "UNKNOWN_ORG_REASON",
     "UNRESOLVED_REASON",
     "AllowListChecker",
     "AllowListFinding",
@@ -134,6 +136,16 @@ _GIT_URL_SUFFIX = ".git"
 #: be resolved. The resolver is fail-soft and reports ``None`` without
 #: distinguishing the cause, so the reason enumerates the possibilities
 #: rather than claiming one of them.
+#: Sentinel host key recorded when the workflow organisation itself
+#: could not be determined, so no pin could be resolved. Distinct from
+#: a named host that failed to resolve.
+UNKNOWN_ORG_HOST = "<workflow organisation>"
+
+UNKNOWN_ORG_REASON = (
+    "workflow organisation could not be determined; pass "
+    "--allow-list-org to set it explicitly"
+)
+
 UNRESOLVED_REASON = (
     "the latest release could not be resolved (no token, no network, "
     "no releases, or an active cooldown excluded every candidate)"
@@ -632,10 +644,29 @@ class AllowListChecker:
             self.logger.debug("Allow-list check disabled by configuration")
             return _empty_outcome()
 
-        pins = self._scan(paths, root)
+        org = resolve_workflow_org(root, configured=settings.org)
+        pins = self._scan(paths, root, org)
         if not pins:
-            self.logger.debug("No allow-list pins found")
-            return _empty_outcome()
+            if org:
+                self.logger.debug("No allow-list pins found")
+                return _empty_outcome()
+            # An unknown workflow org makes every candidate in-repo path
+            # unresolvable, so the scanner finds nothing at all. Reporting
+            # that as "clean" would let --verify-allow-list pass without
+            # having checked anything, which is the failure mode the
+            # verify flag exists to prevent.
+            self.logger.warning(
+                "Workflow organisation could not be determined; no "
+                "allow-list pins could be resolved. Pass --allow-list-org "
+                "to set it explicitly"
+            )
+            return AllowListOutcome(
+                findings=[],
+                hosts={},
+                unresolved={UNKNOWN_ORG_HOST: UNKNOWN_ORG_REASON},
+                suppressed_count=0,
+                checked=True,
+            )
 
         # Distinct host repositories only: twenty pins naming the same
         # '.github' repository must cost exactly one lookup, and the
@@ -664,18 +695,20 @@ class AllowListChecker:
             checked=True,
         )
 
-    def _scan(self, paths: Iterable[Path], root: Path) -> list[AllowListPin]:
+    def _scan(
+        self, paths: Iterable[Path], root: Path, org: str
+    ) -> list[AllowListPin]:
         """Detect every allow-list pin in the given files.
 
         Args:
             paths: Files to scan.
             root: Repository root, for workflow-org inference.
+            org: Resolved workflow organisation, possibly empty.
 
         Returns:
             The pins found, flattened into scan order.
         """
         settings = self.config.allow_list
-        org = resolve_workflow_org(root, configured=settings.org)
         if not org:
             self.logger.debug(
                 "Workflow org could not be determined; shorthand "

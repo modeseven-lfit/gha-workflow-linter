@@ -14,11 +14,13 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from unittest import mock
 
 import pytest
 
 from gha_workflow_linter import exit_codes
 from gha_workflow_linter.allow_list_scanner import CommentPosition, QuoteStyle
+from gha_workflow_linter.cache import ValidationCache
 from gha_workflow_linter.cli import (
     _AutoFixOutcome,
     _determine_exit_code,
@@ -28,6 +30,7 @@ from gha_workflow_linter.cli import (
 from gha_workflow_linter.models import (
     ActionCall,
     ActionCallType,
+    AllowListConfig,
     Category,
     CLIOptions,
     Config,
@@ -562,3 +565,92 @@ class TestAllowListExitCodes:
             config,
         )
         assert code == exit_codes.ALLOW_LIST_STALE
+
+
+class TestAllowListStageFailure:
+    """A broken check must not silently pass under --verify-allow-list.
+
+    Regression tests for the review finding that _run_allow_list_stage
+    swallowed every exception and returned None, which made
+    _determine_exit_code skip the allow-list branch entirely -- so
+    enforcement degraded to "pass" precisely when the check could not
+    run, contradicting the documented guarantee.
+    """
+
+    @staticmethod
+    def _stage(
+        *, verify: bool, quiet: bool = True
+    ) -> tuple[AllowListOutcome | None, Config]:
+        from gha_workflow_linter.cli import _run_allow_list_stage
+
+        config = Config()
+        config.allow_list.verify = verify
+        cache = ValidationCache(config.cache)
+        options = _options(quiet=quiet, path=Path("/nonexistent-path-xyz"))
+
+        with mock.patch(
+            "gha_workflow_linter.cli.AllowListChecker",
+            side_effect=RuntimeError("boom"),
+        ):
+            return _run_allow_list_stage(config, options, cache), config
+
+    def test_advisory_mode_skips_on_failure(self) -> None:
+        outcome, _ = self._stage(verify=False)
+        assert outcome is None
+
+    def test_verify_mode_reports_failure(self) -> None:
+        outcome, _ = self._stage(verify=True)
+        assert outcome is not None
+        assert outcome.unresolved
+
+    def test_verify_mode_exits_unresolved_on_failure(self) -> None:
+        """The whole point: a broken check fails, it does not pass."""
+        outcome, config = self._stage(verify=True)
+        code = _exit_code(
+            _options(), _validation(), _autofix(), outcome, config
+        )
+        assert code == exit_codes.ALLOW_LIST_UNRESOLVED
+
+    def test_advisory_mode_exits_success_on_failure(self) -> None:
+        outcome, config = self._stage(verify=False)
+        code = _exit_code(
+            _options(), _validation(), _autofix(), outcome, config
+        )
+        assert code == exit_codes.SUCCESS
+
+
+class TestShowSuppressedIsConfigDriven:
+    """--show-suppressed must be settable from a config file.
+
+    Rendering previously read options.show_suppressed, so a config-file
+    setting had no effect unless the CLI flag was also passed.
+    """
+
+    def test_cli_flag_reaches_config(self) -> None:
+        from gha_workflow_linter.cli import _apply_cli_overrides
+
+        config = Config()
+        _apply_cli_overrides(config, _options(show_suppressed=True), None)
+        assert config.allow_list.show_suppressed is True
+
+    def test_config_value_survives_absent_flag(self) -> None:
+        from gha_workflow_linter.cli import _apply_cli_overrides
+
+        config = Config()
+        config.allow_list.show_suppressed = True
+        _apply_cli_overrides(config, _options(), None)
+        assert config.allow_list.show_suppressed is True
+
+
+class TestNoDeadConfigKnobs:
+    """Config must not advertise behaviour that does nothing.
+
+    Remediation lands in a later phase; until something implements it,
+    an 'update' knob would mislead users and downstream tooling.
+    """
+
+    def test_allow_list_config_has_no_update_knob(self) -> None:
+        assert "update" not in AllowListConfig.model_fields
+
+    def test_cli_options_have_no_update_knob(self) -> None:
+        assert "update_allow_list" not in CLIOptions.model_fields

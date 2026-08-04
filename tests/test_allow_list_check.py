@@ -18,15 +18,18 @@ directive silences it.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 import subprocess
 from typing import TYPE_CHECKING, Any
+from unittest import mock
 
 import pytest
 
 from gha_workflow_linter import allow_list_check
 from gha_workflow_linter.allow_list_check import (
     ORG_ENV_VAR,
+    UNKNOWN_ORG_HOST,
     UNRESOLVED_REASON,
     AllowListChecker,
     AllowListFinding,
@@ -1037,3 +1040,94 @@ class TestWorkflowOrgPrecedence:
 
         with pytest.raises(SpecError):
             resolve_spec(f"@{STALE_SHA}", workflow_org="")
+
+
+class TestUnknownWorkflowOrg:
+    """An unknown org must not read as a clean result.
+
+    An empty workflow organisation makes every candidate in-repo path
+    unresolvable, so the scanner finds nothing at all. Returning an empty
+    outcome would let --verify-allow-list pass without having checked
+    anything, which is the failure mode the flag exists to prevent.
+    """
+
+    @staticmethod
+    def _workflow(tmp_path: Path) -> Path:
+        workflows = tmp_path / ".github" / "workflows"
+        workflows.mkdir(parents=True)
+        target = workflows / "ci.yaml"
+        target.write_text(
+            "---\n"
+            "name: T\n"
+            "on: [push]\n"
+            "jobs:\n"
+            "  b:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: lfreleng-actions/harden-runner-block-action@abc\n"
+            "        with:\n"
+            "          config: "
+            "'@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1\n"
+        )
+        return target
+
+    def _check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> AllowListOutcome:
+        # No configured org, no environment, and a directory that is not a
+        # git repository, so every resolution route comes up empty.
+        monkeypatch.delenv("GITHUB_REPOSITORY_OWNER", raising=False)
+        target = self._workflow(tmp_path)
+        config = Config()
+        return asyncio.run(
+            AllowListChecker(config, ValidationCache(config.cache)).check(
+                [target], tmp_path
+            )
+        )
+
+    def test_reports_unresolved_rather_than_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        outcome = self._check(tmp_path, monkeypatch)
+
+        assert outcome.checked is True
+        assert outcome.unresolved
+        assert not outcome.resolved
+
+    def test_names_the_remedy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        outcome = self._check(tmp_path, monkeypatch)
+
+        assert "--allow-list-org" in "".join(outcome.unresolved.values())
+
+    def test_configured_org_resolves_normally(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With an org supplied, the pin is found and no sentinel appears."""
+        monkeypatch.delenv("GITHUB_REPOSITORY_OWNER", raising=False)
+        target = self._workflow(tmp_path)
+        config = Config()
+        config.allow_list.org = "lfreleng-actions"
+
+        with mock.patch.object(
+            AllowListResolver, "resolve", new=_no_release_resolver()
+        ):
+            outcome = asyncio.run(
+                AllowListChecker(config, ValidationCache(config.cache)).check(
+                    [target], tmp_path
+                )
+            )
+
+        assert UNKNOWN_ORG_HOST not in outcome.unresolved
+
+
+def _no_release_resolver() -> Any:
+    """Return a resolve() stub reporting no release for every host."""
+
+    async def _resolve(
+        _self: AllowListResolver, repo_keys: Any
+    ) -> dict[str, Any]:
+        return dict.fromkeys(repo_keys)
+
+    return _resolve

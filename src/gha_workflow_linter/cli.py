@@ -1302,6 +1302,7 @@ def _emit_results(
     scanner: WorkflowScanner,
     validation: _ValidationOutcome,
     autofix: _AutoFixOutcome,
+    config: Config,
     allow_list: AllowListOutcome | None = None,
 ) -> None:
     """Generate and display the scan/validation results."""
@@ -1343,9 +1344,15 @@ def _emit_results(
             render_allow_list(
                 allow_list,
                 root=options.path,
-                show_suppressed=options.show_suppressed,
+                show_suppressed=config.allow_list.show_suppressed,
                 update_hint=False,
             )
+
+
+#: Sentinel host key used when the allow-list stage itself fails, rather
+#: than a specific host repository failing to resolve. Keeps the failure
+#: visible to exit-code determination without inventing a repository name.
+STAGE_FAILURE_HOST = "<allow-list check>"
 
 
 def _run_allow_list_stage(
@@ -1356,9 +1363,14 @@ def _run_allow_list_stage(
     """Detect stale harden-runner allow-list pins.
 
     Allow-list pins are an ``lfreleng-actions`` convention rather than
-    GitHub-native syntax, so a failure here must never break a run that
-    would otherwise have succeeded. Any unexpected error is logged and
-    swallowed; the check is simply skipped.
+    GitHub-native syntax, so in the default advisory mode a failure here
+    must never break a run that would otherwise have succeeded: the error
+    is logged and the check skipped.
+
+    Under ``allow_list.verify`` the opposite holds. The caller asked for
+    enforcement, and enforcement that degrades to "pass" when the check
+    cannot run is worse than useless, so the failure is reported as an
+    unresolved host and becomes exit status ``ALLOW_LIST_UNRESOLVED``.
 
     Args:
         config: Resolved configuration.
@@ -1366,7 +1378,8 @@ def _run_allow_list_stage(
         shared_cache: Cache shared with validation and auto-fix.
 
     Returns:
-        The outcome, or None when checking is disabled or failed.
+        The outcome, or None when checking is disabled, or when it failed
+        while running in advisory mode.
     """
     if not config.allow_list.enabled:
         return None
@@ -1378,9 +1391,27 @@ def _run_allow_list_stage(
         paths = _allow_list_paths(config, options, scanner)
         checker = AllowListChecker(config, shared_cache)
         return asyncio.run(checker.check(paths, options.path))
-    except Exception as e:  # noqa: BLE001 - advisory check, never fatal
+    except Exception as e:  # noqa: BLE001 - advisory unless enforcing
         logger.warning(f"Allow-list check failed: {e}")
-        return None
+        if not config.allow_list.verify:
+            # Advisory mode: a developer offline on a train must still be
+            # able to commit, so the check is skipped entirely.
+            return None
+        # Enforcement was requested. Reporting "pass" because the check
+        # itself broke is worse than useless, so surface the failure as
+        # an unresolved host and let the caller exit with
+        # ALLOW_LIST_UNRESOLVED.
+        if not options.quiet:
+            console.print(
+                f"[red]Allow-list verification could not run: {e} ❌[/red]"
+            )
+        return AllowListOutcome(
+            findings=[],
+            hosts={},
+            unresolved={STAGE_FAILURE_HOST: str(e)},
+            suppressed_count=0,
+            checked=True,
+        )
 
 
 def _allow_list_paths(
@@ -1531,7 +1562,7 @@ def run_linter(config: Config, options: CLIOptions) -> int:
 
     allow_list = _run_allow_list_stage(config, options, shared_cache)
 
-    _emit_results(options, scanner, validation, autofix, allow_list)
+    _emit_results(options, scanner, validation, autofix, config, allow_list)
 
     # Report outdated actions when auto-fix repaired validation errors but
     # version bumps were only detected, not applied. This is presentation
