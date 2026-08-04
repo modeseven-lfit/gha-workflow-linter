@@ -845,7 +845,7 @@ def lint(
         gha-workflow-linter lint --no-require-pinned-sha
 
         # Auto-fix issues without using latest versions
-        gha-workflow-linter lint --auto-fix --no-auto-latest
+        gha-workflow-linter lint --auto-fix --no-update-actions
 
         # Auto-fix with two-space comment formatting
         gha-workflow-linter lint --auto-fix --two-space-comments
@@ -854,7 +854,7 @@ def lint(
         gha-workflow-linter lint --auto-fix --fix-test-calls
 
         # Only update to releases at least 7 days old (supply-chain cooldown)
-        gha-workflow-linter lint --auto-fix --auto-latest --cooldown 7
+        gha-workflow-linter lint --auto-fix --update-actions --cooldown 7
 
         # Scan only specific files
         gha-workflow-linter lint --files .github/workflows/ci.yml
@@ -2001,7 +2001,8 @@ def _display_stale_actions_from_summary(
         console.print()
 
     console.print(
-        "[cyan]Run with [bold]--auto-fix --auto-latest[/bold] to update these actions 💡[/cyan]\n"
+        "[cyan]Run with [bold]--auto-fix --update-actions[/bold] to update "
+        "these actions 💡[/cyan]\n"
     )
 
 

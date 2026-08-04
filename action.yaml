@@ -49,6 +49,33 @@ inputs:
     description: "Skip scanning action.yaml/action.yml files"
     required: false
     default: "false"
+  auto-fix:
+    description: "Automatically fix broken/invalid references"
+    required: false
+    default: "true"
+  update-actions:
+    description: >
+      When auto-fixing, update action calls to the latest release.
+      Replaces the former 'auto-latest' name.
+    required: false
+    default: "false"
+  allow-prerelease:
+    description: "Allow prerelease versions when finding latest versions"
+    required: false
+    default: "false"
+  two-space-comments:
+    description: "Use two spaces before inline comments when fixing"
+    required: false
+    default: "true"
+  fix-test-calls:
+    description: "Fix action calls whose comment mentions testing"
+    required: false
+    default: "false"
+  cooldown:
+    description: >
+      Minimum days a release must have been available before updating to
+      it. Read from .github/dependabot.yml when unset.
+    required: false
   validation-method:
     description: "Validation method (github-api, git, or auto-detect)"
     required: false
@@ -138,6 +165,12 @@ runs:
         INPUT_EXCLUDE: ${{ inputs.exclude }}
         INPUT_REQUIRE_PINNED_SHA: ${{ inputs.require-pinned-sha }}
         INPUT_SKIP_ACTIONS: ${{ inputs.skip-actions }}
+        INPUT_AUTO_FIX: ${{ inputs.auto-fix }}
+        INPUT_UPDATE_ACTIONS: ${{ inputs.update-actions }}
+        INPUT_ALLOW_PRERELEASE: ${{ inputs.allow-prerelease }}
+        INPUT_TWO_SPACE_COMMENTS: ${{ inputs.two-space-comments }}
+        INPUT_FIX_TEST_CALLS: ${{ inputs.fix-test-calls }}
+        INPUT_COOLDOWN: ${{ inputs.cooldown }}
         INPUT_VALIDATION_METHOD: ${{ inputs.validation-method }}
         INPUT_ALLOW_LIST: ${{ inputs.allow-list }}
         INPUT_VERIFY_ALLOW_LIST: ${{ inputs.verify-allow-list }}
@@ -191,6 +224,30 @@ runs:
 
         if [[ "$INPUT_SKIP_ACTIONS" == "true" ]]; then
           args+=(--skip-actions)
+        fi
+
+        if [[ "$INPUT_AUTO_FIX" == "false" ]]; then
+          args+=(--no-auto-fix)
+        fi
+
+        if [[ "$INPUT_UPDATE_ACTIONS" == "true" ]]; then
+          args+=(--update-actions)
+        fi
+
+        if [[ "$INPUT_ALLOW_PRERELEASE" == "true" ]]; then
+          args+=(--allow-prerelease)
+        fi
+
+        if [[ "$INPUT_TWO_SPACE_COMMENTS" == "false" ]]; then
+          args+=(--no-two-space-comments)
+        fi
+
+        if [[ "$INPUT_FIX_TEST_CALLS" == "true" ]]; then
+          args+=(--fix-test-calls)
+        fi
+
+        if [[ -n "$INPUT_COOLDOWN" ]]; then
+          args+=(--cooldown "$INPUT_COOLDOWN")
         fi
 
         if [[ -n "$INPUT_VALIDATION_METHOD" ]]; then

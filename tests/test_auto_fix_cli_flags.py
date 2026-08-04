@@ -9,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from gha_workflow_linter.cli import app
+from tests.conftest import strip_ansi
 
 
 class TestAutoFixCLIFlags:
@@ -228,7 +229,9 @@ class TestAutoFixHelp:
 
         result = runner.invoke(app, ["lint", "--help"])
 
-        help_text = result.stdout.lower()
+        # Rich inserts colour codes inside option names when it
+        # believes it is writing to a terminal, which CI does.
+        help_text = strip_ansi(result.stdout).lower()
 
         # Check for auto-fix related options in help
         # Use partial matching to handle formatting differences

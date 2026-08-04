@@ -525,7 +525,7 @@ update_actions: false
 # Allow prerelease versions when finding latest versions (default: false)
 allow_prerelease: false
 
-# Use two spaces before inline comments when fixing (default: false)
+# Use two spaces before inline comments when fixing (default: true)
 two_space_comments: true
 
 # Skip scanning action.yaml/action.yml files (default: false)
@@ -841,7 +841,7 @@ gha-workflow-linter lint --format json
 | -------------------- | -------------------------------------------- | -------- | ------- |
 | `path`               | Path to scan for workflows                   | No       | `.`     |
 | `config-file`        | Path to configuration file                   | No       |         |
-| `github-token`       | GitHub API token                             | No       |         |
+| `validation-method`  | Validation method (github-api or git)        | No       | auto    |
 | `log-level`          | Logging level                                | No       | `INFO`  |
 | `output-format`      | Output format (text, json)                   | No       | `text`  |
 | `fail-on-error`      | Exit with error on failures                  | No       | `true`  |
@@ -855,6 +855,11 @@ gha-workflow-linter lint --format json
 | `two-space-comments` | Use two spaces before inline comments        | No       | `false` |
 | `skip-actions`       | Skip scanning action.yaml/action.yml files   | No       | `false` |
 | `fix-test-calls`     | Fix actions with 'test' in comments          | No       | `false` |
+| `cooldown`           | Days a release must have been public         | No       |         |
+| `allow-list`         | Detect stale harden-runner allow-list pins   | No       | `true`  |
+| `verify-allow-list`  | Fail when stale allow-list pins remain       | No       | `false` |
+| `update-allow-list`  | Rewrite stale allow-list pins in place       | No       | `false` |
+| `allow-list-org`     | Org for the allow-list `@` shorthand         | No       |         |
 
 <!-- markdownlint-enable MD013 -->
 

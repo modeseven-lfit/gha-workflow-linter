@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 from gha_workflow_linter.cli import _resolve_update_actions
 from gha_workflow_linter.config import ConfigManager
 from gha_workflow_linter.models import Config
+from tests.conftest import strip_ansi
 
 
 class TestFlagResolution:
@@ -107,7 +108,8 @@ class TestBothFlagsAreAccepted:
     def test_help_lists_both(self) -> None:
         from gha_workflow_linter.cli import app
 
-        text = CliRunner().invoke(app, ["lint", "--help"]).stdout.lower()
+        raw = CliRunner().invoke(app, ["lint", "--help"]).stdout
+        text = strip_ansi(raw).lower()
 
         assert "update-actions" in text
         assert "auto-latest" in text

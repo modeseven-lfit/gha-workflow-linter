@@ -45,6 +45,7 @@ from gha_workflow_linter.models import (
     ValidationResult,
 )
 from gha_workflow_linter.validator import ActionCallValidator
+from tests.conftest import strip_ansi
 
 
 def parse_json_output(stdout: str) -> dict[str, Any]:
@@ -744,7 +745,7 @@ jobs:
             return errors
 
         # Mock git operations and the auto-fixer for this CLI test
-        # Report a fix for every flagged call, as a real --auto-latest
+        # Report a fix for every flagged call, as a real --update-actions
         # run would. Line numbers match the ``uses:`` lines of the
         # fixture, not the ``- name:`` lines above them.
         expected_fixes: dict[Path, list[dict[str, str]]] = {
@@ -820,7 +821,7 @@ jobs:
             assert output_data["validation_summary"]["total_errors"] == 5
 
             # With require_pinned_sha=True every non-SHA reference is an
-            # error, so all five reach the fixer, and --auto-latest asks
+            # error, so all five reach the fixer, and --update-actions asks
             # it to move them to the latest versions.
             assert auto_fix.called
             assert len(auto_fix.errors) == 5
@@ -1036,7 +1037,7 @@ validation_method: git
             assert output_data["validation_summary"]["invalid_references"] == 1
             assert output_data["validation_summary"]["not_pinned_to_sha"] == 4
 
-            # All five errors reach the fixer, but without --auto-latest
+            # All five errors reach the fixer, but without --update-actions
             # it is not asked to chase newer versions.
             assert auto_fix.called
             assert len(auto_fix.errors) == 5
@@ -1152,7 +1153,7 @@ validation_method: git
         assert "validation errors" in result.stdout
         assert "Auto-fixed" not in result.stdout
 
-    def test_auto_latest_disabled(self, temp_dir: Path) -> None:
+    def test_update_actions_disabled(self, temp_dir: Path) -> None:
         """Test auto-fix with update_actions=False uses existing versions not latest."""
         workflow_file = temp_dir / ".github" / "workflows" / "test.yaml"
         workflow_file.parent.mkdir(parents=True)
@@ -1279,7 +1280,7 @@ jobs:
             ],
         )
 
-        # With --no-auto-latest and a valid SHA, there should be no validation errors
+        # With --no-update-actions and a valid SHA, there should be no validation errors
         assert result.exit_code == 0
 
         # Parse JSON output for structured validation
@@ -1361,7 +1362,7 @@ jobs:
         # Test that CLI flags are accepted (actual behavior is tested elsewhere)
         test_cases = [
             (["--no-auto-fix"], "Auto-fix disabled via CLI"),
-            (["--no-update-actions"], "Auto-latest disabled via CLI"),
+            (["--no-update-actions"], "update_actions disabled via CLI"),
         ]
 
         for flags, description in test_cases:
@@ -1500,9 +1501,9 @@ jobs:
                 and "2" in result.stdout
                 and "validation errors" in result.stdout
             )
-            assert "2 actions not pinned to SHA" in result.stdout
+            assert "2 actions not pinned to SHA" in strip_ansi(result.stdout)
             # Only the two action calls are errors; the fixer is still
-            # offered the remote reusable workflow call so --auto-latest
+            # offered the remote reusable workflow call so --update-actions
             # could update it, but never the local ``./`` call.
             assert auto_fix.called
             assert len(auto_fix.errors) == 2
@@ -1581,7 +1582,7 @@ jobs:
                 and "50" in result.stdout
                 and "validation errors" in result.stdout
             )
-            assert "50 actions not pinned to SHA" in result.stdout
+            assert "50 actions not pinned to SHA" in strip_ansi(result.stdout)
             # Every one of the 50 calls is carried through to the fixer
             # in a single batch.
             assert auto_fix.called
@@ -1813,7 +1814,9 @@ jobs:
                 and "3" in result.stdout
                 and "validation errors" in result.stdout
             )
-            assert "Updated 3 workflow call(s) in 3 file(s)" in result.stdout
+            assert "Updated 3 workflow call(s) in 3 file(s)" in strip_ansi(
+                result.stdout
+            )
             assert result.exit_code == 1
             # One call per directory reaches the fixer, so the count
             # above cannot come from one file being scanned three times.
