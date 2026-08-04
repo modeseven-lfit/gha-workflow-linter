@@ -1523,8 +1523,14 @@ allow-list code exists.
 - `allow_list_fix.py` + diff-assertion tests, including
   directive-preservation and never-fix-suppressed.
 - CLI: `--update-allow-list`.
-- JSON output `allow_list` block (with `"suppressed"`);
+- JSON output `allow_list` block (with `"suppressed"` and `"fixed"`);
   `action.yaml` inputs/outputs.
+
+Remediation rewrites the reference and its version comment by surgical
+substring replacement, so quoting style, the spacing before `#`, the
+comment's position and any suppression directive all survive. Writes go
+through `file_edit.replace_lines`, so they are atomic and preserve line
+endings.
 
 ### Phase 3 — flag migration and consolidation
 

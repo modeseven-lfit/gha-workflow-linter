@@ -23,6 +23,11 @@ from .exceptions import (
     TemporaryAPIError,
 )
 from .git_refs import AnnotatedTagPeel
+from .latest_release import (
+    LatestRelease,
+    ReleasePolicy,
+    resolve_latest_releases_chunk,
+)
 from .models import (
     APICallStats,
     GitHubAPIConfig,
@@ -421,6 +426,85 @@ class GitHubGraphQLClient:
         )
 
         for batch_result in batch_results_list:
+            results.update(batch_result)
+
+        return results
+
+    async def resolve_latest_releases_batch(
+        self,
+        repo_keys: list[str],
+        policy: ReleasePolicy | None = None,
+    ) -> dict[str, LatestRelease | None]:
+        """
+        Resolve each repository's latest release tag and peeled commit SHA.
+
+        Repositories are chunked by ``max_repositories_per_query`` and the
+        chunks run concurrently under the same worker limit as the other
+        batch methods. Every chunk is a single query returning both the
+        repository's releases and its tag refs, so an annotated tag peels
+        to its commit without a second round trip -- the distinction that
+        decides whether a pin is stale.
+
+        Args:
+            repo_keys: Repository keys in format "owner/repo". Duplicates
+                are not de-duplicated here; callers resolving allow-list
+                pins should pass distinct host repositories.
+            policy: Draft/prerelease and cooldown policy. Defaults to
+                excluding prereleases with no cooldown.
+
+        Returns:
+            Dictionary mapping every supplied repository key to its latest
+            release, or ``None`` where none could be resolved (unknown
+            repository, no releases, or a cooldown excluding everything).
+
+        Raises:
+            AuthenticationError: If the token is missing or rejected.
+            RateLimitError: If the API rate limit is exhausted.
+            NetworkError: If the request could not be completed.
+            GitHubAPIError: If the API reported a fatal error.
+        """
+        if not repo_keys:
+            return {}
+
+        effective_policy = policy or ReleasePolicy()
+        batch_size = max(1, self.config.max_repositories_per_query)
+        batches = [
+            repo_keys[i : i + batch_size]
+            for i in range(0, len(repo_keys), batch_size)
+        ]
+
+        semaphore = asyncio.Semaphore(self.parallel_workers)
+
+        async def process_batch_with_limit(
+            batch: list[str],
+        ) -> dict[str, LatestRelease | None]:
+            """Resolve one batch under the shared concurrency limit."""
+            async with semaphore:
+                await self._check_rate_limit()
+                try:
+                    return await resolve_latest_releases_chunk(
+                        self._execute_graphql_query, batch, effective_policy
+                    )
+                except (
+                    NetworkError,
+                    GitHubAPIError,
+                    AuthenticationError,
+                    RateLimitError,
+                ):
+                    # Re-raise real API/network errors so the caller can
+                    # tell "could not check" from "nothing to report".
+                    raise
+                except Exception as e:
+                    self.logger.error(
+                        f"Unexpected error resolving latest releases: {e}"
+                    )
+                    self.api_stats.increment_failed_call()
+                    return dict.fromkeys(batch, None)
+
+        results: dict[str, LatestRelease | None] = {}
+        for batch_result in await asyncio.gather(
+            *[process_batch_with_limit(batch) for batch in batches]
+        ):
             results.update(batch_result)
 
         return results

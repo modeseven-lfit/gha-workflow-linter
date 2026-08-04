@@ -1,0 +1,22 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+# yamllint disable rule:line-length
+
+# A perfectly ordinary workflow with no allow-list coordinate anywhere.
+# The 'config' input here belongs to an unrelated action and does not
+# parse as a spec, so it is skipped rather than reported.
+name: No pins
+
+on:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+      - uses: some-org/unrelated-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v1.2.3
+        with:
+          config: ./config/settings/unrelated.json
+          verbose: 'true'

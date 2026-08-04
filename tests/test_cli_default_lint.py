@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 from typer.testing import CliRunner
 
 from gha_workflow_linter.cli import _preprocess_args_for_default_command, app
-from gha_workflow_linter.models import ValidationMethod
+from gha_workflow_linter.models import Config, ValidationMethod
 
 
 class TestCLIDefaultLint:
@@ -42,7 +42,7 @@ class TestCLIDefaultLint:
     ) -> None:
         """Test that running without subcommand invokes lint."""
         # Setup mocks
-        mock_config_manager.return_value.load_config.return_value = Mock()
+        mock_config_manager.return_value.load_config.return_value = Config()
         mock_scanner.return_value.scan_directory.return_value = {}
         mock_scanner.return_value.get_scan_summary.return_value = {
             "total_files": 0,
@@ -86,7 +86,7 @@ class TestCLIDefaultLint:
     ) -> None:
         """Test that flags work without explicit 'lint' subcommand."""
         # Setup mocks
-        mock_config_manager.return_value.load_config.return_value = Mock()
+        mock_config_manager.return_value.load_config.return_value = Config()
         mock_scanner.return_value.scan_directory.return_value = {}
         mock_scanner.return_value.get_scan_summary.return_value = {
             "total_files": 0,
@@ -353,7 +353,7 @@ class TestCLIDefaultLint:
     ) -> None:
         """Test that --format json works without explicit 'lint' subcommand."""
         # Setup mocks
-        mock_config_manager.return_value.load_config.return_value = Mock()
+        mock_config_manager.return_value.load_config.return_value = Config()
         mock_scanner.return_value.scan_directory.return_value = {}
         mock_scanner.return_value.get_scan_summary.return_value = {
             "total_files": 0,
@@ -390,7 +390,7 @@ class TestCLIDefaultLint:
         self, mock_config_manager: Mock
     ) -> None:
         """Test that --config flag works without explicit 'lint' subcommand."""
-        mock_config_manager.return_value.load_config.return_value = Mock()
+        mock_config_manager.return_value.load_config.return_value = Config()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create a config file
@@ -433,7 +433,7 @@ class TestCLIDefaultLint:
     ) -> None:
         """Test that --files flag works without explicit 'lint' subcommand."""
         # Setup mocks
-        mock_config_manager.return_value.load_config.return_value = Mock()
+        mock_config_manager.return_value.load_config.return_value = Config()
         mock_scanner.return_value.scan_directory.return_value = {}
         mock_scanner.return_value.get_scan_summary.return_value = {
             "total_files": 0,
@@ -483,7 +483,7 @@ class TestCLIDefaultLint:
     ) -> None:
         """Test that default path (current directory) works without explicit 'lint' subcommand."""
         # Setup mocks
-        mock_config_manager.return_value.load_config.return_value = Mock()
+        mock_config_manager.return_value.load_config.return_value = Config()
         mock_scanner.return_value.scan_directory.return_value = {}
         mock_scanner.return_value.get_scan_summary.return_value = {
             "total_files": 0,
@@ -522,7 +522,7 @@ class TestCLIDefaultLint:
             ) as mock_validator,
             patch("gha_workflow_linter.cli.ValidationCache") as mock_cache,
         ):
-            mock_config.return_value.load_config.return_value = Mock()
+            mock_config.return_value.load_config.return_value = Config()
             mock_scanner.return_value.scan_directory.return_value = {}
             mock_scanner.return_value.get_scan_summary.return_value = {
                 "total_files": 0,

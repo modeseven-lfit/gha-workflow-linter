@@ -52,6 +52,28 @@ inputs:
   validation-method:
     description: "Validation method (github-api, git, or auto-detect)"
     required: false
+  allow-list:
+    description: "Detect stale harden-runner allow-list pins"
+    required: false
+    default: "true"
+  verify-allow-list:
+    description: >
+      Treat stale allow-list pins as errors. Exits with status 3 when
+      stale pins remain, or 4 when the latest release cannot be
+      resolved. Without this the findings are advisory only.
+    required: false
+    default: "false"
+  update-allow-list:
+    description: >
+      Rewrite stale allow-list pins in place. Pins carrying an
+      'allow-list-pin-ok' directive are never rewritten.
+    required: false
+    default: "false"
+  allow-list-org:
+    description: >
+      Organisation used to resolve the '@<sha>' allow-list shorthand.
+      Defaults at runtime to github.repository_owner.
+    required: false
 
 outputs:
   errors-found:
@@ -63,6 +85,12 @@ outputs:
   scan-summary:
     description: "JSON summary of scan results"
     value: ${{ steps.gha-workflow-linter.outputs.scan-summary }}
+  allow-list-stale:
+    description: "Number of stale allow-list pins found"
+    value: ${{ steps.gha-workflow-linter.outputs.allow-list-stale }}
+  allow-list-fixed:
+    description: "Number of allow-list pins rewritten"
+    value: ${{ steps.gha-workflow-linter.outputs.allow-list-fixed }}
 
 runs:
   using: "composite"
@@ -111,6 +139,10 @@ runs:
         INPUT_REQUIRE_PINNED_SHA: ${{ inputs.require-pinned-sha }}
         INPUT_SKIP_ACTIONS: ${{ inputs.skip-actions }}
         INPUT_VALIDATION_METHOD: ${{ inputs.validation-method }}
+        INPUT_ALLOW_LIST: ${{ inputs.allow-list }}
+        INPUT_VERIFY_ALLOW_LIST: ${{ inputs.verify-allow-list }}
+        INPUT_UPDATE_ALLOW_LIST: ${{ inputs.update-allow-list }}
+        INPUT_ALLOW_LIST_ORG: ${{ inputs.allow-list-org }}
       run: |
         # Determine command prefix (uvx for PyPI, direct for local)
         if [[ "$USE_UVX" == "true" ]]; then
@@ -165,6 +197,22 @@ runs:
           args+=(--validation-method "$INPUT_VALIDATION_METHOD")
         fi
 
+        if [[ "$INPUT_ALLOW_LIST" == "false" ]]; then
+          args+=(--no-allow-list)
+        fi
+
+        if [[ "$INPUT_VERIFY_ALLOW_LIST" == "true" ]]; then
+          args+=(--verify-allow-list)
+        fi
+
+        if [[ "$INPUT_UPDATE_ALLOW_LIST" == "true" ]]; then
+          args+=(--update-allow-list)
+        fi
+
+        if [[ -n "$INPUT_ALLOW_LIST_ORG" ]]; then
+          args+=(--allow-list-org "$INPUT_ALLOW_LIST_ORG")
+        fi
+
         # Run gha-workflow-linter and capture output
         if [[ "$INPUT_OUTPUT_FORMAT" == "json" ]]; then
           output=$($cmd_prefix lint "${args[@]}" --no-cache)
@@ -207,8 +255,17 @@ runs:
           echo "EOF" >> "$GITHUB_OUTPUT"
         fi
 
+        # Allow-list counters come from the same JSON summary. Absent
+        # keys (the check disabled, or an older tool) default to 0.
+        allow_list_stale=$(echo "${json_output:-$output}" | \
+          jq -r '.allow_list.summary.stale // 0' 2>/dev/null || echo "0")
+        allow_list_fixed=$(echo "${json_output:-$output}" | \
+          jq -r '.allow_list.summary.fixed // 0' 2>/dev/null || echo "0")
+
         echo "errors-found=$errors_found" >> "$GITHUB_OUTPUT"
         echo "total-calls=$total_calls" >> "$GITHUB_OUTPUT"
+        echo "allow-list-stale=$allow_list_stale" >> "$GITHUB_OUTPUT"
+        echo "allow-list-fixed=$allow_list_fixed" >> "$GITHUB_OUTPUT"
 
         # Set step summary
         if [[ "$errors_found" -eq 0 ]]; then

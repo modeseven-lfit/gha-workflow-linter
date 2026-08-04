@@ -30,6 +30,7 @@ from gha_workflow_linter.cli import (
 from gha_workflow_linter.models import (
     ActionCall,
     ActionCallType,
+    Config,
     LogLevel,
     ReferenceType,
     ValidationError,
@@ -191,7 +192,7 @@ class TestCLICommands:
     ) -> None:
         """Test basic lint command execution."""
         # Setup mocks
-        mock_config_manager.return_value.load_config.return_value = Mock()
+        mock_config_manager.return_value.load_config.return_value = Config()
         mock_scanner.return_value.scan_directory.return_value = {}
         mock_scanner.return_value.get_scan_summary.return_value = {
             "total_files": 0,
@@ -273,7 +274,7 @@ class TestCLICommands:
         self, mock_scanner: Mock, mock_config_manager: Mock
     ) -> None:
         """Test lint command with scanner error."""
-        mock_config_manager.return_value.load_config.return_value = Mock()
+        mock_config_manager.return_value.load_config.return_value = Config()
         mock_scanner.return_value.scan_directory.side_effect = OSError(
             "Permission denied"
         )
@@ -294,7 +295,7 @@ class TestCLICommands:
         mock_config_manager: Mock,
     ) -> None:
         """Test lint command with GitHub token from environment."""
-        mock_config_manager.return_value.load_config.return_value = Mock()
+        mock_config_manager.return_value.load_config.return_value = Config()
         mock_scanner.return_value.scan_directory.return_value = {}
         mock_scanner.return_value.get_scan_summary.return_value = {
             "total_files": 0,
@@ -331,7 +332,7 @@ class TestCLICommands:
         mock_config_manager: Mock,
     ) -> None:
         """Test lint command with GitHub token from CLI flag."""
-        mock_config_manager.return_value.load_config.return_value = Mock()
+        mock_config_manager.return_value.load_config.return_value = Config()
         mock_scanner.return_value.scan_directory.return_value = {}
         mock_scanner.return_value.get_scan_summary.return_value = {
             "total_files": 0,
@@ -367,7 +368,7 @@ class TestCLICommands:
         mock_config_manager: Mock,
     ) -> None:
         """Test lint command with JSON output format."""
-        mock_config_manager.return_value.load_config.return_value = Mock()
+        mock_config_manager.return_value.load_config.return_value = Config()
         mock_scanner.return_value.scan_directory.return_value = {
             Path("workflow.yml"): {1: Mock()}
         }
@@ -555,7 +556,7 @@ class TestCLICommands:
         mock_config_manager: Mock,
     ) -> None:
         """Test lint command with cache TTL option."""
-        mock_config_manager.return_value.load_config.return_value = Mock()
+        mock_config_manager.return_value.load_config.return_value = Config()
         mock_scanner.return_value.scan_directory.return_value = {}
         mock_scanner.return_value.get_scan_summary.return_value = {
             "total_files": 0,
@@ -616,7 +617,7 @@ class TestCLICommands:
         mock_config_manager: Mock,
     ) -> None:
         """Test lint command with --no-require-pinned-sha flag."""
-        mock_config_manager.return_value.load_config.return_value = Mock()
+        mock_config_manager.return_value.load_config.return_value = Config()
         mock_scanner.return_value.scan_directory.return_value = {}
         mock_scanner.return_value.get_scan_summary.return_value = {
             "total_files": 0,
@@ -653,7 +654,7 @@ class TestCLICommands:
     ) -> None:
         """Test lint command with --no-fail-on-error flag."""
         # Setup mocks to return validation errors
-        mock_config_manager.return_value.load_config.return_value = Mock()
+        mock_config_manager.return_value.load_config.return_value = Config()
         mock_scanner.return_value.scan_directory.return_value = {
             Path("workflow.yml"): {1: Mock()}
         }

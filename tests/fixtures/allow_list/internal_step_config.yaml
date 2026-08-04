@@ -1,0 +1,20 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+# yamllint disable rule:line-length
+
+# The shape every internal workflow uses: the shorthand '@<sha>' form,
+# whose host org comes from the workflow org, with the version in a
+# YAML comment outside the quotes (form A of design section 2).
+name: Internal workflow
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          config: '@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1

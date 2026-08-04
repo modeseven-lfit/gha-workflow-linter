@@ -213,6 +213,20 @@ two_space_comments: {config_dict["two_space_comments"]}
 # Skip scanning action.yaml/action.yml files
 skip_actions: {config_dict["skip_actions"]}
 
+# Harden-runner allow-list pin checking. These pins are an
+# lfreleng-actions convention rather than GitHub-native syntax, so the
+# check is advisory by default: it reports stale pins but never changes
+# the exit code. Set verify to true to enforce (exit status 3, or 4 when
+# the latest release cannot be resolved).
+allow_list:
+  enabled: true
+  verify: false
+  show_suppressed: false
+  # Organisation used to resolve the '@<sha>' shorthand. When empty the
+  # tool infers it from GITHUB_REPOSITORY_OWNER, then the 'upstream' git
+  # remote, then 'origin'. Forks should set this explicitly.
+  org: ""
+
 # Network configuration
 network:
   # Timeout for network requests (seconds)

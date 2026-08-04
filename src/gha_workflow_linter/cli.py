@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+import dataclasses
 from dataclasses import dataclass
 import json
 import logging
@@ -36,6 +37,15 @@ import typer
 
 from . import exit_codes
 from ._version import __version__
+from .allow_list_check import AllowListChecker, AllowListOutcome
+from .allow_list_fix import AppliedFix
+from .allow_list_fix import apply_fixes as apply_allow_list_fixes
+from .allow_list_report import (
+    build_json as build_allow_list_json,
+)
+from .allow_list_report import (
+    render_text as render_allow_list,
+)
 from .auto_fix import AutoFixer
 from .cache import CachePrimeReport, ValidationCache
 from .config import ConfigManager
@@ -255,6 +265,7 @@ def _preprocess_args_for_default_command(
         "--format",
         "-f",
         "--files",
+        "--allow-list-org",
     }
 
     # No args at all: behave like the explicit `lint` subcommand.
@@ -437,6 +448,20 @@ def _apply_cli_overrides(
     if options.cache_ttl is not None:
         config.cache.default_ttl_seconds = options.cache_ttl
         logger.debug(f"Cache TTL overridden to {options.cache_ttl} seconds")
+
+    # Allow-list pin checking. Only --allow-list is tri-state; the rest are
+    # opt-in switches that a config file may also enable, so a CLI False
+    # must not clobber a configured True.
+    if options.allow_list is not None:
+        config.allow_list.enabled = options.allow_list
+    if options.verify_allow_list:
+        config.allow_list.verify = True
+    if options.update_allow_list:
+        config.allow_list.update = True
+    if options.show_suppressed:
+        config.allow_list.show_suppressed = True
+    if options.allow_list_org is not None:
+        config.allow_list.org = options.allow_list_org
 
 
 def _configure_validation_backend(
@@ -661,6 +686,47 @@ def lint(
             "fail the run"
         ),
     ),
+    allow_list: bool | None = typer.Option(
+        None,
+        "--allow-list/--no-allow-list",
+        help=(
+            "Detect stale harden-runner allow-list pins (default: enabled). "
+            "Findings are advisory unless --verify-allow-list is given"
+        ),
+    ),
+    verify_allow_list: bool = typer.Option(
+        False,
+        "--verify-allow-list",
+        help=(
+            "Treat stale allow-list pins as errors and exit with status 3 "
+            "(or 4 if the latest release cannot be resolved)"
+        ),
+    ),
+    update_allow_list: bool = typer.Option(
+        False,
+        "--update-allow-list",
+        help=(
+            "Rewrite stale allow-list pins in place. Pins carrying an "
+            "'allow-list-pin-ok' directive are never rewritten"
+        ),
+    ),
+    show_suppressed: bool = typer.Option(
+        False,
+        "--show-suppressed",
+        help=(
+            "Report allow-list pins silenced by an 'allow-list-pin-ok' "
+            "directive. Never affects the exit code"
+        ),
+    ),
+    allow_list_org: str | None = typer.Option(
+        None,
+        "--allow-list-org",
+        help=(
+            "Organisation used to resolve the '@<sha>' allow-list shorthand. "
+            "Inferred from GITHUB_REPOSITORY_OWNER, then the 'upstream' git "
+            "remote, then 'origin', when not given"
+        ),
+    ),
     _help: bool = typer.Option(
         False,
         "--help",
@@ -804,6 +870,11 @@ def lint(
             cooldown=cooldown,
             files=files,
             verify_actions=verify_actions,
+            allow_list=allow_list,
+            verify_allow_list=verify_allow_list,
+            update_allow_list=update_allow_list,
+            show_suppressed=show_suppressed,
+            allow_list_org=allow_list_org,
         )
 
         # Apply CLI overrides to config
@@ -1245,6 +1316,8 @@ def _emit_results(
     scanner: WorkflowScanner,
     validation: _ValidationOutcome,
     autofix: _AutoFixOutcome,
+    config: Config,
+    allow_list: AllowListOutcome | None = None,
 ) -> None:
     """Generate and display the scan/validation results."""
     scan_summary = scanner.get_scan_summary(validation.workflow_calls)
@@ -1266,6 +1339,7 @@ def _emit_results(
             validation_summary,
             validation.validation_errors,
             options.path,
+            allow_list,
         )
     else:
         output_text_results(
@@ -1278,12 +1352,205 @@ def _emit_results(
             autofix.redirect_stats,
             autofix.stale_actions_summary,
         )
+        if allow_list is not None and not options.quiet:
+            # Only suggest remediation when it has not already run.
+            render_allow_list(
+                allow_list,
+                root=options.path,
+                show_suppressed=config.allow_list.show_suppressed,
+                update_hint=not config.allow_list.update,
+            )
+
+
+#: Sentinel host key used when the allow-list stage itself fails, rather
+#: than a specific host repository failing to resolve. Keeps the failure
+#: visible to exit-code determination without inventing a repository name.
+STAGE_FAILURE_HOST = "<allow-list check>"
+
+
+def _run_allow_list_stage(
+    config: Config,
+    options: CLIOptions,
+    shared_cache: ValidationCache,
+) -> AllowListOutcome | None:
+    """Detect stale harden-runner allow-list pins.
+
+    Allow-list pins are an ``lfreleng-actions`` convention rather than
+    GitHub-native syntax, so in the default advisory mode a failure here
+    must never break a run that would otherwise have succeeded: the error
+    is logged and the check skipped.
+
+    Under ``allow_list.verify`` the opposite holds. The caller asked for
+    enforcement, and enforcement that degrades to "pass" when the check
+    cannot run is worse than useless, so the failure is reported as an
+    unresolved host and becomes exit status ``ALLOW_LIST_UNRESOLVED``.
+
+    Args:
+        config: Resolved configuration.
+        options: Resolved CLI options.
+        shared_cache: Cache shared with validation and auto-fix.
+
+    Returns:
+        The outcome, or None when checking is disabled, or when it failed
+        while running in advisory mode.
+    """
+    if not config.allow_list.enabled:
+        return None
+
+    logger = logging.getLogger(__name__)
+    scanner = WorkflowScanner(config)
+
+    try:
+        paths = _allow_list_paths(config, options, scanner)
+        checker = AllowListChecker(config, shared_cache)
+        outcome = asyncio.run(checker.check(paths, options.path))
+        if config.allow_list.update:
+            outcome = _apply_allow_list_fixes(outcome, options)
+        return outcome
+    except ConfigurationError:
+        # A bad setting is a usage error, not a transient failure. It
+        # must surface in advisory mode too, or a typo in
+        # --allow-list-org would silently disable the whole check.
+        raise
+    except Exception as e:  # noqa: BLE001 - advisory unless enforcing
+        logger.warning(f"Allow-list check failed: {e}")
+        if not config.allow_list.verify:
+            # Advisory mode: a developer offline on a train must still be
+            # able to commit, so the check is skipped entirely.
+            return None
+        # Enforcement was requested. Reporting "pass" because the check
+        # itself broke is worse than useless, so surface the failure as
+        # an unresolved host and let the caller exit with
+        # ALLOW_LIST_UNRESOLVED.
+        if not options.quiet:
+            console.print(
+                f"[red]Allow-list verification could not run: {e} ❌[/red]"
+            )
+        return AllowListOutcome(
+            findings=[],
+            hosts={},
+            unresolved={STAGE_FAILURE_HOST: str(e)},
+            suppressed_count=0,
+            checked=True,
+        )
+
+
+def _apply_allow_list_fixes(
+    outcome: AllowListOutcome,
+    options: CLIOptions,
+) -> AllowListOutcome:
+    """Rewrite stale pins and fold the result back into the outcome.
+
+    Only unsuppressed findings are offered to the fixer: a suppression
+    that survived detection but lost to remediation would be worse than
+    none at all.
+
+    Args:
+        outcome: The outcome of the detection pass.
+        options: Resolved CLI options, for reporting paths.
+
+    Returns:
+        The outcome with ``fixed_lines`` populated.
+    """
+    logger = logging.getLogger(__name__)
+    fixes = apply_allow_list_fixes(outcome.unsuppressed)
+
+    for finding, reason in fixes.skipped:
+        logger.debug(
+            f"Not rewriting {finding.pin.file_path}:"
+            f"{finding.pin.line_number}: {reason}"
+        )
+
+    if not fixes.applied:
+        return outcome
+
+    if not options.quiet:
+        _display_allow_list_fixes(fixes.applied, options)
+
+    return dataclasses.replace(
+        outcome,
+        fixed_lines=frozenset(
+            (str(fix.finding.pin.file_path), fix.line_number)
+            for fix in fixes.applied
+        ),
+    )
+
+
+def _display_allow_list_fixes(
+    applied: list[AppliedFix],
+    options: CLIOptions,
+) -> None:
+    """Report the allow-list pins that remediation rewrote.
+
+    Args:
+        applied: The fixes written to disk.
+        options: Resolved CLI options, for relative paths.
+    """
+    console.print("\n[green]Updated allow-list pins ✅[/green]")
+    by_file: dict[Path, list[AppliedFix]] = defaultdict(list)
+    for fix in applied:
+        by_file[fix.finding.pin.file_path].append(fix)
+
+    for file_path in sorted(by_file):
+        relative = _get_relative_path(file_path, options.path)
+        console.print(f"\n  [bold]{relative}[/bold]")
+        for fix in by_file[file_path]:
+            pad = " " * len(str(fix.line_number))
+            console.print(
+                f"    line {fix.line_number}   "
+                f"[red]{fix.old_line.strip()}[/red]"
+            )
+            console.print(
+                f"    {pad}        [green]{fix.new_line.strip()}[/green]"
+            )
+
+    console.print(
+        "\n[yellow]Files have been modified; please review the changes "
+        "and commit them ⚠️[/yellow]"
+    )
+
+
+def _allow_list_paths(
+    config: Config,
+    options: CLIOptions,
+    scanner: WorkflowScanner,
+) -> list[Path]:
+    """Collect the files the allow-list check should read.
+
+    Honours ``--files`` so the check covers the same scope as validation.
+    Otherwise it adds ``allow_list.extra_globs`` to the usual discovery:
+    example caller workflows live outside ``.github/workflows`` and are
+    not found by the standard scan, but they carry pins too.
+
+    Args:
+        config: Resolved configuration.
+        options: Resolved CLI options.
+        scanner: Scanner providing the standard discovery.
+
+    Returns:
+        Deduplicated file paths, in discovery order.
+    """
+    if options.files:
+        return list(
+            scanner.scan_directory(options.path, specific_files=options.files)
+        )
+
+    paths: list[Path] = list(scanner.find_workflow_files(options.path))
+    seen = set(paths)
+    for pattern in config.allow_list.extra_globs:
+        for path in sorted(options.path.glob(pattern)):
+            if path.is_file() and path not in seen:
+                seen.add(path)
+                paths.append(path)
+    return paths
 
 
 def _determine_exit_code(
     options: CLIOptions,
     validation: _ValidationOutcome,
     autofix: _AutoFixOutcome,
+    config: Config,
+    allow_list: AllowListOutcome | None = None,
 ) -> int:
     """Compute the process exit code from fixes and validation errors.
 
@@ -1296,6 +1563,8 @@ def _determine_exit_code(
         options: Resolved CLI options.
         validation: Outcome of the scan/validate stage.
         autofix: Outcome of the auto-fix stage.
+        config: Resolved configuration.
+        allow_list: Outcome of the allow-list stage, when it ran.
 
     Returns:
         A code from :mod:`gha_workflow_linter.exit_codes`.
@@ -1328,6 +1597,22 @@ def _determine_exit_code(
     # caller opted in with --verify-actions.
     if options.verify_actions and _has_outdated_actions(autofix):
         codes.append(exit_codes.ACTIONS_OUTDATED)
+
+    # Allow-list findings are advisory unless --verify-allow-list is set.
+    # An unresolved check outranks a stale one: enforcement that silently
+    # degrades to "pass" when the network is down is worse than useless.
+    if allow_list is not None:
+        if allow_list.fixed_count:
+            # Files changed on disk, so the caller must notice, exactly as
+            # for the action-call fixer.
+            codes.append(exit_codes.DEFECTS_FOUND)
+        if config.allow_list.verify:
+            if allow_list.unresolved:
+                codes.append(exit_codes.ALLOW_LIST_UNRESOLVED)
+            elif allow_list.outstanding:
+                # Anything remediation already rewrote is no longer a
+                # problem, so only what remains can fail the run.
+                codes.append(exit_codes.ALLOW_LIST_STALE)
 
     return exit_codes.combine(*codes) if codes else exit_codes.SUCCESS
 
@@ -1378,7 +1663,9 @@ def run_linter(config: Config, options: CLIOptions) -> int:
 
     autofix = _run_auto_fix_stage(config, options, shared_cache, validation)
 
-    _emit_results(options, scanner, validation, autofix)
+    allow_list = _run_allow_list_stage(config, options, shared_cache)
+
+    _emit_results(options, scanner, validation, autofix, config, allow_list)
 
     # Report outdated actions when auto-fix repaired validation errors but
     # version bumps were only detected, not applied. This is presentation
@@ -1394,7 +1681,9 @@ def run_linter(config: Config, options: CLIOptions) -> int:
             autofix.stale_actions_summary, options
         )
 
-    return _determine_exit_code(options, validation, autofix)
+    return _determine_exit_code(
+        options, validation, autofix, config, allow_list
+    )
 
 
 def _create_scan_summary_table(
@@ -1850,6 +2139,7 @@ def output_json_results(
     validation_summary: dict[str, Any],
     errors: list[Any],
     scan_path: Path,
+    allow_list: AllowListOutcome | None = None,
 ) -> None:
     """
     Output results in JSON format.
@@ -1859,6 +2149,8 @@ def output_json_results(
         validation_summary: Validation statistics
         errors: List of validation errors
         scan_path: Base path for computing relative paths
+        allow_list: Allow-list outcome, merged in under an ``allow_list``
+            key when the check ran
     """
     result = {
         "scan_summary": scan_summary,
@@ -1881,6 +2173,9 @@ def output_json_results(
             for error in errors
         ],
     }
+
+    if allow_list is not None:
+        result.update(build_allow_list_json(allow_list, root=scan_path))
 
     # Use plain print() to avoid Rich formatting/ANSI codes in JSON output
     print(json.dumps(result, indent=2))

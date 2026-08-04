@@ -48,6 +48,9 @@ class WorkflowScanner:
         self.config = config
         self.logger = logging.getLogger(__name__)
         self._patterns = ActionCallPatterns()
+        # Memoises "is this directory a repository root?" for the life of
+        # the scanner; a deep tree asks about the same ancestors often.
+        self._repository_roots: dict[Path, bool] = {}
 
     def find_workflow_files(
         self,
@@ -135,14 +138,78 @@ class WorkflowScanner:
         # Search for .github/workflows directories recursively
         try:
             for github_dir in root_path.rglob(".github"):
-                if github_dir.is_dir():
-                    workflows_dir = github_dir / "workflows"
-                    if workflows_dir.exists() and workflows_dir.is_dir():
-                        workflow_dirs.add(workflows_dir)
+                if not github_dir.is_dir():
+                    continue
+                if self._crosses_repository_boundary(github_dir, root_path):
+                    continue
+                workflows_dir = github_dir / "workflows"
+                if workflows_dir.exists() and workflows_dir.is_dir():
+                    workflow_dirs.add(workflows_dir)
         except (PermissionError, OSError) as e:
             self.logger.warning(f"Error scanning directory {root_path}: {e}")
 
         return workflow_dirs
+
+    def _crosses_repository_boundary(self, path: Path, root_path: Path) -> bool:
+        """Report whether a path lies inside a nested repository.
+
+        Git worktrees, submodules and vendored clones all place a ``.git``
+        entry (a directory for a clone, a gitdir pointer file for a
+        worktree or submodule) at their own root. Anything beneath such a
+        directory belongs to a different repository, or to a second
+        checkout of this one, so its workflows are not the scanned
+        repository's concern.
+
+        Without this, scanning a repository that keeps worktrees under
+        ``.worktrees/`` reports every finding several times over, once per
+        checked-out branch, against files the working tree does not
+        contain. Remediation would then rewrite stale duplicates.
+
+        The scan root itself is never treated as a boundary: it is the
+        repository being scanned.
+
+        Args:
+            path: Candidate path, at or below ``root_path``.
+            root_path: Root of the scan.
+
+        Returns:
+            True when a nested repository sits between ``root_path`` and
+            ``path``.
+        """
+        try:
+            relative = path.relative_to(root_path)
+        except ValueError:
+            return False
+
+        current = root_path
+        for part in relative.parts:
+            current = current / part
+            if current == path and not path.is_dir():
+                break
+            if self._is_repository_root(current):
+                return True
+        return False
+
+    def _is_repository_root(self, path: Path) -> bool:
+        """Report whether a directory is the root of a Git repository.
+
+        Results are cached for the lifetime of the scanner: a deep tree
+        asks about the same ancestors repeatedly.
+
+        Args:
+            path: Directory to test.
+
+        Returns:
+            True when the directory contains a ``.git`` entry.
+        """
+        cached = self._repository_roots.get(path)
+        if cached is None:
+            try:
+                cached = (path / ".git").exists()
+            except OSError:
+                cached = False
+            self._repository_roots[path] = cached
+        return cached
 
     def _find_action_files(self, root_path: Path) -> Iterator[Path]:
         """
@@ -167,9 +234,14 @@ class WorkflowScanner:
                 # Find recursively (rglob includes root directory)
                 for action_file in root_path.rglob(action_name):
                     # Yield only real action files outside .github/workflows
-                    # (paths under .github/workflows are workflow files).
-                    if action_file.is_file() and not self._is_in_workflows_dir(
-                        action_file
+                    # (paths under .github/workflows are workflow files),
+                    # and outside any nested repository.
+                    if (
+                        action_file.is_file()
+                        and not self._is_in_workflows_dir(action_file)
+                        and not self._crosses_repository_boundary(
+                            action_file, root_path
+                        )
                     ):
                         self.logger.debug(f"Found action file: {action_file}")
                         yield action_file
