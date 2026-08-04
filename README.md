@@ -315,7 +315,18 @@ gha-workflow-linter lint --no-allow-list
 
 # Show pins silenced by a suppression directive
 gha-workflow-linter lint --show-suppressed
+
+# Rewrite stale pins in place
+gha-workflow-linter lint --update-allow-list
 ```
+
+`--update-allow-list` changes the reference and its version comment and
+nothing else. Quoting style, the spacing before `#`, the comment's
+position (inside or outside the quotes) and any suppression directive
+all survive the edit, so the resulting diff stays reviewable. Writes are
+atomic and preserve the file's existing line endings. As with the action
+fixer, a run that modifies files exits `1` so a pre-commit hook or CI job
+notices that the tree changed.
 
 This check follows an `lfreleng-actions` convention rather than
 GitHub-native validation, so it stays **advisory by default**: the
@@ -349,8 +360,9 @@ The preceding-line form must sit on the line directly above the pin, at
 any indentation. An optional reason may follow ` -- ` and appears in
 reports. Both forms stay inert at run time: the action never sees them.
 
-The linter excludes a suppressed pin from both reporting and
-enforcement, but still lists it under `--format json` with
+The linter excludes a suppressed pin from reporting, enforcement **and
+remediation**: `--update-allow-list` leaves it alone. It still lists it
+under `--format json` with
 `"suppressed": true`, and every run prints a one-line count so
 suppressions stay visible.
 

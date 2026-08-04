@@ -12,6 +12,7 @@ about the same repository state.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest import mock
@@ -442,7 +443,9 @@ def _allow_list_outcome(
     """Build an outcome with the given failure shape."""
     from gha_workflow_linter.allow_list_check import AllowListOutcome as _O
 
-    findings = [_stale_finding() for _ in range(unsuppressed)]
+    # Distinct line numbers: findings are keyed by (file, line), so
+    # identical pins would collapse into one for fix tracking.
+    findings = [_stale_finding(line=n + 1) for n in range(unsuppressed)]
     return _O(
         findings=findings,
         hosts={},
@@ -454,8 +457,8 @@ def _allow_list_outcome(
     )
 
 
-def _stale_finding() -> Any:
-    """A minimal unsuppressed STALE finding."""
+def _stale_finding(*, line: int = 1) -> Any:
+    """A minimal unsuppressed STALE finding at the given line."""
     from gha_workflow_linter.allow_list_check import AllowListFinding
     from gha_workflow_linter.allow_list_scanner import AllowListPin
     from gha_workflow_linter.allow_list_spec import resolve_spec
@@ -463,7 +466,7 @@ def _stale_finding() -> Any:
 
     pin = AllowListPin(
         file_path=Path(".github/workflows/ci.yaml"),
-        line_number=1,
+        line_number=line,
         column=0,
         key_path=("jobs", "b", "steps", "0", "with", "config"),
         raw_line="        config: '@18d9c444'  # v0.1.1",
@@ -642,15 +645,74 @@ class TestShowSuppressedIsConfigDriven:
         assert config.allow_list.show_suppressed is True
 
 
-class TestNoDeadConfigKnobs:
-    """Config must not advertise behaviour that does nothing.
+class TestAllowListRemediationExitCodes:
+    """--update-allow-list changes files, so the caller must notice."""
 
-    Remediation lands in a later phase; until something implements it,
-    an 'update' knob would mislead users and downstream tooling.
-    """
+    @staticmethod
+    def _fixed(outcome: AllowListOutcome) -> AllowListOutcome:
+        """Mark every finding in the outcome as rewritten."""
+        return dataclasses.replace(
+            outcome,
+            fixed_lines=frozenset(
+                (str(f.pin.file_path), f.pin.line_number)
+                for f in outcome.findings
+            ),
+        )
 
-    def test_allow_list_config_has_no_update_knob(self) -> None:
-        assert "update" not in AllowListConfig.model_fields
+    def test_files_changed_fails_like_the_action_fixer(self) -> None:
+        outcome = self._fixed(_allow_list_outcome(unsuppressed=2))
+        code = _exit_code(
+            _options(), _validation(), _autofix(), outcome, Config()
+        )
+        assert code == exit_codes.DEFECTS_FOUND
 
-    def test_cli_options_have_no_update_knob(self) -> None:
-        assert "update_allow_list" not in CLIOptions.model_fields
+    def test_fixed_findings_do_not_also_fail_verification(self) -> None:
+        """Everything repaired means nothing left to enforce against."""
+        config = Config()
+        config.allow_list.verify = True
+        outcome = self._fixed(_allow_list_outcome(unsuppressed=2))
+
+        code = _exit_code(
+            _options(), _validation(), _autofix(), outcome, config
+        )
+
+        assert code == exit_codes.DEFECTS_FOUND
+        assert not outcome.outstanding
+
+    def test_unfixable_findings_still_fail_verification(self) -> None:
+        config = Config()
+        config.allow_list.verify = True
+        # Two findings, only the first rewritten.
+        outcome = _allow_list_outcome(unsuppressed=2)
+        outcome = dataclasses.replace(
+            outcome,
+            fixed_lines=frozenset(
+                {
+                    (
+                        str(outcome.findings[0].pin.file_path),
+                        outcome.findings[0].pin.line_number,
+                    )
+                }
+            ),
+        )
+
+        code = _exit_code(
+            _options(), _validation(), _autofix(), outcome, config
+        )
+
+        assert code == exit_codes.ALLOW_LIST_STALE
+
+    def test_nothing_fixed_is_success(self) -> None:
+        code = _exit_code(
+            _options(),
+            _validation(),
+            _autofix(),
+            _allow_list_outcome(),
+            Config(),
+        )
+        assert code == exit_codes.SUCCESS
+
+    def test_update_knob_exists_now_that_it_works(self) -> None:
+        """The inverse of the earlier no-dead-knobs guard."""
+        assert "update" in AllowListConfig.model_fields
+        assert "update_allow_list" in CLIOptions.model_fields

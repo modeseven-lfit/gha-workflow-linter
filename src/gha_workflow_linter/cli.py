@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+import dataclasses
 from dataclasses import dataclass
 import json
 import logging
@@ -37,6 +38,8 @@ import typer
 from . import exit_codes
 from ._version import __version__
 from .allow_list_check import AllowListChecker, AllowListOutcome
+from .allow_list_fix import AppliedFix
+from .allow_list_fix import apply_fixes as apply_allow_list_fixes
 from .allow_list_report import (
     build_json as build_allow_list_json,
 )
@@ -453,6 +456,8 @@ def _apply_cli_overrides(
         config.allow_list.enabled = options.allow_list
     if options.verify_allow_list:
         config.allow_list.verify = True
+    if options.update_allow_list:
+        config.allow_list.update = True
     if options.show_suppressed:
         config.allow_list.show_suppressed = True
     if options.allow_list_org is not None:
@@ -697,6 +702,14 @@ def lint(
             "(or 4 if the latest release cannot be resolved)"
         ),
     ),
+    update_allow_list: bool = typer.Option(
+        False,
+        "--update-allow-list",
+        help=(
+            "Rewrite stale allow-list pins in place. Pins carrying an "
+            "'allow-list-pin-ok' directive are never rewritten"
+        ),
+    ),
     show_suppressed: bool = typer.Option(
         False,
         "--show-suppressed",
@@ -859,6 +872,7 @@ def lint(
             verify_actions=verify_actions,
             allow_list=allow_list,
             verify_allow_list=verify_allow_list,
+            update_allow_list=update_allow_list,
             show_suppressed=show_suppressed,
             allow_list_org=allow_list_org,
         )
@@ -1339,13 +1353,12 @@ def _emit_results(
             autofix.stale_actions_summary,
         )
         if allow_list is not None and not options.quiet:
-            # Remediation lands in a later phase, so do not advertise a
-            # flag that does not exist yet.
+            # Only suggest remediation when it has not already run.
             render_allow_list(
                 allow_list,
                 root=options.path,
                 show_suppressed=config.allow_list.show_suppressed,
-                update_hint=False,
+                update_hint=not config.allow_list.update,
             )
 
 
@@ -1390,7 +1403,10 @@ def _run_allow_list_stage(
     try:
         paths = _allow_list_paths(config, options, scanner)
         checker = AllowListChecker(config, shared_cache)
-        return asyncio.run(checker.check(paths, options.path))
+        outcome = asyncio.run(checker.check(paths, options.path))
+        if config.allow_list.update:
+            outcome = _apply_allow_list_fixes(outcome, options)
+        return outcome
     except Exception as e:  # noqa: BLE001 - advisory unless enforcing
         logger.warning(f"Allow-list check failed: {e}")
         if not config.allow_list.verify:
@@ -1412,6 +1428,81 @@ def _run_allow_list_stage(
             suppressed_count=0,
             checked=True,
         )
+
+
+def _apply_allow_list_fixes(
+    outcome: AllowListOutcome,
+    options: CLIOptions,
+) -> AllowListOutcome:
+    """Rewrite stale pins and fold the result back into the outcome.
+
+    Only unsuppressed findings are offered to the fixer: a suppression
+    that survived detection but lost to remediation would be worse than
+    none at all.
+
+    Args:
+        outcome: The outcome of the detection pass.
+        options: Resolved CLI options, for reporting paths.
+
+    Returns:
+        The outcome with ``fixed_lines`` populated.
+    """
+    logger = logging.getLogger(__name__)
+    fixes = apply_allow_list_fixes(outcome.unsuppressed)
+
+    for finding, reason in fixes.skipped:
+        logger.debug(
+            f"Not rewriting {finding.pin.file_path}:"
+            f"{finding.pin.line_number}: {reason}"
+        )
+
+    if not fixes.applied:
+        return outcome
+
+    if not options.quiet:
+        _display_allow_list_fixes(fixes.applied, options)
+
+    return dataclasses.replace(
+        outcome,
+        fixed_lines=frozenset(
+            (str(fix.finding.pin.file_path), fix.line_number)
+            for fix in fixes.applied
+        ),
+    )
+
+
+def _display_allow_list_fixes(
+    applied: list[AppliedFix],
+    options: CLIOptions,
+) -> None:
+    """Report the allow-list pins that remediation rewrote.
+
+    Args:
+        applied: The fixes written to disk.
+        options: Resolved CLI options, for relative paths.
+    """
+    console.print("\n[green]Updated allow-list pins ✅[/green]")
+    by_file: dict[Path, list[AppliedFix]] = defaultdict(list)
+    for fix in applied:
+        by_file[fix.finding.pin.file_path].append(fix)
+
+    for file_path in sorted(by_file):
+        relative = _get_relative_path(file_path, options.path)
+        console.print(f"\n  [bold]{relative}[/bold]")
+        for fix in by_file[file_path]:
+            pad = " " * len(str(fix.line_number))
+            console.print(
+                f"    line {fix.line_number}   "
+                f"[red]{fix.old_line.strip()}[/red]"
+            )
+            console.print(
+                f"    {pad}        [green]{fix.new_line.strip()}[/green]"
+            )
+
+    console.print(
+        "\n[yellow]Files have been modified; please review the changes "
+        "and commit them ⚠️[/yellow]"
+    )
 
 
 def _allow_list_paths(
@@ -1505,11 +1596,18 @@ def _determine_exit_code(
     # Allow-list findings are advisory unless --verify-allow-list is set.
     # An unresolved check outranks a stale one: enforcement that silently
     # degrades to "pass" when the network is down is worse than useless.
-    if allow_list is not None and config.allow_list.verify:
-        if allow_list.unresolved:
-            codes.append(exit_codes.ALLOW_LIST_UNRESOLVED)
-        elif allow_list.unsuppressed:
-            codes.append(exit_codes.ALLOW_LIST_STALE)
+    if allow_list is not None:
+        if allow_list.fixed_count:
+            # Files changed on disk, so the caller must notice, exactly as
+            # for the action-call fixer.
+            codes.append(exit_codes.DEFECTS_FOUND)
+        if config.allow_list.verify:
+            if allow_list.unresolved:
+                codes.append(exit_codes.ALLOW_LIST_UNRESOLVED)
+            elif allow_list.outstanding:
+                # Anything remediation already rewrote is no longer a
+                # problem, so only what remains can fail the run.
+                codes.append(exit_codes.ALLOW_LIST_STALE)
 
     return exit_codes.combine(*codes) if codes else exit_codes.SUCCESS
 

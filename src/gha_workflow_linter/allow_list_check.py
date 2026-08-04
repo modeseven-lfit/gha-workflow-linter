@@ -226,6 +226,8 @@ class AllowListOutcome:
         checked: ``False`` when the check was disabled or no pin was
             found, so no conclusion may be drawn from an empty
             ``findings``.
+        fixed_lines: ``(file path, line number)`` pairs that remediation
+            rewrote on disk. Empty unless ``--update-allow-list`` ran.
     """
 
     findings: list[AllowListFinding]
@@ -233,6 +235,9 @@ class AllowListOutcome:
     unresolved: dict[str, str]
     suppressed_count: int
     checked: bool
+    fixed_lines: frozenset[tuple[str, int]] = dataclasses.field(
+        default_factory=frozenset
+    )
 
     @property
     def resolved(self) -> bool:
@@ -252,6 +257,48 @@ class AllowListOutcome:
             order.
         """
         return [finding for finding in self.findings if not finding.suppressed]
+
+    @property
+    def outstanding(self) -> list[AllowListFinding]:
+        """Findings that still need attention after any remediation.
+
+        A finding whose line remediation rewrote is no longer a problem,
+        so it must not keep failing an enforcing run. Without this,
+        ``--update-allow-list --verify-allow-list`` would fix everything
+        and then report failure anyway.
+
+        Returns:
+            Unsuppressed findings whose line was not rewritten.
+        """
+        return [
+            finding
+            for finding in self.unsuppressed
+            if (str(finding.pin.file_path), finding.pin.line_number)
+            not in self.fixed_lines
+        ]
+
+    @property
+    def fixed_count(self) -> int:
+        """How many pins remediation rewrote.
+
+        Returns:
+            The number of rewritten lines.
+        """
+        return len(self.fixed_lines)
+
+    def was_fixed(self, finding: AllowListFinding) -> bool:
+        """Report whether remediation rewrote this finding's line.
+
+        Args:
+            finding: The finding to test.
+
+        Returns:
+            True when the line was rewritten on disk.
+        """
+        return (
+            str(finding.pin.file_path),
+            finding.pin.line_number,
+        ) in self.fixed_lines
 
 
 def host_key(pin: AllowListPin) -> str:

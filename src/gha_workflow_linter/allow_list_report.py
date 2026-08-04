@@ -389,17 +389,18 @@ def render_text(
         )
 
 
-def _finding_json(finding: AllowListFinding, *, root: Path) -> dict[str, Any]:
+def _finding_json(
+    finding: AllowListFinding, *, root: Path, fixed: bool
+) -> dict[str, Any]:
     """Render one finding as a JSON object.
 
     Args:
         finding: The finding to render.
         root: Base for the relative ``file`` path.
+        fixed: Whether remediation rewrote this finding's line.
 
     Returns:
-        The finding object of design section 9.4. ``fixed`` is always
-        ``False`` here: remediation is a separate phase, and the fixer
-        rewrites this field when it runs.
+        The finding object of design section 9.4.
     """
     return {
         "file": _relative(finding.pin.file_path, root),
@@ -411,7 +412,7 @@ def _finding_json(finding: AllowListFinding, *, root: Path) -> dict[str, Any]:
         "target_sha": finding.target_sha,
         "target_version": finding.target_version,
         "suppressed": finding.suppressed,
-        "fixed": False,
+        "fixed": fixed,
     }
 
 
@@ -437,7 +438,7 @@ def _summary_json(outcome: AllowListOutcome) -> dict[str, int]:
         counts[finding.kind.value] = counts.get(finding.kind.value, 0) + 1
 
     counts["suppressed"] = outcome.suppressed_count
-    counts["fixed"] = 0
+    counts["fixed"] = outcome.fixed_count
     return counts
 
 
@@ -473,7 +474,9 @@ def build_json(outcome: AllowListOutcome, *, root: Path) -> dict[str, Any]:
             },
             "unresolved": dict(outcome.unresolved),
             "findings": [
-                _finding_json(finding, root=root)
+                _finding_json(
+                    finding, root=root, fixed=outcome.was_fixed(finding)
+                )
                 for finding in outcome.findings
             ],
             "summary": _summary_json(outcome),
