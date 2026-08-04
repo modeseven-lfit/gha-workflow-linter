@@ -12,13 +12,20 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+    from typing import TypeAlias
 
     from rich.progress import Progress, TaskID
+
+    AutoFixResult: TypeAlias = tuple[
+        dict[Path, list[dict[str, str]]],
+        dict[str, int],
+        dict[str, list[dict[str, Any]]],
+    ]
 
 import pytest
 from typer.testing import CliRunner
@@ -127,6 +134,105 @@ def stub_validator_class(
             return validate(action_calls)
 
     return StubValidator
+
+
+def stub_auto_fixer_class(
+    fix: Callable[
+        [list[ValidationError], dict[Path, dict[int, ActionCall]], bool],
+        AutoFixResult,
+    ],
+) -> type[AutoFixer]:
+    """Build an auto-fixer class whose fixing step is replaced.
+
+    ``cli.py`` does ``from .auto_fix import AutoFixer`` at import time,
+    so patching ``gha_workflow_linter.auto_fix``'s attribute has no
+    effect on the CLI: the name has to be replaced where it is looked
+    up, ``gha_workflow_linter.cli.AutoFixer``. Left unpatched, the real
+    fixer runs, queries github.com and rewrites the workflow files the
+    test just wrote.
+
+    Subclassing the real fixer, rather than substituting a bare mock,
+    keeps construction and the async context manager genuine. Both are
+    inert -- they build an HTTP client and a Git client but issue no
+    request -- so the CLI's real setup and teardown path is exercised
+    while the one method that reaches the network is replaced.
+
+    The stub writes nothing to disk. The fixes it returns describe what
+    a real run would have rewritten, so callers must assert on what the
+    CLI does with them rather than on file contents; the rewriting
+    itself is covered by the tests that drive the real
+    :class:`AutoFixer` directly.
+
+    Args:
+        fix: Callable invoked with the validation errors, the scanner's
+            action calls and the ``check_for_updates`` flag, returning
+            the ``(fixes_by_file, redirect_stats,
+            stale_actions_summary)`` triple the CLI should see.
+
+    Returns:
+        A drop-in replacement for ``AutoFixer`` that performs no network
+        access and leaves the working tree untouched.
+    """
+
+    class StubAutoFixer(AutoFixer):
+        """Fixer reporting pre-computed changes, without network use."""
+
+        async def fix_validation_errors(
+            self,
+            errors: list[ValidationError],
+            all_action_calls: dict[Path, dict[int, ActionCall]],
+            check_for_updates: bool = False,
+        ) -> AutoFixResult:
+            """Return the fixes supplied by the enclosing factory."""
+            return fix(errors, all_action_calls, check_for_updates)
+
+    return StubAutoFixer
+
+
+class RecordedAutoFix:
+    """Auto-fix stub that records how the CLI invoked it.
+
+    A stubbed fixer writes nothing, and under ``--format json`` (which
+    forces quiet mode) the report of applied fixes is suppressed too, so
+    asserting on file contents or on the printed diff would only test
+    the stub. What remains genuinely observable is the exit code and the
+    arguments the CLI assembled for the fixer: which errors it
+    forwarded, which action calls it offered for update, and whether it
+    asked for latest versions. Recording those keeps the assertions on
+    production behaviour, and ``called`` fails loudly if the patch ever
+    stops taking effect.
+    """
+
+    def __init__(self, result: AutoFixResult) -> None:
+        """Store the triple to hand back when the CLI calls the fixer.
+
+        Args:
+            result: The ``(fixes_by_file, redirect_stats,
+                stale_actions_summary)`` triple to return.
+        """
+        self.result = result
+        self.called = False
+        self.errors: list[ValidationError] = []
+        self.action_calls: dict[Path, dict[int, ActionCall]] = {}
+        self.check_for_updates = False
+
+    @property
+    def action_call_count(self) -> int:
+        """Total number of action calls offered to the fixer."""
+        return sum(len(calls) for calls in self.action_calls.values())
+
+    def __call__(
+        self,
+        errors: list[ValidationError],
+        action_calls: dict[Path, dict[int, ActionCall]],
+        check_for_updates: bool,
+    ) -> AutoFixResult:
+        """Record the CLI's arguments and return the stored result."""
+        self.called = True
+        self.errors = errors
+        self.action_calls = action_calls
+        self.check_for_updates = check_for_updates
+        return self.result
 
 
 def iter_calls(
@@ -638,56 +744,59 @@ jobs:
             return errors
 
         # Mock git operations and the auto-fixer for this CLI test
+        # Report a fix for every flagged call, as a real --auto-latest
+        # run would. Line numbers match the ``uses:`` lines of the
+        # fixture, not the ``- name:`` lines above them.
+        expected_fixes: dict[Path, list[dict[str, str]]] = {
+            workflow_file: [
+                {
+                    "line_number": "10",
+                    "old_line": "uses: actions/checkout@invalid-branch",
+                    "new_line": "uses: actions/checkout@abc123",
+                },
+                {
+                    "line_number": "13",
+                    "old_line": "uses: actions/checkout@master",
+                    "new_line": "uses: actions/checkout@def456",
+                },
+                {
+                    "line_number": "16",
+                    "old_line": "uses: actions/setup-python@v4",
+                    "new_line": "uses: actions/setup-python@ghi789",
+                },
+                {
+                    "line_number": "19",
+                    "old_line": "uses: actions/setup-node@v3.8.1",
+                    "new_line": "uses: actions/setup-node@jkl012",
+                },
+                {
+                    "line_number": "22",
+                    "old_line": "uses: actions/upload-artifact@v2",
+                    "new_line": "uses: actions/upload-artifact@mno345",
+                },
+            ]
+        }
+        auto_fix = RecordedAutoFix(
+            (expected_fixes, {"actions_moved": 0, "calls_updated": 0}, {})
+        )
+
         with (
             patch(
                 "gha_workflow_linter.cli.ActionCallValidator",
                 stub_validator_class(mock_validate_calls),
             ),
             patch(
-                "gha_workflow_linter.auto_fix.AutoFixer"
-            ) as mock_auto_fixer_class,
+                "gha_workflow_linter.cli.AutoFixer",
+                stub_auto_fixer_class(auto_fix),
+            ),
         ):
-            mock_auto_fixer = AsyncMock()
-            mock_auto_fixer_class.return_value.__aenter__.return_value = (
-                mock_auto_fixer
-            )
-
-            # Mock that it fixes all 5 issues
-            mock_auto_fixer.fix_validation_errors.return_value = (
-                {
-                    workflow_file: [
-                        {
-                            "line_number": "9",
-                            "old_line": "uses: actions/checkout@invalid-branch",
-                            "new_line": "uses: actions/checkout@abc123",
-                        },
-                        {
-                            "line_number": "12",
-                            "old_line": "uses: actions/checkout@master",
-                            "new_line": "uses: actions/checkout@def456",
-                        },
-                        {
-                            "line_number": "15",
-                            "old_line": "uses: actions/setup-python@v4",
-                            "new_line": "uses: actions/setup-python@ghi789",
-                        },
-                        {
-                            "line_number": "18",
-                            "old_line": "uses: actions/setup-node@v3.8.1",
-                            "new_line": "uses: actions/setup-node@jkl012",
-                        },
-                        {
-                            "line_number": "21",
-                            "old_line": "uses: actions/upload-artifact@v2",
-                            "new_line": "uses: actions/upload-artifact@mno345",
-                        },
-                    ]
-                },
-                {"actions_moved": 0, "calls_updated": 0},
-                {},
-            )
-
-            # Run CLI with require-pinned-sha (default is True)
+            # Run CLI with require-pinned-sha (default is True).
+            # --no-fail-on-error isolates the exit code to the fixer:
+            # the run can then only fail because the tree changed, so
+            # the exit code below tests that the CLI acted on the fixes
+            # it was handed. That validation errors alone also fail a
+            # run is covered by
+            # ``test_error_count_summary_with_pinned_sha_required``.
             result = runner.invoke(
                 app,
                 [
@@ -695,6 +804,7 @@ jobs:
                     str(temp_dir),
                     "--auto-fix",
                     "--auto-latest",
+                    "--no-fail-on-error",
                     "--validation-method",
                     "git",
                     "--format",
@@ -709,8 +819,19 @@ jobs:
             output_data = parse_json_output(result.stdout)
             assert output_data["validation_summary"]["total_errors"] == 5
 
-            # Verify the file was actually modified
-            assert workflow_file.read_text() != workflow_with_mixed_references
+            # With require_pinned_sha=True every non-SHA reference is an
+            # error, so all five reach the fixer, and --auto-latest asks
+            # it to move them to the latest versions.
+            assert auto_fix.called
+            assert len(auto_fix.errors) == 5
+            assert auto_fix.action_call_count == 5
+            assert auto_fix.check_for_updates is True
+
+            # The fixer is stubbed, so the workflow on disk is untouched:
+            # rewriting is covered by
+            # ``test_auto_fix_with_pinned_sha_required``, which drives
+            # the real AutoFixer.
+            assert workflow_file.read_text() == workflow_with_mixed_references
 
     def test_cli_auto_fix_with_pinned_sha_not_required(
         self,
@@ -750,55 +871,52 @@ validation_method: git
                 if call.reference == "invalid-branch"
             ]
 
+        # With auto_latest enabled a real run fixes the invalid
+        # reference and updates the other four calls to their latest
+        # versions, so the fixer reports five changes for one file.
+        expected_fixes: dict[Path, list[dict[str, str]]] = {
+            workflow_file: [
+                {
+                    "line_number": "10",
+                    "old_line": "uses: actions/checkout@invalid-branch",
+                    "new_line": "uses: actions/checkout@abc123",
+                },
+                {
+                    "line_number": "13",
+                    "old_line": "uses: actions/checkout@master",
+                    "new_line": "uses: actions/checkout@def456",
+                },
+                {
+                    "line_number": "16",
+                    "old_line": "uses: actions/setup-python@v4",
+                    "new_line": "uses: actions/setup-python@ghi789",
+                },
+                {
+                    "line_number": "19",
+                    "old_line": "uses: actions/setup-node@v3.8.1",
+                    "new_line": "uses: actions/setup-node@jkl012",
+                },
+                {
+                    "line_number": "22",
+                    "old_line": "uses: actions/upload-artifact@v2",
+                    "new_line": "uses: actions/upload-artifact@mno345",
+                },
+            ]
+        }
+        auto_fix = RecordedAutoFix(
+            (expected_fixes, {"actions_moved": 0, "calls_updated": 0}, {})
+        )
+
         with (
             patch(
                 "gha_workflow_linter.cli.ActionCallValidator",
                 stub_validator_class(mock_validate_calls),
             ),
             patch(
-                "gha_workflow_linter.auto_fix.AutoFixer"
-            ) as mock_auto_fixer_class,
+                "gha_workflow_linter.cli.AutoFixer",
+                stub_auto_fixer_class(auto_fix),
+            ),
         ):
-            mock_auto_fixer = AsyncMock()
-            mock_auto_fixer_class.return_value.__aenter__.return_value = (
-                mock_auto_fixer
-            )
-
-            # Mock that it fixes all 5 issues (1 invalid ref + 4 version updates due to auto_latest)
-            mock_auto_fixer.fix_validation_errors.return_value = (
-                {
-                    workflow_file: [
-                        {
-                            "line_number": "9",
-                            "old_line": "uses: actions/checkout@invalid-branch",
-                            "new_line": "uses: actions/checkout@abc123",
-                        },
-                        {
-                            "line_number": "12",
-                            "old_line": "uses: actions/checkout@master",
-                            "new_line": "uses: actions/checkout@def456",
-                        },
-                        {
-                            "line_number": "15",
-                            "old_line": "uses: actions/setup-python@v4",
-                            "new_line": "uses: actions/setup-python@ghi789",
-                        },
-                        {
-                            "line_number": "18",
-                            "old_line": "uses: actions/setup-node@v3.8.1",
-                            "new_line": "uses: actions/setup-node@jkl012",
-                        },
-                        {
-                            "line_number": "21",
-                            "old_line": "uses: actions/upload-artifact@v2",
-                            "new_line": "uses: actions/upload-artifact@mno345",
-                        },
-                    ]
-                },
-                {"actions_moved": 0, "calls_updated": 0},
-                {},
-            )
-
             result = runner.invoke(
                 app,
                 [
@@ -806,23 +924,33 @@ validation_method: git
                     str(temp_dir),
                     "--config",
                     str(config_file),
+                    "--no-fail-on-error",
                     "--format",
                     "json",
                 ],
             )
 
-            # Should complete successfully
-            if result.exit_code in (0, 1):
-                # Parse JSON output for structured validation
-                output_data = parse_json_output(result.stdout)
-                # Only 1 validation error (require_pinned_sha=False, so tags/branches are valid)
-                # But auto_latest=True updates all actions to latest versions
-                assert output_data["validation_summary"]["total_errors"] >= 1
+            # --no-fail-on-error leaves the auto-fixer as the only
+            # source of a non-zero exit code, so this asserts that the
+            # CLI acted on the five fixes it was handed.
+            assert result.exit_code == 1
 
-                # Verify the file was modified
-                assert (
-                    workflow_file.read_text() != workflow_with_mixed_references
-                )
+            # Parse JSON output for structured validation
+            output_data = parse_json_output(result.stdout)
+            # Only 1 validation error (require_pinned_sha=False, so
+            # tags and branches are valid on their own).
+            assert output_data["validation_summary"]["total_errors"] == 1
+
+            # That single error is all the fixer is asked to repair, but
+            # auto_latest still offers it every action call in the tree
+            # so the remaining four can be moved to latest versions.
+            assert auto_fix.called
+            assert len(auto_fix.errors) == 1
+            assert auto_fix.action_call_count == 5
+            assert auto_fix.check_for_updates is True
+
+            # The fixer is stubbed, so nothing is rewritten on disk.
+            assert workflow_file.read_text() == workflow_with_mixed_references
 
     def test_error_count_summary_with_pinned_sha_required(
         self,
@@ -869,25 +997,22 @@ validation_method: git
                         )
             return errors
 
+        # Nothing is fixable in this scenario: the test is about the
+        # error counts the validation summary reports.
+        auto_fix = RecordedAutoFix(
+            ({}, {"actions_moved": 0, "calls_updated": 0}, {})
+        )
+
         with (
             patch(
                 "gha_workflow_linter.cli.ActionCallValidator",
                 stub_validator_class(mock_validate_calls),
             ),
             patch(
-                "gha_workflow_linter.auto_fix.AutoFixer"
-            ) as mock_auto_fixer_class,
+                "gha_workflow_linter.cli.AutoFixer",
+                stub_auto_fixer_class(auto_fix),
+            ),
         ):
-            mock_auto_fixer = AsyncMock()
-            mock_auto_fixer_class.return_value.__aenter__.return_value = (
-                mock_auto_fixer
-            )
-            mock_auto_fixer.fix_validation_errors.return_value = (
-                {},
-                {"actions_moved": 0, "calls_updated": 0},
-                {},
-            )
-
             result = runner.invoke(
                 app,
                 [
@@ -901,16 +1026,24 @@ validation_method: git
                 ],
             )
 
-            if result.exit_code in (0, 1):
-                # Parse JSON output for structured validation
-                output_data = parse_json_output(result.stdout)
-                assert output_data["validation_summary"]["total_errors"] == 5
-                assert (
-                    output_data["validation_summary"]["invalid_references"] == 1
-                )
-                assert (
-                    output_data["validation_summary"]["not_pinned_to_sha"] == 4
-                )
+            # No fixes were applied, so the exit code comes from the
+            # five outstanding validation errors alone.
+            assert result.exit_code == 1
+
+            # Parse JSON output for structured validation
+            output_data = parse_json_output(result.stdout)
+            assert output_data["validation_summary"]["total_errors"] == 5
+            assert output_data["validation_summary"]["invalid_references"] == 1
+            assert output_data["validation_summary"]["not_pinned_to_sha"] == 4
+
+            # All five errors reach the fixer, but without --auto-latest
+            # it is not asked to chase newer versions.
+            assert auto_fix.called
+            assert len(auto_fix.errors) == 5
+            assert auto_fix.check_for_updates is False
+
+            # The fixer reported no changes, so the workflow is intact.
+            assert workflow_file.read_text() == workflow_with_mixed_references
 
     def test_error_count_summary_with_pinned_sha_not_required(
         self,
@@ -1335,25 +1468,21 @@ jobs:
                 and call.reference in ["v3", "v4"]
             ]
 
+        # The scenario is about what gets flagged, not about fixing.
+        auto_fix = RecordedAutoFix(
+            ({}, {"actions_moved": 0, "calls_updated": 0}, {})
+        )
+
         with (
             patch(
                 "gha_workflow_linter.cli.ActionCallValidator",
                 stub_validator_class(mock_validate_calls),
             ),
             patch(
-                "gha_workflow_linter.auto_fix.AutoFixer"
-            ) as mock_auto_fixer_class,
+                "gha_workflow_linter.cli.AutoFixer",
+                stub_auto_fixer_class(auto_fix),
+            ),
         ):
-            mock_auto_fixer = AsyncMock()
-            mock_auto_fixer_class.return_value.__aenter__.return_value = (
-                mock_auto_fixer
-            )
-            mock_auto_fixer.fix_validation_errors.return_value = (
-                {},
-                {"actions_moved": 0, "calls_updated": 0},
-                {},
-            )
-
             result = runner.invoke(
                 app,
                 [
@@ -1372,6 +1501,15 @@ jobs:
                 and "validation errors" in result.stdout
             )
             assert "2 actions not pinned to SHA" in result.stdout
+            # Only the two action calls are errors; the fixer is still
+            # offered the remote reusable workflow call so --auto-latest
+            # could update it, but never the local ``./`` call.
+            assert auto_fix.called
+            assert len(auto_fix.errors) == 2
+            assert auto_fix.action_call_count == 3
+            # The fixer reported no changes, so the workflow is intact,
+            # reusable and local calls included.
+            assert workflow_file.read_text() == workflow_content
 
     def test_auto_fix_with_large_workflow_file(self, temp_dir: Path) -> None:
         """Test auto-fix performance with large workflow files."""
@@ -1411,25 +1549,21 @@ jobs:
                 for file_path, call in iter_calls(action_calls)
             ]
 
+        # The scenario is about scale, not about fixing.
+        auto_fix = RecordedAutoFix(
+            ({}, {"actions_moved": 0, "calls_updated": 0}, {})
+        )
+
         with (
             patch(
                 "gha_workflow_linter.cli.ActionCallValidator",
                 stub_validator_class(mock_validate_calls),
             ),
             patch(
-                "gha_workflow_linter.auto_fix.AutoFixer"
-            ) as mock_auto_fixer_class,
+                "gha_workflow_linter.cli.AutoFixer",
+                stub_auto_fixer_class(auto_fix),
+            ),
         ):
-            mock_auto_fixer = AsyncMock()
-            mock_auto_fixer_class.return_value.__aenter__.return_value = (
-                mock_auto_fixer
-            )
-            mock_auto_fixer.fix_validation_errors.return_value = (
-                {},
-                {"actions_moved": 0, "calls_updated": 0},
-                {},
-            )
-
             result = runner.invoke(
                 app,
                 [
@@ -1448,6 +1582,13 @@ jobs:
                 and "validation errors" in result.stdout
             )
             assert "50 actions not pinned to SHA" in result.stdout
+            # Every one of the 50 calls is carried through to the fixer
+            # in a single batch.
+            assert auto_fix.called
+            assert len(auto_fix.errors) == 50
+            assert auto_fix.action_call_count == 50
+            # The fixer reported no changes, so the workflow is intact.
+            assert workflow_file.read_text() == workflow_content
 
     def test_auto_fix_with_syntax_errors(self, temp_dir: Path) -> None:
         """Test auto-fix behavior with workflows that have YAML syntax errors."""
@@ -1629,38 +1770,31 @@ jobs:
                 for file_path, call in iter_calls(action_calls)
             ]
 
+        # Mock fixes for all files
+        expected_fixes: dict[Path, list[dict[str, str]]] = {
+            workflow_dir / "test.yaml": [
+                {
+                    "line_number": "7",
+                    "old_line": "uses: actions/checkout@v3",
+                    "new_line": "uses: actions/checkout@sha123",
+                }
+            ]
+            for workflow_dir in dirs
+        }
+        auto_fix = RecordedAutoFix(
+            (expected_fixes, {"actions_moved": 0, "calls_updated": 0}, {})
+        )
+
         with (
             patch(
                 "gha_workflow_linter.cli.ActionCallValidator",
                 stub_validator_class(mock_validate_calls),
             ),
             patch(
-                "gha_workflow_linter.auto_fix.AutoFixer"
-            ) as mock_auto_fixer_class,
+                "gha_workflow_linter.cli.AutoFixer",
+                stub_auto_fixer_class(auto_fix),
+            ),
         ):
-            mock_auto_fixer = AsyncMock()
-            mock_auto_fixer_class.return_value.__aenter__.return_value = (
-                mock_auto_fixer
-            )
-
-            # Mock fixes for all files
-            fixed_files = {}
-            for workflow_dir in dirs:
-                workflow_file = workflow_dir / "test.yaml"
-                fixed_files[workflow_file] = [
-                    {
-                        "line_number": "7",
-                        "old_line": "uses: actions/checkout@v3",
-                        "new_line": "uses: actions/checkout@sha123",
-                    }
-                ]
-
-            mock_auto_fixer.fix_validation_errors.return_value = (
-                fixed_files,
-                {"actions_moved": 0, "calls_updated": 0},
-                {},
-            )
-
             result = runner.invoke(
                 app,
                 [
@@ -1681,6 +1815,17 @@ jobs:
             )
             assert "Updated 3 workflow call(s) in 3 file(s)" in result.stdout
             assert result.exit_code == 1
+            # One call per directory reaches the fixer, so the count
+            # above cannot come from one file being scanned three times.
+            assert auto_fix.called
+            assert len(auto_fix.errors) == 3
+            assert set(auto_fix.action_calls) == set(expected_fixes)
+            # Every workflow directory is named in the report.
+            for workflow_path in expected_fixes:
+                assert str(workflow_path.relative_to(temp_dir)) in result.stdout
+                # The fixer is stubbed and writes nothing, so the
+                # original references survive on disk.
+                assert "actions/checkout@v3" in workflow_path.read_text()
 
 
 class TestYAMLStructurePreservation:

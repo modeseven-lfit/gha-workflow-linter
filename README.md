@@ -378,6 +378,23 @@ then the `upstream` git remote, then `origin`. Contributors working from
 a personal fork should pass `--allow-list-org` explicitly, since `origin`
 would otherwise resolve to a `.github` repository that does not exist.
 
+### What Gets Scanned
+
+The linter walks the tree below the path you give it, collecting
+`.github/workflows/*.y{a,}ml` at any depth plus `action.y{a,}ml` files.
+
+Scanning **stops at nested repository boundaries**. Git worktrees,
+submodules and vendored clones each place a `.git` entry at their own
+root, and anything beneath one belongs to a different repository, or to
+a second checkout of this one. A repository that keeps worktrees under
+`.worktrees/` would otherwise report every finding once per checked-out
+branch, against files the working tree does not contain.
+
+The scan root itself never counts as a boundary, so pointing the linter
+at a worktree scans that worktree. Pointing it at a directory that
+merely *contains* repositories finds nothing, since each child is a
+boundary.
+
 ### As a Pre-commit Hook
 
 Add to your `.pre-commit-config.yaml`:
