@@ -1,0 +1,42 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+# yamllint disable rule:line-length
+
+# Every quoting style and both comment positions, one step each.
+name: Comment positions
+
+on:
+  workflow_dispatch:
+
+jobs:
+  quoting:
+    runs-on: ubuntu-24.04
+    steps:
+      # Single quotes, version in a YAML comment outside them (form A).
+      - uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          config: '@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1
+
+      # Double quotes, version inside them (form B).
+      - uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          config: "@8f4f0cf83e6a015957e83261ed379fd811fc060e # v0.5.1"
+
+      # Unquoted, no comment at all.
+      - uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          config: lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@bf6642f68d58c1b81bbe993e676d6cc339ac3654
+
+      # Both positions at once. The in-scalar comment is the one the
+      # action itself sees, so it wins.
+      - uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          config: '@8f4f0cf83e6a015957e83261ed379fd811fc060e # v0.5.1'  # v0.2.1
+
+      # A folded block scalar spans several lines: recorded, but never
+      # rewritten.
+      - uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          config: >-
+            lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@bf6642f68d58c1b81bbe993e676d6cc339ac3654

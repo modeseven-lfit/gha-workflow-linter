@@ -13,11 +13,12 @@ about the same repository state.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from gha_workflow_linter import exit_codes
+from gha_workflow_linter.allow_list_scanner import CommentPosition, QuoteStyle
 from gha_workflow_linter.cli import (
     _AutoFixOutcome,
     _determine_exit_code,
@@ -37,6 +38,9 @@ from gha_workflow_linter.models import (
     result_category,
 )
 from gha_workflow_linter.validator import ActionCallValidator
+
+if TYPE_CHECKING:
+    from gha_workflow_linter.allow_list_check import AllowListOutcome
 
 
 class TestExitCodeConstants:
@@ -247,13 +251,26 @@ def _autofix(
     )
 
 
+def _exit_code(
+    options: CLIOptions,
+    validation: _ValidationOutcome,
+    autofix: _AutoFixOutcome,
+    allow_list: AllowListOutcome | None = None,
+    config: Config | None = None,
+) -> int:
+    """Call _determine_exit_code with a default configuration."""
+    return _determine_exit_code(
+        options, validation, autofix, config or Config(), allow_list
+    )
+
+
 class TestDetermineExitCode:
     def test_clean_run(self) -> None:
-        code = _determine_exit_code(_options(), _validation(), _autofix())
+        code = _exit_code(_options(), _validation(), _autofix())
         assert code == exit_codes.SUCCESS
 
     def test_validation_errors_fail(self) -> None:
-        code = _determine_exit_code(
+        code = _exit_code(
             _options(),
             _validation([_validation_error()]),
             _autofix(),
@@ -261,7 +278,7 @@ class TestDetermineExitCode:
         assert code == exit_codes.DEFECTS_FOUND
 
     def test_no_fail_on_error_suppresses_defects(self) -> None:
-        code = _determine_exit_code(
+        code = _exit_code(
             _options(fail_on_error=False),
             _validation([_validation_error()]),
             _autofix(),
@@ -269,7 +286,7 @@ class TestDetermineExitCode:
         assert code == exit_codes.SUCCESS
 
     def test_test_references_do_not_fail(self) -> None:
-        code = _determine_exit_code(
+        code = _exit_code(
             _options(),
             _validation([_validation_error(comment="# v4 testing")]),
             _autofix(),
@@ -282,7 +299,7 @@ class TestDetermineExitCode:
                 {"line_number": "1", "old_line": "x", "new_line": "y"}
             ]
         }
-        code = _determine_exit_code(
+        code = _exit_code(
             _options(),
             _validation(),
             _autofix(fixed_files=fixed),
@@ -291,7 +308,7 @@ class TestDetermineExitCode:
 
     def test_skipped_only_fixes_do_not_fail(self) -> None:
         fixed = {Path("a.yaml"): [{"line_number": "1", "skipped": "true"}]}
-        code = _determine_exit_code(
+        code = _exit_code(
             _options(),
             _validation(),
             _autofix(fixed_files=fixed),
@@ -305,7 +322,7 @@ class TestOutdatedActions:
     STALE = {"build.yaml": [{"line": 3, "action": "actions/checkout"}]}
 
     def test_outdated_advisory_by_default(self) -> None:
-        code = _determine_exit_code(
+        code = _exit_code(
             _options(),
             _validation(),
             _autofix(stale=self.STALE),
@@ -313,7 +330,7 @@ class TestOutdatedActions:
         assert code == exit_codes.SUCCESS
 
     def test_outdated_fails_under_verify_actions(self) -> None:
-        code = _determine_exit_code(
+        code = _exit_code(
             _options(verify_actions=True),
             _validation(),
             _autofix(stale=self.STALE),
@@ -321,7 +338,7 @@ class TestOutdatedActions:
         assert code == exit_codes.ACTIONS_OUTDATED
 
     def test_verify_actions_clean(self) -> None:
-        code = _determine_exit_code(
+        code = _exit_code(
             _options(verify_actions=True),
             _validation(),
             _autofix(),
@@ -333,7 +350,7 @@ class TestOutdatedActions:
 
     def test_outdated_outranks_defects(self) -> None:
         """A specifically-requested condition is not masked by code 1."""
-        code = _determine_exit_code(
+        code = _exit_code(
             _options(verify_actions=True),
             _validation([_validation_error()]),
             _autofix(stale=self.STALE),
@@ -355,7 +372,7 @@ class TestPresentationDoesNotAffectExitCode:
 
     def test_defect_not_masked_by_outdated_actions(self) -> None:
         """The core bug: a real error alongside an outdated action."""
-        code = _determine_exit_code(
+        code = _exit_code(
             _options(),
             _validation([_validation_error()]),
             _autofix(stale=self.STALE),
@@ -368,7 +385,7 @@ class TestPresentationDoesNotAffectExitCode:
                 {"line_number": "1", "old_line": "x", "new_line": "y"}
             ]
         }
-        code = _determine_exit_code(
+        code = _exit_code(
             _options(),
             _validation(),
             _autofix(fixed_files=fixed, stale=self.STALE),
@@ -389,7 +406,7 @@ class TestPresentationDoesNotAffectExitCode:
         self, presentation: dict[str, object]
     ) -> None:
         """lint, --quiet and --format json must agree on the code."""
-        code = _determine_exit_code(
+        code = _exit_code(
             _options(**presentation),
             _validation([_validation_error()]),
             _autofix(stale=self.STALE),
@@ -408,9 +425,140 @@ class TestPresentationDoesNotAffectExitCode:
     def test_clean_run_agrees_across_presentation(
         self, presentation: dict[str, object]
     ) -> None:
-        code = _determine_exit_code(
+        code = _exit_code(
             _options(**presentation),
             _validation(),
             _autofix(stale=self.STALE),
         )
         assert code == exit_codes.SUCCESS
+
+
+def _allow_list_outcome(
+    *, unsuppressed: int = 0, unresolved: bool = False
+) -> AllowListOutcome:
+    """Build an outcome with the given failure shape."""
+    from gha_workflow_linter.allow_list_check import AllowListOutcome as _O
+
+    findings = [_stale_finding() for _ in range(unsuppressed)]
+    return _O(
+        findings=findings,
+        hosts={},
+        unresolved={"lfreleng-actions/.github": "no releases"}
+        if unresolved
+        else {},
+        suppressed_count=0,
+        checked=True,
+    )
+
+
+def _stale_finding() -> Any:
+    """A minimal unsuppressed STALE finding."""
+    from gha_workflow_linter.allow_list_check import AllowListFinding
+    from gha_workflow_linter.allow_list_scanner import AllowListPin
+    from gha_workflow_linter.allow_list_spec import resolve_spec
+    from gha_workflow_linter.models import AllowListFindingKind
+
+    pin = AllowListPin(
+        file_path=Path(".github/workflows/ci.yaml"),
+        line_number=1,
+        column=0,
+        key_path=("jobs", "b", "steps", "0", "with", "config"),
+        raw_line="        config: '@18d9c444'  # v0.1.1",
+        raw_value="@18d9c4446bea555d0783e850f6d295f844fe8f67",
+        quote_style=QuoteStyle.SINGLE,
+        comment_position=CommentPosition.YAML,
+        version_comment="v0.1.1",
+        directives=frozenset(),
+        suppressed_by=None,
+        suppression_reason=None,
+        spec=resolve_spec(
+            "@18d9c4446bea555d0783e850f6d295f844fe8f67",
+            workflow_org="lfreleng-actions",
+        ),
+        auto_fixable=True,
+    )
+    return AllowListFinding(
+        pin=pin,
+        kind=AllowListFindingKind.STALE,
+        severity=Severity.WARNING,
+        message="stale",
+        current_sha="18d9c4446bea555d0783e850f6d295f844fe8f67",
+        target_sha="bf6642f68d58c1b81bbe993e676d6cc339ac3654",
+        target_version="v0.12.2",
+        suppressed=False,
+    )
+
+
+class TestAllowListExitCodes:
+    """Allow-list findings are advisory unless --verify-allow-list."""
+
+    def test_stale_pins_advisory_by_default(self) -> None:
+        config = Config()
+        code = _exit_code(
+            _options(),
+            _validation(),
+            _autofix(),
+            _allow_list_outcome(unsuppressed=3),
+            config,
+        )
+        assert code == exit_codes.SUCCESS
+
+    def test_stale_pins_fail_under_verify(self) -> None:
+        config = Config()
+        config.allow_list.verify = True
+        code = _exit_code(
+            _options(),
+            _validation(),
+            _autofix(),
+            _allow_list_outcome(unsuppressed=3),
+            config,
+        )
+        assert code == exit_codes.ALLOW_LIST_STALE
+
+    def test_clean_run_under_verify(self) -> None:
+        config = Config()
+        config.allow_list.verify = True
+        code = _exit_code(
+            _options(),
+            _validation(),
+            _autofix(),
+            _allow_list_outcome(),
+            config,
+        )
+        assert code == exit_codes.SUCCESS
+
+    def test_unresolved_outranks_stale(self) -> None:
+        """An unresolved check must never look like a clean-or-stale result."""
+        config = Config()
+        config.allow_list.verify = True
+        code = _exit_code(
+            _options(),
+            _validation(),
+            _autofix(),
+            _allow_list_outcome(unsuppressed=3, unresolved=True),
+            config,
+        )
+        assert code == exit_codes.ALLOW_LIST_UNRESOLVED
+
+    def test_unresolved_advisory_without_verify(self) -> None:
+        code = _exit_code(
+            _options(),
+            _validation(),
+            _autofix(),
+            _allow_list_outcome(unresolved=True),
+            Config(),
+        )
+        assert code == exit_codes.SUCCESS
+
+    def test_stale_outranks_generic_defects(self) -> None:
+        """A specifically requested condition is not masked by code 1."""
+        config = Config()
+        config.allow_list.verify = True
+        code = _exit_code(
+            _options(),
+            _validation([_validation_error()]),
+            _autofix(),
+            _allow_list_outcome(unsuppressed=1),
+            config,
+        )
+        assert code == exit_codes.ALLOW_LIST_STALE

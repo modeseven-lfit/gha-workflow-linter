@@ -1,0 +1,49 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+# yamllint disable rule:line-length
+
+# The two suppression forms of design section 7.4, separately and
+# together, plus an unsuppressed pin for contrast.
+name: Suppression forms
+
+on:
+  workflow_dispatch:
+
+jobs:
+  suppressed:
+    runs-on: ubuntu-24.04
+    steps:
+      # Form 1: a directive on the immediately preceding line.
+      - uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          # gha-workflow-linter: allow-list-pin-ok -- waiting for a release
+          config: '@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1
+
+      # Form 2: an inline keyword after the version token.
+      - uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          config: '@8f4f0cf83e6a015957e83261ed379fd811fc060e'  # v0.5.1 allow-list-pin-ok -- upstream is broken
+
+      # Both forms at once: idempotent, not an error.
+      - uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          # gha-workflow-linter: allow-list-pin-ok -- preceding reason
+          config: '@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1 allow-list-pin-ok -- inline reason
+
+      # A directive carried by the in-scalar comment instead.
+      - uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          config: '@8f4f0cf83e6a015957e83261ed379fd811fc060e # v0.5.1 allow-list-pin-ok'
+
+      # A blank line between the directive and the pin breaks the bind.
+      - uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          # gha-workflow-linter: allow-list-pin-ok
+
+          config: '@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1
+
+      # No directive anywhere.
+      - uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          config: '@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1

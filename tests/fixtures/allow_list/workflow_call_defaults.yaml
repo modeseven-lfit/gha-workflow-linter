@@ -1,0 +1,45 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+# yamllint disable rule:line-length
+
+# Reusable-workflow input defaults, in the explicit path form. The bare
+# 'on:' key below is a YAML 1.1 boolean once constructed, which is the
+# gotcha the walker has to survive.
+#
+# 'audit_config' proves design section 5.4: a python-audit allow-list is
+# detected with no code change, no registry entry and a key name that
+# matches none of the recogniser's patterns. Only the conventional
+# filename in the path identifies it.
+name: Reusable workflow
+
+on:
+  workflow_call:
+    inputs:
+      harden_runner_allowlist:
+        description: 'Harden-runner egress allow-list coordinate'
+        required: false
+        type: string
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@bf6642f68d58c1b81bbe993e676d6cc339ac3654'  # v0.12.2
+      audit_config:
+        description: 'python-audit allow-list coordinate'
+        required: false
+        type: string
+        default: 'lfreleng-actions//.github/python-audit/lfreleng-actions/allow_list.txt@bf6642f68d58c1b81bbe993e676d6cc339ac3654'  # v0.12.2
+      # Parses as a spec (an org, taking every default) but names no
+      # allow-list file and sits under an unrecognised key: not a pin.
+      build_timeout:
+        required: false
+        type: string
+        default: '30'
+      # Fails the grammar outright: '.' is not valid in an org name.
+      python_version:
+        required: false
+        type: string
+        default: '3.11'
+
+jobs:
+  noop:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "nothing to do"

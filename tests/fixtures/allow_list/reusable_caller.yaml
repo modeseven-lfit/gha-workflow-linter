@@ -1,0 +1,26 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+# yamllint disable rule:line-length
+
+# A reusable-workflow caller. Location 3 puts the coordinate in the
+# job's own 'with:' block, under a key the workflow author chose.
+name: Caller workflow
+
+on:
+  push:
+
+jobs:
+  call:
+    uses: lfreleng-actions/.github/.github/workflows/reusable.yaml@bf6642f68d58c1b81bbe993e676d6cc339ac3654  # v0.12.2
+    with:
+      harden_runner_allowlist: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@bf6642f68d58c1b81bbe993e676d6cc339ac3654'  # v0.12.2
+      audit_level: 'moderate'
+
+  expression:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          # Resolved at run time, so there is nothing here to pin.
+          config: ${{ inputs.harden_runner_allowlist }}

@@ -102,6 +102,57 @@ def result_category(result: ValidationResult) -> Category | None:
     return _RESULT_CATEGORIES.get(result)
 
 
+class AllowListFindingKind(str, Enum):
+    """What is wrong with a detected allow-list pin.
+
+    ``STALE`` and ``UNPINNED`` are currency findings: the pin works, but
+    a newer allow-list exists. The remainder are defects that are wrong
+    now. Only currency findings may be silenced by an
+    ``allow-list-pin-ok`` directive, because that directive asserts "this
+    pin is deliberately at this version" -- a statement about currency,
+    not about correctness.
+    """
+
+    STALE = "stale"
+    UNPINNED = "unpinned"
+    COMMENT_MISMATCH = "comment_mismatch"
+    UNRESOLVABLE = "unresolvable"
+    INVALID_SPEC = "invalid_spec"
+
+
+#: Finding kinds an ``allow-list-pin-ok`` directive may silence. A pin
+#: whose comment lies, whose SHA does not exist, or whose spec is
+#: malformed is broken regardless of intent, so those are never
+#: suppressible.
+SUPPRESSIBLE_ALLOW_LIST_KINDS: frozenset[AllowListFindingKind] = frozenset(
+    {
+        AllowListFindingKind.STALE,
+        AllowListFindingKind.UNPINNED,
+    }
+)
+
+
+_ALLOW_LIST_CATEGORIES: dict[AllowListFindingKind, Category] = {
+    AllowListFindingKind.STALE: Category.CURRENCY,
+    AllowListFindingKind.UNPINNED: Category.CURRENCY,
+    AllowListFindingKind.COMMENT_MISMATCH: Category.DEFECT,
+    AllowListFindingKind.UNRESOLVABLE: Category.DEFECT,
+    AllowListFindingKind.INVALID_SPEC: Category.DEFECT,
+}
+
+
+def allow_list_category(kind: AllowListFindingKind) -> Category:
+    """Return the category of an allow-list finding kind.
+
+    Args:
+        kind: The finding kind to classify.
+
+    Returns:
+        The finding category.
+    """
+    return _ALLOW_LIST_CATEGORIES[kind]
+
+
 class ActionCallType(str, Enum):
     """Type of action call detected."""
 
@@ -433,6 +484,77 @@ class CacheConfig(BaseModel):
         return self.cache_dir / self.cache_file
 
 
+class AllowListConfig(BaseModel):
+    """Configuration for harden-runner allow-list pin checking.
+
+    Allow-list pins are an ``lfreleng-actions`` convention rather than
+    GitHub-native syntax, so the check is advisory by default: it reports
+    stale pins but never changes the exit code. ``verify`` opts in to
+    enforcement.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Detect harden-runner allow-list pins",
+    )
+    verify: bool = Field(
+        default=False,
+        description=(
+            "Treat stale allow-list pins as errors and exit with the "
+            "ALLOW_LIST_STALE status"
+        ),
+    )
+    update: bool = Field(
+        default=False,
+        description="Rewrite stale allow-list pins in place",
+    )
+    show_suppressed: bool = Field(
+        default=False,
+        description=(
+            "Report suppressed pins as notices. Never affects the exit code"
+        ),
+    )
+    org: str = Field(
+        default="",
+        description=(
+            "Workflow organisation used to resolve the '@<sha>' shorthand. "
+            "When empty the tool infers it from GITHUB_REPOSITORY_OWNER, "
+            "then the 'upstream' git remote, then 'origin'"
+        ),
+    )
+    filename: str = Field(
+        default="allow_list.txt",
+        description=(
+            "Conventional allow-list filename, used by the recogniser for "
+            "scalars whose key name gives no clue. There is deliberately no "
+            "per-consumer registry: every consumer shares one grammar, one "
+            "host repository, and one staleness condition"
+        ),
+    )
+    key_patterns: list[str] = Field(
+        default_factory=lambda: [
+            "*allow_list*",
+            "*allowlist*",
+            "*allow-list*",
+        ],
+        description=(
+            "Key-name patterns recognised as allow-list coordinates in "
+            "workflow_call input defaults and reusable-workflow 'with' blocks"
+        ),
+    )
+    extra_globs: list[str] = Field(
+        default_factory=lambda: [
+            "examples/**/*.yaml",
+            "examples/**/*.yml",
+        ],
+        description=(
+            "Extra globs scanned only by the allow-list checker. Example "
+            "caller workflows live outside .github/workflows and are "
+            "otherwise not discovered"
+        ),
+    )
+
+
 class Config(BaseModel):
     """Main configuration model."""
 
@@ -508,6 +630,10 @@ class Config(BaseModel):
     cache: CacheConfig = Field(
         default_factory=CacheConfig,
         description="Cache configuration",
+    )
+    allow_list: AllowListConfig = Field(
+        default_factory=AllowListConfig,
+        description="Allow-list pin checking configuration",
     )
 
     @property
@@ -593,6 +719,25 @@ class CLIOptions(BaseModel):
             "Treat outdated action calls as errors and exit with the "
             "ACTIONS_OUTDATED status"
         ),
+    )
+    allow_list: bool | None = Field(
+        default=None, description="Enable allow-list pin detection"
+    )
+    verify_allow_list: bool = Field(
+        default=False,
+        description="Treat stale allow-list pins as errors",
+    )
+    update_allow_list: bool = Field(
+        default=False,
+        description="Rewrite stale allow-list pins in place",
+    )
+    show_suppressed: bool = Field(
+        default=False,
+        description="Report suppressed allow-list pins as notices",
+    )
+    allow_list_org: str | None = Field(
+        default=None,
+        description="Workflow organisation for '@<sha>' shorthand resolution",
     )
 
     @field_validator("output_format")

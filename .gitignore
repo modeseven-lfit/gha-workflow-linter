@@ -60,3 +60,6 @@ MANIFEST
 
 # Node
 node_modules/*
+
+# aislop scan history (generated per-run, machine-local)
+.aislop/history.jsonl

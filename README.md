@@ -268,6 +268,104 @@ latest release remains inside the window.
 > release dates, so the linter skips candidates it cannot date while a
 > cooldown applies.
 
+### Allow-List Pin Checking
+
+The `lfreleng-actions` organisation pins its
+[`step-security/harden-runner`](https://github.com/step-security/harden-runner)
+egress allow-list using a custom `uses:`-style coordinate consumed by
+[`harden-runner-block-action`][hrba]:
+
+[hrba]: https://github.com/lfreleng-actions/harden-runner-block-action
+
+<!-- markdownlint-disable MD013 -->
+
+```yaml
+# Internal workflow, shorthand form
+- uses: lfreleng-actions/harden-runner-block-action@6db537b3...  # v0.2.1
+  with:
+    config: '@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1
+
+# Reusable-workflow input default, explicit path form
+harden_runner_allowlist:
+  type: string
+  default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@bf6642f6...'  # v0.12.2
+```
+
+<!-- markdownlint-enable MD013 -->
+
+These are values of `config:` and `default:` keys, **not** `uses:`
+references, so Dependabot cannot see or bump them. They drift without
+warning, and a stale pin means a block-mode job lacks newly allow-listed
+endpoints, producing confusing `ECONNREFUSED` failures long after
+someone corrected the allow-list itself.
+
+The linter detects these pins, resolves the host repository's latest
+release (dereferencing the annotated tag to its commit), and reports
+pins that lag behind.
+
+```bash
+# Detect stale pins; reports them but never fails (the default)
+gha-workflow-linter lint
+
+# Fail the run when stale pins remain
+gha-workflow-linter lint --verify-allow-list
+
+# Skip the check entirely
+gha-workflow-linter lint --no-allow-list
+
+# Show pins silenced by a suppression directive
+gha-workflow-linter lint --show-suppressed
+```
+
+This check follows an `lfreleng-actions` convention rather than
+GitHub-native validation, so it stays **advisory by default**: the
+linter reports findings as warnings and leaves the exit code alone.
+Enforcement is opt-in via `--verify-allow-list`. When the linter cannot
+resolve the latest release (no token, no network, rate limited), the
+default mode prints a notice and carries on; under
+`--verify-allow-list` it exits `4` instead of passing.
+
+A pin counts as stale when the target is newer, and not otherwise.
+It leaves a repository already ahead of the cooldown-eligible release
+alone, so a cooldown never recommends a downgrade.
+
+#### Suppressing a deliberate pin
+
+A repository may hold a pin at an older version on purpose. The linter
+accepts either of two forms:
+
+<!-- markdownlint-disable MD013 -->
+
+```yaml
+    # gha-workflow-linter: allow-list-pin-ok -- waiting on ONAP rollout
+    config: '@8f4f0cf83e6a015957e83261ed379fd811fc060e'  # v0.5.1
+
+    config: '@8f4f0cf83e6a015957e83261ed379fd811fc060e'  # v0.5.1 allow-list-pin-ok
+```
+
+<!-- markdownlint-enable MD013 -->
+
+The preceding-line form must sit on the line directly above the pin, at
+any indentation. An optional reason may follow ` -- ` and appears in
+reports. Both forms stay inert at run time: the action never sees them.
+
+The linter excludes a suppressed pin from both reporting and
+enforcement, but still lists it under `--format json` with
+`"suppressed": true`, and every run prints a one-line count so
+suppressions stay visible.
+
+Suppression covers **currency** and nothing else. A pin whose version comment
+disagrees with its SHA, or whose spec breaks the grammar, counts as a
+defect regardless of intent and stays reported.
+
+#### Resolving the organisation
+
+The `@<sha>` shorthand resolves its host organisation from the workflow's
+own organisation. The linter infers this from `GITHUB_REPOSITORY_OWNER`,
+then the `upstream` git remote, then `origin`. Contributors working from
+a personal fork should pass `--allow-list-org` explicitly, since `origin`
+would otherwise resolve to a `.github` repository that does not exist.
+
 ### As a Pre-commit Hook
 
 Add to your `.pre-commit-config.yaml`:
