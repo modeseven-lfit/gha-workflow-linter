@@ -49,6 +49,7 @@ from gha_workflow_linter.allow_list_scanner import (
 from gha_workflow_linter.allow_list_spec import SpecError, resolve_spec
 from gha_workflow_linter.cache import ValidationCache
 from gha_workflow_linter.directives import Directive, SuppressionSource
+from gha_workflow_linter.exceptions import ConfigurationError
 from gha_workflow_linter.latest_release import LatestRelease
 from gha_workflow_linter.models import (
     SUPPRESSIBLE_ALLOW_LIST_KINDS,
@@ -1131,3 +1132,62 @@ def _no_release_resolver() -> Any:
         return dict.fromkeys(repo_keys)
 
     return _resolve
+
+
+class TestConfiguredOrgIsValidated:
+    """An invalid explicit org must not silently disable the check.
+
+    resolve_workflow_org returned `configured` verbatim, and
+    resolve_spec validates the workflow org, so a typo made EVERY spec
+    raise and be skipped -- including explicit-path specs that do not
+    need the org at all. --verify-allow-list then passed with zero
+    findings: the third instance of enforcement degrading to "pass".
+    """
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "lfreleng--actions",  # consecutive hyphens
+            "-leading-hyphen",
+            "trailing-hyphen-",
+            "not a valid org!",
+            "a" * 40,  # over the 39-character limit
+        ],
+    )
+    def test_invalid_configured_org_is_rejected(
+        self, tmp_path: Path, bad: str
+    ) -> None:
+        with pytest.raises(ConfigurationError, match="Invalid allow-list"):
+            resolve_workflow_org(tmp_path, configured=bad)
+
+    def test_error_names_the_offending_value(self, tmp_path: Path) -> None:
+        with pytest.raises(ConfigurationError, match="lfreleng--actions"):
+            resolve_workflow_org(tmp_path, configured="lfreleng--actions")
+
+    @pytest.mark.parametrize(
+        "good", ["lfreleng-actions", "onap", "a", "a" * 39, "org123"]
+    )
+    def test_valid_configured_org_passes_through(
+        self, tmp_path: Path, good: str
+    ) -> None:
+        assert resolve_workflow_org(tmp_path, configured=good) == good
+
+    def test_surrounding_whitespace_tolerated(self, tmp_path: Path) -> None:
+        assert (
+            resolve_workflow_org(tmp_path, configured="  lfreleng-actions  ")
+            == "lfreleng-actions"
+        )
+
+    def test_invalid_inferred_org_falls_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An inferred value was never asked for, so it may be skipped.
+
+        This is the deliberate asymmetry: silently replacing an explicit
+        setting would check the wrong repository and report confidently
+        wrong results, but falling through an unusable inferred value is
+        exactly what the precedence chain is for.
+        """
+        monkeypatch.setenv(ORG_ENV_VAR, "not--valid")
+
+        assert resolve_workflow_org(tmp_path) == ""

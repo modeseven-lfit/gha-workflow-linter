@@ -1407,6 +1407,11 @@ def _run_allow_list_stage(
         if config.allow_list.update:
             outcome = _apply_allow_list_fixes(outcome, options)
         return outcome
+    except ConfigurationError:
+        # A bad setting is a usage error, not a transient failure. It
+        # must surface in advisory mode too, or a typo in
+        # --allow-list-org would silently disable the whole check.
+        raise
     except Exception as e:  # noqa: BLE001 - advisory unless enforcing
         logger.warning(f"Allow-list check failed: {e}")
         if not config.allow_list.verify:

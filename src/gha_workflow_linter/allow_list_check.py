@@ -79,6 +79,7 @@ from .allow_list_resolver import AllowListResolver
 from .allow_list_scanner import AllowListScanner
 from .allow_list_spec import ORG_RE
 from .directives import Directive
+from .exceptions import ConfigurationError
 from .models import (
     SUPPRESSIBLE_ALLOW_LIST_KINDS,
     AllowListFindingKind,
@@ -386,17 +387,29 @@ def resolve_workflow_org(root: Path, *, configured: str = "") -> str:
     Args:
         root: Directory of the repository being scanned. Used only for
             the Git remote probes.
-        configured: Explicit org from configuration. Returned verbatim
-            when non-empty, without validation, because an explicit
-            setting is a statement of intent.
+        configured: Explicit org from configuration or the
+            ``--allow-list-org`` flag.
 
     Returns:
         The org name, or ``""`` when it cannot be determined. An empty
-        result is not an error: the scanner then skips shorthand pins,
-        which is the documented behaviour of design section 6.4.
+        result is not an error: the caller reports it as an unresolved
+        check rather than a clean one.
+
+    Raises:
+        ConfigurationError: If ``configured`` is not a valid GitHub
+            organisation name. An explicit setting is a statement of
+            intent, so a typo is reported rather than quietly replaced
+            by an inferred value that would check the wrong repository.
     """
     explicit = configured.strip()
     if explicit:
+        if not ORG_RE.match(explicit):
+            raise ConfigurationError(
+                f"Invalid allow-list organisation: {explicit!r}. "
+                "GitHub organisation names are 1-39 characters of "
+                "letters, digits and single hyphens, and cannot start "
+                "or end with a hyphen"
+            )
         return explicit
 
     from_env = os.environ.get(ORG_ENV_VAR, "").strip()
@@ -408,7 +421,10 @@ def resolve_workflow_org(root: Path, *, configured: str = "") -> str:
         if not url:
             continue
         owner = _owner_from_remote_url(url)
-        if owner:
+        # An inferred value was never asked for by name, so an
+        # unusable one falls through to the next source rather than
+        # failing the run.
+        if owner and ORG_RE.match(owner):
             return owner
 
     return ""
