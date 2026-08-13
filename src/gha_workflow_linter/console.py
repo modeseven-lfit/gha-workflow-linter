@@ -23,4 +23,9 @@ from rich.console import Console
 
 console: Console = Console()
 
-__all__ = ["console"]
+#: Companion writing to standard error. Deprecation notices and similar
+#: out-of-band messages use this so ``--format json`` keeps standard
+#: output machine-readable.
+err_console: Console = Console(stderr=True)
+
+__all__ = ["console", "err_console"]

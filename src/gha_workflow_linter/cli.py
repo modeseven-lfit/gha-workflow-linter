@@ -49,7 +49,7 @@ from .allow_list_report import (
 from .auto_fix import AutoFixer
 from .cache import CachePrimeReport, ValidationCache
 from .config import ConfigManager
-from .console import console
+from .console import console, err_console
 from .dependabot import resolve_cooldown
 from .exceptions import (
     AuthenticationError,
@@ -426,8 +426,8 @@ def _apply_cli_overrides(
     # Apply auto-fix overrides (only if explicitly provided)
     if options.auto_fix is not None:
         config.auto_fix = options.auto_fix
-    if options.auto_latest is not None:
-        config.auto_latest = options.auto_latest
+    if options.update_actions is not None:
+        config.update_actions = options.update_actions
     if options.allow_prerelease is not None:
         config.allow_prerelease = options.allow_prerelease
     if options.two_space_comments is not None:
@@ -536,6 +536,44 @@ def _configure_validation_backend(
             raise
 
 
+def _resolve_update_actions(
+    update_actions: bool | None,
+    auto_latest: bool | None,
+    *,
+    quiet: bool,
+) -> bool | None:
+    """Combine the canonical flag with its deprecated predecessor.
+
+    ``--auto-latest`` was renamed to ``--update-actions`` once a second
+    updatable thing (the allow-list) existed and the old name stopped
+    saying which. The old spelling keeps working so scripts and CI
+    configurations do not break.
+
+    Args:
+        update_actions: Value of ``--update-actions``, or None.
+        auto_latest: Value of the deprecated ``--auto-latest``, or None.
+        quiet: Suppress the deprecation notice.
+
+    Returns:
+        The effective value, or None when neither flag was given.
+    """
+    if auto_latest is None:
+        return update_actions
+
+    if not quiet:
+        # stderr, never stdout: --format json must stay machine-readable.
+        err_console.print(
+            "[yellow]--auto-latest is deprecated; use --update-actions "
+            "⚠️[/yellow]"
+        )
+
+    if update_actions is not None:
+        # Both given: the canonical flag wins, so a script adding the new
+        # name to an existing invocation gets what it asked for.
+        return update_actions
+    return auto_latest
+
+
 @app.command()
 def lint(
     path: Path | None = typer.Argument(
@@ -636,10 +674,21 @@ def lint(
         "--auto-fix/--no-auto-fix",
         help="Automatically fix broken/invalid SHA pins, versions, and branches (default: enabled unless overridden in config)",
     ),
+    update_actions: bool | None = typer.Option(
+        None,
+        "--update-actions/--no-update-actions",
+        help=(
+            "When auto-fixing, update action calls to the latest release "
+            "(default: disabled unless overridden in config)"
+        ),
+    ),
     auto_latest: bool | None = typer.Option(
         None,
         "--auto-latest/--no-auto-latest",
-        help="When auto-fixing, use the latest version of actions (default: disabled unless overridden in config)",
+        help=(
+            "(deprecated) Former name for --update-actions. Still "
+            "honoured; will be removed in a future major release"
+        ),
     ),
     allow_prerelease: bool | None = typer.Option(
         None,
@@ -796,7 +845,7 @@ def lint(
         gha-workflow-linter lint --no-require-pinned-sha
 
         # Auto-fix issues without using latest versions
-        gha-workflow-linter lint --auto-fix --no-auto-latest
+        gha-workflow-linter lint --auto-fix --no-update-actions
 
         # Auto-fix with two-space comment formatting
         gha-workflow-linter lint --auto-fix --two-space-comments
@@ -805,7 +854,7 @@ def lint(
         gha-workflow-linter lint --auto-fix --fix-test-calls
 
         # Only update to releases at least 7 days old (supply-chain cooldown)
-        gha-workflow-linter lint --auto-fix --auto-latest --cooldown 7
+        gha-workflow-linter lint --auto-fix --update-actions --cooldown 7
 
         # Scan only specific files
         gha-workflow-linter lint --files .github/workflows/ci.yml
@@ -862,7 +911,9 @@ def lint(
             cache_ttl=cache_ttl,
             validation_method=validation_method,
             auto_fix=auto_fix,
-            auto_latest=auto_latest,
+            update_actions=_resolve_update_actions(
+                update_actions, auto_latest, quiet=quiet
+            ),
             allow_prerelease=allow_prerelease,
             two_space_comments=two_space_comments,
             skip_actions=skip_actions,
@@ -1198,7 +1249,7 @@ def _run_auto_fix_stage(
     # Determine if we should run auto-fix:
     # - If auto_fix is enabled, fix validation errors and check for outdated
     #   versions.
-    # - If auto_latest is also enabled, update to latest versions.
+    # - If update_actions is also enabled, update to latest versions.
     should_run_auto_fix = (config.auto_fix or not config.fix_test_calls) and (
         validation.validation_errors or config.auto_fix
     )
@@ -1220,11 +1271,11 @@ def _run_auto_fix_stage(
                 cache=shared_cache,
             ) as auto_fixer:
                 # When auto_fix is enabled, always pass all action calls to
-                # check. check_for_updates=True only when auto_latest is
+                # check. check_for_updates=True only when update_actions is
                 # enabled (update to latest versions); False means: fix
                 # validation errors, report outdated versions.
                 all_calls = validation.workflow_calls if config.auto_fix else {}
-                check_for_updates = config.auto_latest
+                check_for_updates = config.update_actions
                 return await auto_fixer.fix_validation_errors(
                     validation.validation_errors,
                     all_calls,
@@ -1674,7 +1725,7 @@ def run_linter(config: Config, options: CLIOptions) -> int:
     # depend on --quiet, which also gates this block).
     if (
         autofix.stale_actions_summary
-        and not config.auto_latest
+        and not config.update_actions
         and not options.quiet
     ):
         _display_stale_actions_from_summary(
@@ -1950,7 +2001,8 @@ def _display_stale_actions_from_summary(
         console.print()
 
     console.print(
-        "[cyan]Run with [bold]--auto-fix --auto-latest[/bold] to update these actions 💡[/cyan]\n"
+        "[cyan]Run with [bold]--auto-fix --update-actions[/bold] to update "
+        "these actions 💡[/cyan]\n"
     )
 
 

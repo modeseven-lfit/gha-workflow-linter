@@ -36,6 +36,7 @@ from gha_workflow_linter.models import (
     ValidationError,
     ValidationResult,
 )
+from tests.conftest import strip_ansi
 
 
 class TestCLICallbacks:
@@ -163,20 +164,20 @@ class TestCLICommands:
         """Test main app help."""
         result = self.runner.invoke(app, ["--help"])
         assert result.exit_code == 0
-        assert __version__ in result.stdout
+        assert __version__ in strip_ansi(result.stdout)
         assert "GitHub Actions workflow linter" in result.stdout
 
     def test_version_flag(self) -> None:
         """Test --version flag."""
         result = self.runner.invoke(app, ["--version"])
         assert result.exit_code == 0
-        assert __version__ in result.stdout
+        assert __version__ in strip_ansi(result.stdout)
 
     def test_lint_help(self) -> None:
         """Test lint command help."""
         result = self.runner.invoke(app, ["lint", "--help"])
         assert result.exit_code == 0
-        assert __version__ in result.stdout
+        assert __version__ in strip_ansi(result.stdout)
         assert "Scan GitHub Actions workflows" in result.stdout
 
     @patch("gha_workflow_linter.cli.ConfigManager")

@@ -5,6 +5,7 @@
 
 from collections.abc import Generator
 from pathlib import Path
+import re
 import tempfile
 
 import pytest
@@ -15,6 +16,30 @@ from gha_workflow_linter.models import (
     LogLevel,
     NetworkConfig,
 )
+
+_ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from console output.
+
+    Rich colours its output when it believes it is writing to a terminal,
+    and its highlighter puts the escape sequences *inside* values rather
+    than around them: ``1.3.0`` is emitted as
+    ``\\x1b[1;36m1.3\\x1b[0m.\\x1b[1;36m0\\x1b[0m``, and a number in a
+    sentence is styled the same way. An assertion against raw output
+    therefore tests the styling as much as the text, and passes or fails
+    depending on whether the run happens to have a terminal -- green
+    locally, red on CI, or the reverse once a version string changes
+    shape. Strip the sequences first so the assertion tests the text.
+
+    Args:
+        text: Console output, possibly containing escape sequences.
+
+    Returns:
+        The same text with escape sequences removed.
+    """
+    return _ANSI_ESCAPE_PATTERN.sub("", text)
 
 
 @pytest.fixture

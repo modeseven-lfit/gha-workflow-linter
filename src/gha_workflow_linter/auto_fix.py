@@ -20,6 +20,7 @@ from rich.text import Text
 from .auto_fix_versions import _VersionResolutionMixin
 from .cache import ValidationCache
 from .console import console as _shared_console
+from .file_edit import replace_lines
 from .git_validator import GitValidationClient
 from .github_api import GitHubGraphQLClient
 from .models import (
@@ -1084,12 +1085,12 @@ class AutoFixer(_VersionResolutionMixin):
     ) -> str:
         """Choose the reference to fix an action call to.
 
-        Uses the latest release/tag when ``auto_latest`` is set, otherwise
+        Uses the latest release/tag when ``update_actions`` is set, otherwise
         repairs an invalid reference (with a fallback), and finally falls
         back to the default branch. Non-fixable cases keep the current
         reference (e.g. NOT_PINNED_TO_SHA).
         """
-        if self.config.auto_latest:
+        if self.config.update_actions:
             # Use latest release/tag if available - use base repo
             target_ref = await self._get_latest_release_or_tag(base_repo_key)
             if not target_ref:
@@ -1227,30 +1228,55 @@ class AutoFixer(_VersionResolutionMixin):
     async def _apply_fixes_to_file(
         self, file_path: Path, line_fixes: dict[int, tuple[str, str]]
     ) -> list[dict[str, str]]:
-        """Apply fixes to a workflow file."""
+        """Rewrite a workflow file with the supplied line fixes.
+
+        The rewrite is delegated to
+        :func:`~gha_workflow_linter.file_edit.replace_lines`, which
+        publishes a sibling temporary file with a single
+        :func:`os.replace`, so the workflow file is either fully updated
+        or left byte-for-byte unchanged. Each rewritten line keeps the
+        terminator it already had, so a CRLF file stays CRLF and a file
+        without a trailing newline does not gain one.
+
+        Args:
+            file_path: Workflow file to rewrite.
+            line_fixes: Mapping of 1-based line number to an
+                ``(old_line, new_line)`` pair. Only ``new_line`` is
+                written; the caller's ``old_line`` is not used. An empty
+                mapping is a no-op that does not open or touch the file.
+
+        Returns:
+            One dict per fixed line, ordered by line number, with the
+            keys ``line_number`` (stringified), ``old_line``, and
+            ``new_line``. ``old_line`` is the content actually read from
+            disk rather than the caller-supplied value, so a rendered
+            diff cannot disagree with the file it describes.
+
+        Raises:
+            ValueError: If a line number is out of range for the file, or
+                a replacement spans more than one line. Previously an
+                out-of-range line was silently skipped; the whole file is
+                now left untouched instead of partially rewritten.
+            OSError: If the file cannot be read, or the replacement
+                cannot be written or moved into place.
+        """
         try:
-            with open(file_path, encoding="utf-8") as f:
-                lines = f.readlines()
-
-            # Apply fixes (line numbers are 1-based)
-            changes = []
-            for i, _line in enumerate(lines, 1):
-                if i in line_fixes:
-                    old_line, new_line = line_fixes[i]
-                    lines[i - 1] = new_line + "\n"
-                    changes.append(
-                        {
-                            "line_number": str(i),
-                            "old_line": old_line,
-                            "new_line": new_line,
-                        }
-                    )
-
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.writelines(lines)
-
-            return changes
-
+            changes = replace_lines(
+                file_path,
+                {
+                    line_number: new_line
+                    for line_number, (_old, new_line) in line_fixes.items()
+                },
+            )
         except Exception as e:
             self.logger.error(f"Failed to apply fixes to {file_path}: {e}")
             raise
+
+        return [
+            {
+                "line_number": str(change.line_number),
+                "old_line": change.old_line,
+                "new_line": change.new_line,
+            }
+            for change in changes
+        ]

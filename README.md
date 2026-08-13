@@ -174,7 +174,7 @@ gha-workflow-linter lint --auto-fix
 gha-workflow-linter lint --auto-fix --fix-test-calls
 
 # Auto-fix without using latest versions (keeps current version)
-gha-workflow-linter lint --auto-fix --no-auto-latest
+gha-workflow-linter lint --auto-fix --no-update-actions
 
 # Run without any authentication (limited to 60 requests/hour)
 # This happens when GitHub CLI is not installed/authenticated AND no token exists
@@ -195,10 +195,10 @@ gha-workflow-linter lint --auto-fix
 gha-workflow-linter lint --no-auto-fix
 
 # Auto-fix with latest versions (default: disabled unless overridden in config)
-gha-workflow-linter lint --auto-fix --auto-latest
+gha-workflow-linter lint --auto-fix --update-actions
 
 # Auto-fix without using latest versions (keeps current version)
-gha-workflow-linter lint --auto-fix --no-auto-latest
+gha-workflow-linter lint --auto-fix --no-update-actions
 ```
 
 **Skip Testing Actions**: By default, auto-fix skips actions with 'test' in
@@ -230,6 +230,47 @@ Example output (default behavior, test actions skipped):
   + - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
 ```
 
+### Exit Codes
+
+<!-- markdownlint-disable MD013 -->
+
+| Code | Meaning                                                               |
+| ---- | --------------------------------------------------------------------- |
+| `0`  | No failing findings                                                   |
+| `1`  | Defects found, or a fixer modified files, or the run itself failed    |
+| `2`  | Command-line usage error (reserved by the argument parser)            |
+| `3`  | `--verify-allow-list` and stale allow-list pins remain                |
+| `4`  | `--verify-allow-list` and the tool could not reach the latest release |
+| `5`  | `--verify-actions` and outdated action calls remain                   |
+
+<!-- markdownlint-enable MD013 -->
+
+When more than one applies, the most significant wins: `4`, then `3`,
+then `5`, then `1`. A check that could not run outranks a stale result,
+because enforcement reporting success when it never looked is worse than
+useless. A condition you asked about by name outranks the generic `1`,
+and nothing masks it.
+
+Codes `3`, `4` and `5` require the matching `--verify-*` flag. Without
+it, the linter reports those findings and leaves the exit code alone.
+
+### Verifying Action Currency
+
+`--verify-actions` treats outdated action calls as errors, mirroring
+`--verify-allow-list`:
+
+```bash
+# Report outdated actions but do not fail (the default)
+gha-workflow-linter lint
+
+# Fail when any action call has a newer release available
+gha-workflow-linter lint --verify-actions
+```
+
+This is useful in a scheduled compliance run, where you want to know
+that something has fallen behind, without blocking a developer's commit
+over it.
+
 ### Update Cooldown
 
 To guard against supply-chain attacks and retracted releases, the linter
@@ -240,10 +281,10 @@ policy.
 
 ```bash
 # Update to releases at least 7 days old
-gha-workflow-linter lint --auto-fix --auto-latest --cooldown 7
+gha-workflow-linter lint --auto-fix --update-actions --cooldown 7
 
 # Disable the cooldown (the default behaviour)
-gha-workflow-linter lint --auto-fix --auto-latest --cooldown 0
+gha-workflow-linter lint --auto-fix --update-actions --cooldown 0
 ```
 
 When `--cooldown` is not supplied, the linter walks up from the scanned
@@ -479,13 +520,13 @@ require_pinned_sha: true
 auto_fix: true
 
 # Use latest versions when auto-fixing (default: false)
-auto_latest: false
+update_actions: false
 
 # Allow prerelease versions when finding latest versions (default: false)
 allow_prerelease: false
 
-# Use two spaces before inline comments when fixing (default: false)
-two_space_comments: false
+# Use two spaces before inline comments when fixing (default: true)
+two_space_comments: true
 
 # Skip scanning action.yaml/action.yml files (default: false)
 skip_actions: false
@@ -800,7 +841,7 @@ gha-workflow-linter lint --format json
 | -------------------- | -------------------------------------------- | -------- | ------- |
 | `path`               | Path to scan for workflows                   | No       | `.`     |
 | `config-file`        | Path to configuration file                   | No       |         |
-| `github-token`       | GitHub API token                             | No       |         |
+| `validation-method`  | Validation method (github-api or git)        | No       | auto    |
 | `log-level`          | Logging level                                | No       | `INFO`  |
 | `output-format`      | Output format (text, json)                   | No       | `text`  |
 | `fail-on-error`      | Exit with error on failures                  | No       | `true`  |
@@ -809,11 +850,16 @@ gha-workflow-linter lint --format json
 | `exclude`            | Comma-separated exclude patterns             | No       |         |
 | `require-pinned-sha` | Require actions pinned to commit SHAs        | No       | `true`  |
 | `auto-fix`           | Auto-fix broken/invalid references           | No       | `true`  |
-| `auto-latest`        | Use latest versions when auto-fixing         | No       | `false` |
+| `update-actions`     | Update action calls to the latest release    | No       | `false` |
 | `allow-prerelease`   | Allow prerelease versions for latest         | No       | `false` |
 | `two-space-comments` | Use two spaces before inline comments        | No       | `false` |
 | `skip-actions`       | Skip scanning action.yaml/action.yml files   | No       | `false` |
 | `fix-test-calls`     | Fix actions with 'test' in comments          | No       | `false` |
+| `cooldown`           | Days a release must have been public         | No       |         |
+| `allow-list`         | Detect stale harden-runner allow-list pins   | No       | `true`  |
+| `verify-allow-list`  | Fail when stale allow-list pins remain       | No       | `false` |
+| `update-allow-list`  | Rewrite stale allow-list pins in place       | No       | `false` |
+| `allow-list-org`     | Org for the allow-list `@` shorthand         | No       |         |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -856,8 +902,8 @@ Options:
   --no-require-pinned-sha    Allow actions with tags/branches
   --auto-fix                 Auto-fix broken/invalid references
   --no-auto-fix              Disable auto-fixing
-  --auto-latest              Use latest versions when auto-fixing
-  --no-auto-latest           Don't use latest versions when auto-fixing
+  --update-actions           Update action calls to the latest release
+  --no-update-actions        Keep the current action versions
   --allow-prerelease         Allow prerelease versions for latest
   --no-allow-prerelease      Disallow prerelease versions
   --two-space-comments       Use two spaces before inline comments

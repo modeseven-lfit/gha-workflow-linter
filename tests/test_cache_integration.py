@@ -15,6 +15,7 @@ from typer.testing import CliRunner
 from gha_workflow_linter.cache import CacheConfig, ValidationCache
 from gha_workflow_linter.cli import app
 from gha_workflow_linter.models import ValidationResult
+from tests.conftest import strip_ansi
 
 
 class TestCacheIntegration:
@@ -120,7 +121,7 @@ cache:
                 app, ["cache", "--purge", "--config", config_file]
             )
             assert result.exit_code == 0
-            assert "Purged 2 cache entries" in result.stdout
+            assert "Purged 2 cache entries" in strip_ansi(result.stdout)
 
             # Verify cache is empty
             new_cache = ValidationCache(cache_config)
@@ -171,7 +172,9 @@ cache:
                 app, ["cache", "--cleanup", "--config", config_file]
             )
             assert result.exit_code == 0
-            assert "Removed 1 expired cache entries" in result.stdout
+            assert "Removed 1 expired cache entries" in strip_ansi(
+                result.stdout
+            )
         finally:
             Path(config_file).unlink()
 
@@ -198,7 +201,7 @@ cache:
                 app, ["cache", "--info", "--config", config_file]
             )
             assert result.exit_code == 0
-            assert "Enabled        │ False" in result.stdout
+            assert "Enabled        │ False" in strip_ansi(result.stdout)
 
         finally:
             Path(config_file).unlink()

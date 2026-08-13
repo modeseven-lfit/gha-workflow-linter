@@ -9,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from gha_workflow_linter.cli import app
+from tests.conftest import strip_ansi
 
 
 class TestAutoFixCLIFlags:
@@ -73,8 +74,8 @@ jobs:
         flag_combinations = [
             ["--auto-fix"],
             ["--no-auto-fix"],
-            ["--auto-latest"],
-            ["--no-auto-latest"],
+            ["--update-actions"],
+            ["--no-update-actions"],
             ["--two-space-comments"],
             ["--no-two-space-comments"],
             ["--require-pinned-sha"],
@@ -155,7 +156,7 @@ jobs:
         config_content = """
 require_pinned_sha: "invalid_boolean"
 auto_fix: 123
-auto_latest: "true_but_string"
+update_actions: "true_but_string"
 two_space_comments: null
 """
         config_file = temp_dir / "gha-workflow-linter.yaml"
@@ -215,7 +216,7 @@ jobs:
 
             assert "require_pinned_sha:" in generated_config
             assert "auto_fix:" in generated_config
-            assert "auto_latest:" in generated_config
+            assert "update_actions:" in generated_config
             assert "two_space_comments:" in generated_config
 
 
@@ -228,11 +229,15 @@ class TestAutoFixHelp:
 
         result = runner.invoke(app, ["lint", "--help"])
 
-        help_text = result.stdout.lower()
+        # Rich inserts colour codes inside option names when it
+        # believes it is writing to a terminal, which CI does.
+        help_text = strip_ansi(result.stdout).lower()
 
         # Check for auto-fix related options in help
         # Use partial matching to handle formatting differences
         assert "auto-fix" in help_text
+        assert "update-actions" in help_text
+        # The deprecated spelling stays discoverable until removal.
         assert "auto-latest" in help_text
         assert "two-space" in help_text or "two space" in help_text
         assert "require-pinned-sha" in help_text or "pinned-sha" in help_text

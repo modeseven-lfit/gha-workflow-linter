@@ -272,7 +272,7 @@ runs:
                     "--files",
                     ".github/workflows/ci.yml",
                     "--auto-fix",
-                    "--no-auto-latest",
+                    "--no-update-actions",
                 ],
             )
 
