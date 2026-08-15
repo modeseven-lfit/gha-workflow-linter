@@ -1334,47 +1334,43 @@ jobs:
             # even though the error it repaired is now gone.
             assert result.exit_code == 1
 
-    def test_two_space_comments_enabled(self, temp_dir: Path) -> None:
+    def test_two_space_comments_enabled(self) -> None:
         """Test auto-fix with two_space_comments=True."""
-        workflow_file = temp_dir / ".github" / "workflows" / "test.yaml"
-        workflow_file.parent.mkdir(parents=True)
-        workflow_file.write_text("""name: Test
-on: [push]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-""")
-
-        config_content = """
-require_pinned_sha: true
-auto_fix: true
-two_space_comments: true  # Use two spaces before comments
-validation_method: git
-"""
-        config_file = temp_dir / "gha-workflow-linter.yaml"
-        config_file.write_text(config_content)
-
-        runner = CliRunner()
-
-        result = runner.invoke(
-            app,
-            [
-                "lint",
-                str(temp_dir),
-                "--config",
-                str(config_file),
-            ],
+        action_call = ActionCall(
+            raw_line="      - uses: actions/checkout@v4",
+            line_number=7,
+            organization="actions",
+            repository="checkout",
+            reference="v4",
+            reference_type=ReferenceType.TAG,
+            call_type=ActionCallType.ACTION,
         )
 
-        # When auto-fix runs with two_space_comments, should use double space
-        # Check the actual file to see if it has two spaces before comment
-        if "Auto-fixed" in result.stdout:
-            content = workflow_file.read_text()
-            # Should have " #" (space before hash) in comment - actual format is single space
-            # The two_space_comments setting affects YAML comment formatting, not inline action comments
-            assert " # " in content or result.exit_code == 0
+        def fixed_line(two_space_comments: bool) -> str:
+            """Pin the call to a SHA under the given comment setting."""
+            config = Config(
+                require_pinned_sha=True,
+                two_space_comments=two_space_comments,
+                cache=CacheConfig(enabled=False),
+            )
+            return AutoFixer(config)._build_fixed_line(
+                action_call,
+                "11bd71901bbe5b1630ceea73d27597364c9af683",
+                version_comment="v4.2.2",
+            )
+
+        # The setting governs the gap between the SHA and the comment
+        # naming the version it came from. Driving the line builder is
+        # the only way to observe it: the CLI reports which lines a run
+        # changed, never how they were spaced.
+        assert fixed_line(two_space_comments=True) == (
+            "      - uses: actions/checkout@"
+            "11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2"
+        )
+        assert fixed_line(two_space_comments=False) == (
+            "      - uses: actions/checkout@"
+            "11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2"
+        )
 
 
 class TestAutoFixEdgeCases:
@@ -1450,8 +1446,10 @@ jobs:
             # The file should not have been modified since it's already valid
             assert workflow_file.read_text() == workflow_content
 
-    def test_auto_fix_file_permission_error(self, temp_dir: Path) -> None:
-        """Test auto-fix behavior when file cannot be written."""
+    def test_auto_fix_failure_is_reported_not_raised(
+        self, temp_dir: Path
+    ) -> None:
+        """Test that a failing auto-fixer does not abort the run."""
         workflow_content = """name: Test
 
 on: [push]
@@ -1466,12 +1464,35 @@ jobs:
         workflow_file.parent.mkdir(parents=True)
         workflow_file.write_text(workflow_content)
 
-        # Make the workflow file read-only to trigger permission error
-        workflow_file.chmod(0o444)
-
         runner = CliRunner()
 
-        try:
+        # _run_auto_fix_stage logs and swallows whatever the fixer
+        # raises, so the linter can still report validation results.
+        # Nothing else covers that promise, and the stub is the only way
+        # to reach it: the fixer catches its own write failures per file
+        # (see AutoFixer.fix_validation_errors), so the exceptions that
+        # do surface here come from the fixer as a whole -- setting up
+        # its clients, or resolving replacements -- rather than from
+        # rewriting any one file. File rewriting, permissions included,
+        # is covered by tests/test_file_edit.py.
+        def failing_fix(
+            _errors: list[ValidationError],
+            _action_calls: dict[Path, dict[int, ActionCall]],
+            _check_for_updates: bool,
+        ) -> AutoFixResult:
+            """Fail the whole fixing step."""
+            raise RuntimeError("Could not resolve replacement references")
+
+        with (
+            patch(
+                "gha_workflow_linter.cli.ActionCallValidator",
+                stub_validator_class(not_pinned_to_sha_errors),
+            ),
+            patch(
+                "gha_workflow_linter.cli.AutoFixer",
+                stub_auto_fixer_class(failing_fix),
+            ),
+        ):
             result = runner.invoke(
                 app,
                 [
@@ -1484,12 +1505,19 @@ jobs:
                 ],
             )
 
-            # Should detect the error or handle gracefully
-            # Either it fails with permission error or completes with validation errors
-            assert result.exit_code in [0, 1]
-        finally:
-            # Restore write permission for cleanup
-            workflow_file.chmod(0o644)
+        # The failure is reported rather than raised, and the run still
+        # gets as far as reporting what validation found.
+        output = strip_ansi(result.stdout)
+        assert (
+            "Auto-fix failed: Could not resolve replacement references"
+            in output
+        )
+        assert "Found 1 validation errors" in output
+
+        # Nothing was fixed, so the exit code comes from that one
+        # outstanding error.
+        assert result.exit_code == 1
+        assert workflow_file.read_text() == workflow_content
 
     @pytest.mark.asyncio
     async def test_auto_fixer_context_manager(
@@ -1591,22 +1619,63 @@ jobs:
         workflow_file.write_text(workflow_content)
 
         runner = CliRunner()
-        result = runner.invoke(
-            app,
-            [
-                "lint",
-                str(temp_dir),
-                "--auto-fix",
-                "--validation-method",
-                "git",
-            ],
+
+        # A real run pins the tag and records the version it came from,
+        # which is what the CLI then renders as a diff.
+        auto_fix = RecordedAutoFix(
+            (
+                {
+                    workflow_file: [
+                        {
+                            "line_number": "9",
+                            "old_line": "      - uses: actions/checkout@v4",
+                            "new_line": (
+                                "      - uses: actions/checkout@"
+                                "11bd71901bbe5b1630ceea73d27597364c9af683"
+                                "  # v4.2.2"
+                            ),
+                        }
+                    ]
+                },
+                {"actions_moved": 0, "calls_updated": 0},
+                {},
+            )
         )
 
-        # Should show auto-fix results
-        output = result.stdout
-        if "Auto-fixed" in output:
-            assert ".github/workflows/test.yaml" in output
-            assert "actions/checkout@v4" in output or "checkout" in output
+        with (
+            patch(
+                "gha_workflow_linter.cli.ActionCallValidator",
+                stub_validator_class(not_pinned_to_sha_errors),
+            ),
+            patch(
+                "gha_workflow_linter.cli.AutoFixer",
+                stub_auto_fixer_class(auto_fix),
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "lint",
+                    str(temp_dir),
+                    "--auto-fix",
+                    "--validation-method",
+                    "git",
+                ],
+            )
+
+        # Should show auto-fix results: a heading, the file the change
+        # landed in, and the replaced line either side of the change.
+        output = strip_ansi(result.stdout)
+        assert "Updated 1 workflow call(s) in 1 file(s)" in output
+        assert ".github/workflows/test.yaml" in output
+        assert "- - uses: actions/checkout@v4" in output
+        assert (
+            "+ - uses: actions/checkout@"
+            "11bd71901bbe5b1630ceea73d27597364c9af683" in output
+        )
+
+        # A changed tree is a failure, so a CI job notices it.
+        assert result.exit_code == 1
 
 
 class TestAutoFixIntegrationScenarios:
@@ -1947,10 +2016,7 @@ class TestAutoFixErrorHandling:
 
     def test_auto_fix_with_network_errors(self, temp_dir: Path) -> None:
         """Test that auto-fix handles network errors gracefully."""
-        workflow_file = temp_dir / ".github" / "workflows" / "test.yaml"
-        workflow_file.parent.mkdir(parents=True)
-        workflow_file.write_text(
-            """name: Test
+        workflow_content = """name: Test
 on: [push]
 jobs:
   test:
@@ -1958,29 +2024,67 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 """
-        )
+        workflow_file = temp_dir / ".github" / "workflows" / "test.yaml"
+        workflow_file.parent.mkdir(parents=True)
+        workflow_file.write_text(workflow_content)
 
         runner = CliRunner()
 
-        # Test with auto-fix - should work with git validation method
-        result = runner.invoke(
-            app,
-            [
-                "lint",
-                str(temp_dir),
-                "--auto-fix",
-                "--validation-method",
-                "git",
-                "--require-pinned-sha",
-            ],
+        # The reference could not be checked at all, which is what a
+        # lookup failing on the network leaves behind.
+        def mock_validate_calls(
+            action_calls: dict[Path, dict[int, ActionCall]],
+        ) -> list[ValidationError]:
+            return [
+                ValidationError(
+                    file_path=file_path,
+                    action_call=call,
+                    result=ValidationResult.NETWORK_ERROR,
+                    error_message="Network error contacting github.com",
+                )
+                for file_path, call in iter_calls(action_calls)
+            ]
+
+        # A reference nobody could resolve gives the fixer nothing to
+        # replace it with, so it reports no changes.
+        auto_fix = RecordedAutoFix(
+            ({}, {"actions_moved": 0, "calls_updated": 0}, {})
         )
 
-        # Should complete successfully or show auto-fix
-        assert (
-            result.exit_code == 0
-            or "Auto-fixed" in result.stdout
-            or "validation errors" in result.stdout
-        )
+        with (
+            patch(
+                "gha_workflow_linter.cli.ActionCallValidator",
+                stub_validator_class(mock_validate_calls),
+            ),
+            patch(
+                "gha_workflow_linter.cli.AutoFixer",
+                stub_auto_fixer_class(auto_fix),
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "lint",
+                    str(temp_dir),
+                    "--auto-fix",
+                    "--validation-method",
+                    "git",
+                    "--require-pinned-sha",
+                ],
+            )
+
+        # The run completes and says what went wrong, rather than
+        # treating an unreachable reference as a valid one.
+        output = strip_ansi(result.stdout)
+        assert "Found 1 validation errors" in output
+        assert "1 network errors" in output
+
+        # The error is still offered to the fixer, which cannot act on
+        # it, so the tree is untouched and the run fails on the error.
+        assert auto_fix.called
+        assert len(auto_fix.errors) == 1
+        assert result.exit_code == 1
+        assert workflow_file.read_text() == workflow_content
 
     def test_auto_fix_with_multiple_workflow_directories(
         self, temp_dir: Path
