@@ -259,6 +259,43 @@ def iter_calls(
     ]
 
 
+def no_validation_errors(
+    _action_calls: dict[Path, dict[int, ActionCall]],
+) -> list[ValidationError]:
+    """Report a clean bill of health for every call the scanner found.
+
+    Args:
+        _action_calls: Scanner results, ignored.
+
+    Returns:
+        An empty error list, for use with :func:`stub_validator_class`.
+    """
+    return []
+
+
+def not_pinned_to_sha_errors(
+    action_calls: dict[Path, dict[int, ActionCall]],
+) -> list[ValidationError]:
+    """Report every call the scanner found as unpinned.
+
+    Args:
+        action_calls: Scanner results as passed to the validator.
+
+    Returns:
+        One ``NOT_PINNED_TO_SHA`` error per call, for use with
+        :func:`stub_validator_class`.
+    """
+    return [
+        ValidationError(
+            file_path=file_path,
+            action_call=call,
+            result=ValidationResult.NOT_PINNED_TO_SHA,
+            error_message="Action not pinned to SHA",
+        )
+        for file_path, call in iter_calls(action_calls)
+    ]
+
+
 class TestAutoFixBehaviorWithPinnedSHA:
     """Test auto-fix behavior with require_pinned_sha configuration."""
 
@@ -1051,7 +1088,11 @@ validation_method: git
         temp_dir: Path,
     ) -> None:
         """Test that error summary shows correct counts with require_pinned_sha=False."""
-        # Create a workflow with only valid tag references (no invalid refs)
+        # Two tag references, which require_pinned_sha=False accepts on
+        # their own, and one reference that resolves to nothing. The
+        # invalid one keeps the summary non-empty, so the absence of the
+        # "not pinned to SHA" line below says something: the run does
+        # report errors, just never that kind.
         workflow_content = """name: Test
 
 on: [push]
@@ -1062,6 +1103,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
+      - uses: actions/upload-artifact@invalid-branch
 """
         workflow_file = temp_dir / ".github" / "workflows" / "test.yaml"
         workflow_file.parent.mkdir(parents=True)
@@ -1076,23 +1118,76 @@ validation_method: git
         config_file.write_text(config_content)
 
         runner = CliRunner()
-        result = runner.invoke(
-            app,
-            [
-                "lint",
-                str(temp_dir),
-                "--config",
-                str(config_file),
-                "--update-actions",
-            ],
+
+        # Without the SHA requirement a tag is a perfectly good
+        # reference, so only the one that resolves to nothing is an
+        # error.
+        def mock_validate_calls(
+            action_calls: dict[Path, dict[int, ActionCall]],
+        ) -> list[ValidationError]:
+            return [
+                ValidationError(
+                    file_path=file_path,
+                    action_call=call,
+                    result=ValidationResult.INVALID_REFERENCE,
+                    error_message="Invalid action call",
+                )
+                for file_path, call in iter_calls(action_calls)
+                if call.reference == "invalid-branch"
+            ]
+
+        # auto_fix is off, so a real fixer returns before looking
+        # anything up and reports no changes.
+        auto_fix = RecordedAutoFix(
+            ({}, {"actions_moved": 0, "calls_updated": 0}, {})
         )
 
-        # When require_pinned_sha=False, tag references are valid
-        # However, the actions are still validated (they exist), and auto-fix may still run
-        # The key is that we shouldn't get "not pinned to SHA" errors
-        assert "not pinned to SHA" not in result.stdout.lower()
-        # Exit code may be 0 or 1 depending on whether auto-fix ran
-        assert result.exit_code in (0, 1)
+        with (
+            patch(
+                "gha_workflow_linter.cli.ActionCallValidator",
+                stub_validator_class(mock_validate_calls),
+            ),
+            patch(
+                "gha_workflow_linter.cli.AutoFixer",
+                stub_auto_fixer_class(auto_fix),
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "lint",
+                    str(temp_dir),
+                    "--config",
+                    str(config_file),
+                    "--update-actions",
+                ],
+            )
+
+            # Nothing was fixed, so the single validation error is the
+            # only thing that can fail the run. With the fixer stubbed
+            # this follows from the fixture rather than from what
+            # upstream actions have released since.
+            assert result.exit_code == 1
+
+            output = strip_ansi(result.stdout)
+            assert "Found 1 validation errors" in output
+            assert "1 invalid references" in output
+
+            # The point of the test: tag references are not reported as
+            # unpinned when the SHA requirement is off, even on a run
+            # that has other errors to report.
+            assert "not pinned to SHA" not in output.lower()
+
+            # The error still reaches the fixer, but with auto_fix off
+            # the CLI offers it no action calls, so --update-actions has
+            # nothing it could advance.
+            assert auto_fix.called
+            assert len(auto_fix.errors) == 1
+            assert auto_fix.action_call_count == 0
+            assert auto_fix.check_for_updates is True
+
+            # Nothing was rewritten.
+            assert workflow_file.read_text() == workflow_content
 
 
 class TestAutoFixConfiguration:
@@ -1115,9 +1210,7 @@ jobs:
 
     def test_auto_fix_disabled(self, temp_dir: Path) -> None:
         """Test that auto-fix respects the auto_fix=false setting."""
-        workflow_file = temp_dir / ".github" / "workflows" / "auto-fix.yaml"
-        workflow_file.parent.mkdir(parents=True)
-        workflow_file.write_text("""name: Test
+        workflow_content = """name: Test
 on: [push]
 jobs:
   test:
@@ -1125,122 +1218,159 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-""")
-
-        config_content = """
-require_pinned_sha: true
-auto_fix: false  # Disable auto-fix
-validation_method: git
 """
-        config_file = temp_dir / "gha-workflow-linter.yaml"
-        config_file.write_text(config_content)
+        workflow_file = temp_dir / ".github" / "workflows" / "auto-fix.yaml"
+        workflow_file.parent.mkdir(parents=True)
+        workflow_file.write_text(workflow_content)
 
         runner = CliRunner()
 
-        result = runner.invoke(
-            app,
-            [
-                "lint",
-                str(temp_dir),
-                "--config",
-                str(config_file),
-                "--no-auto-fix",  # Explicitly disable to ensure it's off
-            ],
-        )
+        # The fixer is deliberately left real here. The CLI still runs
+        # the auto-fix stage -- there are errors to consider -- but with
+        # auto_fix off the fixer returns before it looks anything up, so
+        # it touches no network. That early return is the behaviour under
+        # test: stubbing the fixer would leave nothing asserting the
+        # setting is honoured.
+        with patch(
+            "gha_workflow_linter.cli.ActionCallValidator",
+            stub_validator_class(not_pinned_to_sha_errors),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "lint",
+                    str(temp_dir),
+                    "--validation-method",
+                    "git",
+                    "--no-auto-fix",
+                ],
+            )
 
-        # Should exit with error code but NOT auto-fix
+        # Nothing was fixed, so the exit code comes from the two
+        # outstanding validation errors alone.
         assert result.exit_code == 1
-        assert "validation errors" in result.stdout
-        assert "Auto-fixed" not in result.stdout
+        output = strip_ansi(result.stdout)
+        assert "Found 2 validation errors" in output
+        assert "2 actions not pinned to SHA" in output
+
+        # The decisive check: with auto-fix disabled the file that the
+        # fixer would otherwise have rewritten is left exactly as written.
+        assert workflow_file.read_text() == workflow_content
 
     def test_update_actions_disabled(self, temp_dir: Path) -> None:
         """Test auto-fix with update_actions=False uses existing versions not latest."""
-        workflow_file = temp_dir / ".github" / "workflows" / "test.yaml"
-        workflow_file.parent.mkdir(parents=True)
-        workflow_file.write_text("""name: Test
+        workflow_content = """name: Test
 on: [push]
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-""")
-
-        config_content = """
-require_pinned_sha: true
-auto_fix: true
-update_actions: false  # Don't use latest versions
-validation_method: git
 """
-        config_file = temp_dir / "gha-workflow-linter.yaml"
-        config_file.write_text(config_content)
+        workflow_file = temp_dir / ".github" / "workflows" / "test.yaml"
+        workflow_file.parent.mkdir(parents=True)
+        workflow_file.write_text(workflow_content)
 
         runner = CliRunner()
 
-        result = runner.invoke(
-            app,
-            [
-                "lint",
-                str(temp_dir),
-                "--auto-fix",
-                "--no-update-actions",
-                "--format",
-                "json",
-            ],
+        # With update_actions off, a real run pins the call to the SHA
+        # that v4 already points at rather than advancing it to the
+        # newest release, so the fixer reports one rewritten line.
+        expected_fixes: dict[Path, list[dict[str, str]]] = {
+            workflow_file: [
+                {
+                    "line_number": "7",
+                    "old_line": "uses: actions/checkout@v4",
+                    "new_line": (
+                        "uses: actions/checkout@"
+                        "11bd71901bbe5b1630ceea73d27597364c9af683 # v4"
+                    ),
+                }
+            ]
+        }
+        auto_fix = RecordedAutoFix(
+            (expected_fixes, {"actions_moved": 0, "calls_updated": 0}, {})
         )
 
-        # Should auto-fix without upgrading to latest version
-        # When update_actions=False, it should pin to the SHA of v4, not upgrade to v5
-        output_data = parse_json_output(result.stdout)
+        with (
+            patch(
+                "gha_workflow_linter.cli.ActionCallValidator",
+                stub_validator_class(not_pinned_to_sha_errors),
+            ),
+            patch(
+                "gha_workflow_linter.cli.AutoFixer",
+                stub_auto_fixer_class(auto_fix),
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "lint",
+                    str(temp_dir),
+                    "--auto-fix",
+                    "--no-update-actions",
+                    "--validation-method",
+                    "git",
+                    "--format",
+                    "json",
+                ],
+            )
 
-        # If there were errors, file should be modified to pin to SHA
-        if output_data["validation_summary"]["total_errors"] > 0:
-            modified_content = workflow_file.read_text()
-            # Should have a SHA now, not just v4 tag
-            # The content should be modified (contain @) and be longer due to SHA
-            assert "@" in modified_content and "#" in modified_content
+            # --no-update-actions reaches the fixer as
+            # check_for_updates=False. That one argument is what keeps
+            # the call on v4 instead of advancing it, and asserting on it
+            # is the only way to observe the flag: the decision itself
+            # belongs to the fixer, which is covered by its own tests.
+            assert auto_fix.called
+            assert auto_fix.check_for_updates is False
+            assert len(auto_fix.errors) == 1
+            assert auto_fix.action_call_count == 1
 
-    def test_two_space_comments_enabled(self, temp_dir: Path) -> None:
+            output_data = parse_json_output(result.stdout)
+            assert output_data["validation_summary"]["total_errors"] == 1
+            assert output_data["validation_summary"]["not_pinned_to_sha"] == 1
+
+            # The fixer reported a change to the tree, so the run fails
+            # even though the error it repaired is now gone.
+            assert result.exit_code == 1
+
+    def test_two_space_comments_enabled(self) -> None:
         """Test auto-fix with two_space_comments=True."""
-        workflow_file = temp_dir / ".github" / "workflows" / "test.yaml"
-        workflow_file.parent.mkdir(parents=True)
-        workflow_file.write_text("""name: Test
-on: [push]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-""")
-
-        config_content = """
-require_pinned_sha: true
-auto_fix: true
-two_space_comments: true  # Use two spaces before comments
-validation_method: git
-"""
-        config_file = temp_dir / "gha-workflow-linter.yaml"
-        config_file.write_text(config_content)
-
-        runner = CliRunner()
-
-        result = runner.invoke(
-            app,
-            [
-                "lint",
-                str(temp_dir),
-                "--config",
-                str(config_file),
-            ],
+        action_call = ActionCall(
+            raw_line="      - uses: actions/checkout@v4",
+            line_number=7,
+            organization="actions",
+            repository="checkout",
+            reference="v4",
+            reference_type=ReferenceType.TAG,
+            call_type=ActionCallType.ACTION,
         )
 
-        # When auto-fix runs with two_space_comments, should use double space
-        # Check the actual file to see if it has two spaces before comment
-        if "Auto-fixed" in result.stdout:
-            content = workflow_file.read_text()
-            # Should have " #" (space before hash) in comment - actual format is single space
-            # The two_space_comments setting affects YAML comment formatting, not inline action comments
-            assert " # " in content or result.exit_code == 0
+        def fixed_line(two_space_comments: bool) -> str:
+            """Pin the call to a SHA under the given comment setting."""
+            config = Config(
+                require_pinned_sha=True,
+                two_space_comments=two_space_comments,
+                cache=CacheConfig(enabled=False),
+            )
+            return AutoFixer(config)._build_fixed_line(
+                action_call,
+                "11bd71901bbe5b1630ceea73d27597364c9af683",
+                version_comment="v4.2.2",
+            )
+
+        # The setting governs the gap between the SHA and the comment
+        # naming the version it came from. Driving the line builder is
+        # the only way to observe it: the CLI reports which lines a run
+        # changed, never how they were spaced.
+        assert fixed_line(two_space_comments=True) == (
+            "      - uses: actions/checkout@"
+            "11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2"
+        )
+        assert fixed_line(two_space_comments=False) == (
+            "      - uses: actions/checkout@"
+            "11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2"
+        )
 
 
 class TestAutoFixEdgeCases:
@@ -1265,35 +1395,61 @@ jobs:
 
         runner = CliRunner()
 
-        # Test with JSON output for more robust assertions
-        result = runner.invoke(
-            app,
-            [
-                "lint",
-                str(temp_dir),
-                "--auto-fix",
-                "--no-update-actions",
-                "--validation-method",
-                "git",
-                "--format",
-                "json",
-            ],
+        # Nothing to repair and no newer release wanted, so the fixer
+        # reports no changes.
+        auto_fix = RecordedAutoFix(
+            ({}, {"actions_moved": 0, "calls_updated": 0}, {})
         )
 
-        # With --no-update-actions and a valid SHA, there should be no validation errors
-        assert result.exit_code == 0
+        with (
+            patch(
+                "gha_workflow_linter.cli.ActionCallValidator",
+                stub_validator_class(no_validation_errors),
+            ),
+            patch(
+                "gha_workflow_linter.cli.AutoFixer",
+                stub_auto_fixer_class(auto_fix),
+            ),
+        ):
+            # Test with JSON output for more robust assertions
+            result = runner.invoke(
+                app,
+                [
+                    "lint",
+                    str(temp_dir),
+                    "--auto-fix",
+                    "--no-update-actions",
+                    "--validation-method",
+                    "git",
+                    "--format",
+                    "json",
+                ],
+            )
 
-        # Parse JSON output for structured validation
-        output_data = parse_json_output(result.stdout)
+            # No errors and no fixes leaves nothing that can fail the run.
+            assert result.exit_code == 0
 
-        # Should have no validation errors since the action is already pinned to a valid SHA
-        assert output_data["validation_summary"]["total_errors"] == 0
+            # Parse JSON output for structured validation
+            output_data = parse_json_output(result.stdout)
 
-        # The file should not have been modified since it's already valid
-        assert workflow_file.read_text() == workflow_content
+            # Should have no validation errors since the action is already pinned to a valid SHA
+            assert output_data["validation_summary"]["total_errors"] == 0
 
-    def test_auto_fix_file_permission_error(self, temp_dir: Path) -> None:
-        """Test auto-fix behavior when file cannot be written."""
+            # Auto-fix still runs with nothing to repair: the CLI hands
+            # the fixer every call so --update-actions could advance
+            # them, and here it is told not to.
+            assert auto_fix.called
+            assert auto_fix.errors == []
+            assert auto_fix.action_call_count == 1
+            assert auto_fix.check_for_updates is False
+
+            # The file should not have been modified since it's already valid
+            assert workflow_file.read_text() == workflow_content
+
+    def test_auto_fix_failure_is_reported_not_raised(
+        self, temp_dir: Path
+    ) -> None:
+        """Test that a failing auto-fixer does not abort the run."""
         workflow_content = """name: Test
 
 on: [push]
@@ -1308,12 +1464,35 @@ jobs:
         workflow_file.parent.mkdir(parents=True)
         workflow_file.write_text(workflow_content)
 
-        # Make the workflow file read-only to trigger permission error
-        workflow_file.chmod(0o444)
-
         runner = CliRunner()
 
-        try:
+        # _run_auto_fix_stage logs and swallows whatever the fixer
+        # raises, so the linter can still report validation results.
+        # Nothing else covers that promise, and the stub is the only way
+        # to reach it: the fixer catches its own write failures per file
+        # (see AutoFixer.fix_validation_errors), so the exceptions that
+        # do surface here come from the fixer as a whole -- setting up
+        # its clients, or resolving replacements -- rather than from
+        # rewriting any one file. File rewriting, permissions included,
+        # is covered by tests/test_file_edit.py.
+        def failing_fix(
+            _errors: list[ValidationError],
+            _action_calls: dict[Path, dict[int, ActionCall]],
+            _check_for_updates: bool,
+        ) -> AutoFixResult:
+            """Fail the whole fixing step."""
+            raise RuntimeError("Could not resolve replacement references")
+
+        with (
+            patch(
+                "gha_workflow_linter.cli.ActionCallValidator",
+                stub_validator_class(not_pinned_to_sha_errors),
+            ),
+            patch(
+                "gha_workflow_linter.cli.AutoFixer",
+                stub_auto_fixer_class(failing_fix),
+            ),
+        ):
             result = runner.invoke(
                 app,
                 [
@@ -1326,12 +1505,19 @@ jobs:
                 ],
             )
 
-            # Should detect the error or handle gracefully
-            # Either it fails with permission error or completes with validation errors
-            assert result.exit_code in [0, 1]
-        finally:
-            # Restore write permission for cleanup
-            workflow_file.chmod(0o644)
+        # The failure is reported rather than raised, and the run still
+        # gets as far as reporting what validation found.
+        output = strip_ansi(result.stdout)
+        assert (
+            "Auto-fix failed: Could not resolve replacement references"
+            in output
+        )
+        assert "Found 1 validation errors" in output
+
+        # Nothing was fixed, so the exit code comes from that one
+        # outstanding error.
+        assert result.exit_code == 1
+        assert workflow_file.read_text() == workflow_content
 
     @pytest.mark.asyncio
     async def test_auto_fixer_context_manager(
@@ -1359,28 +1545,54 @@ jobs:
 
         runner = CliRunner()
 
-        # Test that CLI flags are accepted (actual behavior is tested elsewhere)
-        test_cases = [
-            (["--no-auto-fix"], "Auto-fix disabled via CLI"),
-            (["--no-update-actions"], "update_actions disabled via CLI"),
-        ]
-
-        for flags, description in test_cases:
-            result = runner.invoke(
-                app,
-                [
-                    "lint",
-                    str(temp_dir),
-                    "--validation-method",
-                    "git",
-                    *flags,
-                ],
+        # Both flags are about how the CLI drives the fixer, so that is
+        # what the assertions observe: --no-auto-fix must stop the stage
+        # running at all, --no-update-actions must let it run but forbid
+        # it chasing newer releases. Neither should fail a tree whose one
+        # call is already pinned.
+        def run(flags: list[str]) -> tuple[int, RecordedAutoFix]:
+            """Lint the tree with the given flags against stubs."""
+            auto_fix = RecordedAutoFix(
+                ({}, {"actions_moved": 0, "calls_updated": 0}, {})
             )
+            with (
+                patch(
+                    "gha_workflow_linter.cli.ActionCallValidator",
+                    stub_validator_class(no_validation_errors),
+                ),
+                patch(
+                    "gha_workflow_linter.cli.AutoFixer",
+                    stub_auto_fixer_class(auto_fix),
+                ),
+            ):
+                result = runner.invoke(
+                    app,
+                    [
+                        "lint",
+                        str(temp_dir),
+                        "--validation-method",
+                        "git",
+                        *flags,
+                    ],
+                )
+            return result.exit_code, auto_fix
 
-            # Should succeed with valid SHA-pinned action
-            assert result.exit_code == 0, (
-                f"Failed for {description}: {result.stdout}"
-            )
+        # With auto-fix off and nothing to repair, the stage is skipped
+        # entirely and the fixer is never asked for anything.
+        exit_code, auto_fix = run(["--no-auto-fix"])
+        assert exit_code == 0, "Auto-fix disabled via CLI"
+        assert auto_fix.called is False
+
+        # Auto-fix is on by default, so the stage runs and is offered the
+        # single call, but --no-update-actions forbids version bumps.
+        exit_code, auto_fix = run(["--no-update-actions"])
+        assert exit_code == 0, "update_actions disabled via CLI"
+        assert auto_fix.called
+        assert auto_fix.action_call_count == 1
+        assert auto_fix.check_for_updates is False
+
+        # Neither invocation had anything to rewrite.
+        assert workflow_file.read_text() == workflow_content
 
 
 class TestAutoFixCLIOutput:
@@ -1407,22 +1619,63 @@ jobs:
         workflow_file.write_text(workflow_content)
 
         runner = CliRunner()
-        result = runner.invoke(
-            app,
-            [
-                "lint",
-                str(temp_dir),
-                "--auto-fix",
-                "--validation-method",
-                "git",
-            ],
+
+        # A real run pins the tag and records the version it came from,
+        # which is what the CLI then renders as a diff.
+        auto_fix = RecordedAutoFix(
+            (
+                {
+                    workflow_file: [
+                        {
+                            "line_number": "9",
+                            "old_line": "      - uses: actions/checkout@v4",
+                            "new_line": (
+                                "      - uses: actions/checkout@"
+                                "11bd71901bbe5b1630ceea73d27597364c9af683"
+                                "  # v4.2.2"
+                            ),
+                        }
+                    ]
+                },
+                {"actions_moved": 0, "calls_updated": 0},
+                {},
+            )
         )
 
-        # Should show auto-fix results
-        output = result.stdout
-        if "Auto-fixed" in output:
-            assert ".github/workflows/test.yaml" in output
-            assert "actions/checkout@v4" in output or "checkout" in output
+        with (
+            patch(
+                "gha_workflow_linter.cli.ActionCallValidator",
+                stub_validator_class(not_pinned_to_sha_errors),
+            ),
+            patch(
+                "gha_workflow_linter.cli.AutoFixer",
+                stub_auto_fixer_class(auto_fix),
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "lint",
+                    str(temp_dir),
+                    "--auto-fix",
+                    "--validation-method",
+                    "git",
+                ],
+            )
+
+        # Should show auto-fix results: a heading, the file the change
+        # landed in, and the replaced line either side of the change.
+        output = strip_ansi(result.stdout)
+        assert "Updated 1 workflow call(s) in 1 file(s)" in output
+        assert ".github/workflows/test.yaml" in output
+        assert "- - uses: actions/checkout@v4" in output
+        assert (
+            "+ - uses: actions/checkout@"
+            "11bd71901bbe5b1630ceea73d27597364c9af683" in output
+        )
+
+        # A changed tree is a failure, so a CI job notices it.
+        assert result.exit_code == 1
 
 
 class TestAutoFixIntegrationScenarios:
@@ -1496,11 +1749,7 @@ jobs:
             )
 
             # Should only flag action calls, not reusable workflows
-            assert (
-                "Found" in result.stdout
-                and "2" in result.stdout
-                and "validation errors" in result.stdout
-            )
+            assert "Found 2 validation errors" in strip_ansi(result.stdout)
             assert "2 actions not pinned to SHA" in strip_ansi(result.stdout)
             # Only the two action calls are errors; the fixer is still
             # offered the remote reusable workflow call so --update-actions
@@ -1577,11 +1826,7 @@ jobs:
             )
 
             # Should handle all 50 action calls
-            assert (
-                "Found" in result.stdout
-                and "50" in result.stdout
-                and "validation errors" in result.stdout
-            )
+            assert "Found 50 validation errors" in strip_ansi(result.stdout)
             assert "50 actions not pinned to SHA" in strip_ansi(result.stdout)
             # Every one of the 50 calls is carried through to the fixer
             # in a single batch.
@@ -1644,19 +1889,36 @@ jobs:
         (workflows_dir / "valid.yaml").write_text(valid_workflow)
 
         runner = CliRunner()
-        result = runner.invoke(
-            app,
-            [
-                "lint",
-                str(temp_dir),
-                "--no-auto-fix",
-                "--validation-method",
-                "git",
-            ],
+
+        # A tree whose only call is already pinned gives the fixer
+        # nothing to consider, so with --no-auto-fix the stage is skipped.
+        clean_fix = RecordedAutoFix(
+            ({}, {"actions_moved": 0, "calls_updated": 0}, {})
         )
+        with (
+            patch(
+                "gha_workflow_linter.cli.ActionCallValidator",
+                stub_validator_class(no_validation_errors),
+            ),
+            patch(
+                "gha_workflow_linter.cli.AutoFixer",
+                stub_auto_fixer_class(clean_fix),
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "lint",
+                    str(temp_dir),
+                    "--no-auto-fix",
+                    "--validation-method",
+                    "git",
+                ],
+            )
 
         # Valid workflow should return 0
         assert result.exit_code == 0, f"Valid workflow failed: {result.stdout}"
+        assert clean_fix.called is False
 
         # Test with invalid workflow that needs auto-fix
         invalid_workflow = """name: Invalid
@@ -1667,26 +1929,86 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 """
-        (workflows_dir / "invalid.yaml").write_text(invalid_workflow)
+        invalid_file = workflows_dir / "invalid.yaml"
+        invalid_file.write_text(invalid_workflow)
 
-        result = runner.invoke(
-            app,
-            [
-                "lint",
-                str(temp_dir),
-                "--auto-fix",
-                "--update-actions",
-            ],
+        # Only the unpinned call in invalid.yaml is an error; valid.yaml
+        # is already pinned.
+        def mock_validate_calls(
+            action_calls: dict[Path, dict[int, ActionCall]],
+        ) -> list[ValidationError]:
+            return [
+                ValidationError(
+                    file_path=file_path,
+                    action_call=call,
+                    result=ValidationResult.NOT_PINNED_TO_SHA,
+                    error_message="Action not pinned to SHA",
+                )
+                for file_path, call in iter_calls(action_calls)
+                if call.reference == "v3"
+            ]
+
+        # A real run rewrites that one line, pinning it to the SHA of the
+        # latest release because --update-actions is set.
+        auto_fix = RecordedAutoFix(
+            (
+                {
+                    invalid_file: [
+                        {
+                            "line_number": "7",
+                            "old_line": "uses: actions/checkout@v3",
+                            "new_line": (
+                                "uses: actions/checkout@"
+                                "11bd71901bbe5b1630ceea73d27597364c9af683 "
+                                "# v4.2.2"
+                            ),
+                        }
+                    ]
+                },
+                {"actions_moved": 0, "calls_updated": 0},
+                {},
+            )
         )
+
+        with (
+            patch(
+                "gha_workflow_linter.cli.ActionCallValidator",
+                stub_validator_class(mock_validate_calls),
+            ),
+            patch(
+                "gha_workflow_linter.cli.AutoFixer",
+                stub_auto_fixer_class(auto_fix),
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "lint",
+                    str(temp_dir),
+                    "--auto-fix",
+                    "--update-actions",
+                    "--validation-method",
+                    "git",
+                ],
+            )
 
         # Auto-fix should modify file and return 1
         assert result.exit_code == 1, (
             f"Auto-fix should return 1: {result.stdout}"
         )
-        assert (
-            "Auto-fixed" in result.stdout
-            or "validation errors" in result.stdout
-        )
+
+        # Both calls are offered so --update-actions can advance either,
+        # but only the unpinned one is an error to repair.
+        assert auto_fix.called
+        assert len(auto_fix.errors) == 1
+        assert auto_fix.action_call_count == 2
+        assert auto_fix.check_for_updates is True
+
+        # The rewrite the fixer reported is announced, and the run warns
+        # that the tree changed underneath the caller.
+        output = strip_ansi(result.stdout)
+        assert "Updated 1 workflow call(s) in 1 file(s)" in output
+        assert "Files have been modified" in output
 
 
 class TestAutoFixErrorHandling:
@@ -1694,10 +2016,7 @@ class TestAutoFixErrorHandling:
 
     def test_auto_fix_with_network_errors(self, temp_dir: Path) -> None:
         """Test that auto-fix handles network errors gracefully."""
-        workflow_file = temp_dir / ".github" / "workflows" / "test.yaml"
-        workflow_file.parent.mkdir(parents=True)
-        workflow_file.write_text(
-            """name: Test
+        workflow_content = """name: Test
 on: [push]
 jobs:
   test:
@@ -1705,29 +2024,67 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 """
-        )
+        workflow_file = temp_dir / ".github" / "workflows" / "test.yaml"
+        workflow_file.parent.mkdir(parents=True)
+        workflow_file.write_text(workflow_content)
 
         runner = CliRunner()
 
-        # Test with auto-fix - should work with git validation method
-        result = runner.invoke(
-            app,
-            [
-                "lint",
-                str(temp_dir),
-                "--auto-fix",
-                "--validation-method",
-                "git",
-                "--require-pinned-sha",
-            ],
+        # The reference could not be checked at all, which is what a
+        # lookup failing on the network leaves behind.
+        def mock_validate_calls(
+            action_calls: dict[Path, dict[int, ActionCall]],
+        ) -> list[ValidationError]:
+            return [
+                ValidationError(
+                    file_path=file_path,
+                    action_call=call,
+                    result=ValidationResult.NETWORK_ERROR,
+                    error_message="Network error contacting github.com",
+                )
+                for file_path, call in iter_calls(action_calls)
+            ]
+
+        # A reference nobody could resolve gives the fixer nothing to
+        # replace it with, so it reports no changes.
+        auto_fix = RecordedAutoFix(
+            ({}, {"actions_moved": 0, "calls_updated": 0}, {})
         )
 
-        # Should complete successfully or show auto-fix
-        assert (
-            result.exit_code == 0
-            or "Auto-fixed" in result.stdout
-            or "validation errors" in result.stdout
-        )
+        with (
+            patch(
+                "gha_workflow_linter.cli.ActionCallValidator",
+                stub_validator_class(mock_validate_calls),
+            ),
+            patch(
+                "gha_workflow_linter.cli.AutoFixer",
+                stub_auto_fixer_class(auto_fix),
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "lint",
+                    str(temp_dir),
+                    "--auto-fix",
+                    "--validation-method",
+                    "git",
+                    "--require-pinned-sha",
+                ],
+            )
+
+        # The run completes and says what went wrong, rather than
+        # treating an unreachable reference as a valid one.
+        output = strip_ansi(result.stdout)
+        assert "Found 1 validation errors" in output
+        assert "1 network errors" in output
+
+        # The error is still offered to the fixer, which cannot act on
+        # it, so the tree is untouched and the run fails on the error.
+        assert auto_fix.called
+        assert len(auto_fix.errors) == 1
+        assert result.exit_code == 1
+        assert workflow_file.read_text() == workflow_content
 
     def test_auto_fix_with_multiple_workflow_directories(
         self, temp_dir: Path
