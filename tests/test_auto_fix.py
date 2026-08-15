@@ -1088,7 +1088,11 @@ validation_method: git
         temp_dir: Path,
     ) -> None:
         """Test that error summary shows correct counts with require_pinned_sha=False."""
-        # Create a workflow with only valid tag references (no invalid refs)
+        # Two tag references, which require_pinned_sha=False accepts on
+        # their own, and one reference that resolves to nothing. The
+        # invalid one keeps the summary non-empty, so the absence of the
+        # "not pinned to SHA" line below says something: the run does
+        # report errors, just never that kind.
         workflow_content = """name: Test
 
 on: [push]
@@ -1099,6 +1103,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
+      - uses: actions/upload-artifact@invalid-branch
 """
         workflow_file = temp_dir / ".github" / "workflows" / "test.yaml"
         workflow_file.parent.mkdir(parents=True)
@@ -1113,23 +1118,76 @@ validation_method: git
         config_file.write_text(config_content)
 
         runner = CliRunner()
-        result = runner.invoke(
-            app,
-            [
-                "lint",
-                str(temp_dir),
-                "--config",
-                str(config_file),
-                "--update-actions",
-            ],
+
+        # Without the SHA requirement a tag is a perfectly good
+        # reference, so only the one that resolves to nothing is an
+        # error.
+        def mock_validate_calls(
+            action_calls: dict[Path, dict[int, ActionCall]],
+        ) -> list[ValidationError]:
+            return [
+                ValidationError(
+                    file_path=file_path,
+                    action_call=call,
+                    result=ValidationResult.INVALID_REFERENCE,
+                    error_message="Invalid action call",
+                )
+                for file_path, call in iter_calls(action_calls)
+                if call.reference == "invalid-branch"
+            ]
+
+        # auto_fix is off, so a real fixer returns before looking
+        # anything up and reports no changes.
+        auto_fix = RecordedAutoFix(
+            ({}, {"actions_moved": 0, "calls_updated": 0}, {})
         )
 
-        # When require_pinned_sha=False, tag references are valid
-        # However, the actions are still validated (they exist), and auto-fix may still run
-        # The key is that we shouldn't get "not pinned to SHA" errors
-        assert "not pinned to SHA" not in result.stdout.lower()
-        # Exit code may be 0 or 1 depending on whether auto-fix ran
-        assert result.exit_code in (0, 1)
+        with (
+            patch(
+                "gha_workflow_linter.cli.ActionCallValidator",
+                stub_validator_class(mock_validate_calls),
+            ),
+            patch(
+                "gha_workflow_linter.cli.AutoFixer",
+                stub_auto_fixer_class(auto_fix),
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "lint",
+                    str(temp_dir),
+                    "--config",
+                    str(config_file),
+                    "--update-actions",
+                ],
+            )
+
+            # Nothing was fixed, so the single validation error is the
+            # only thing that can fail the run. With the fixer stubbed
+            # this follows from the fixture rather than from what
+            # upstream actions have released since.
+            assert result.exit_code == 1
+
+            output = strip_ansi(result.stdout)
+            assert "Found 1 validation errors" in output
+            assert "1 invalid references" in output
+
+            # The point of the test: tag references are not reported as
+            # unpinned when the SHA requirement is off, even on a run
+            # that has other errors to report.
+            assert "not pinned to SHA" not in output.lower()
+
+            # The error still reaches the fixer, but with auto_fix off
+            # the CLI offers it no action calls, so --update-actions has
+            # nothing it could advance.
+            assert auto_fix.called
+            assert len(auto_fix.errors) == 1
+            assert auto_fix.action_call_count == 0
+            assert auto_fix.check_for_updates is True
+
+            # Nothing was rewritten.
+            assert workflow_file.read_text() == workflow_content
 
 
 class TestAutoFixConfiguration:
@@ -1622,11 +1680,7 @@ jobs:
             )
 
             # Should only flag action calls, not reusable workflows
-            assert (
-                "Found" in result.stdout
-                and "2" in result.stdout
-                and "validation errors" in result.stdout
-            )
+            assert "Found 2 validation errors" in strip_ansi(result.stdout)
             assert "2 actions not pinned to SHA" in strip_ansi(result.stdout)
             # Only the two action calls are errors; the fixer is still
             # offered the remote reusable workflow call so --update-actions
@@ -1703,11 +1757,7 @@ jobs:
             )
 
             # Should handle all 50 action calls
-            assert (
-                "Found" in result.stdout
-                and "50" in result.stdout
-                and "validation errors" in result.stdout
-            )
+            assert "Found 50 validation errors" in strip_ansi(result.stdout)
             assert "50 actions not pinned to SHA" in strip_ansi(result.stdout)
             # Every one of the 50 calls is carried through to the fixer
             # in a single batch.
