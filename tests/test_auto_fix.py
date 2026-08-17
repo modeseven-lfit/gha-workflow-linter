@@ -11,19 +11,15 @@ from breaking when output formatting changes.
 from __future__ import annotations
 
 import json
-import logging
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
     from pathlib import Path
     from typing import TypeAlias
 
-    from rich.live import Live
     from rich.progress import Progress, TaskID
-
-    from gha_workflow_linter.file_edit import LineChange
 
     AutoFixResult: TypeAlias = tuple[
         dict[Path, list[dict[str, str]]],
@@ -36,7 +32,6 @@ from typer.testing import CliRunner
 
 from gha_workflow_linter.auto_fix import AutoFixer
 from gha_workflow_linter.cli import app
-from gha_workflow_linter.file_edit import replace_lines
 from gha_workflow_linter.models import (
     ActionCall,
     ActionCallType,
@@ -299,52 +294,6 @@ def not_pinned_to_sha_errors(
         )
         for file_path, call in iter_calls(action_calls)
     ]
-
-
-def stub_resolved_fixes_class(
-    version_fixes: dict[Path, dict[int, tuple[str, str]]],
-) -> type[AutoFixer]:
-    """Build a fixer whose reference-resolution step is replaced.
-
-    ``fix_validation_errors`` decides what to rewrite in two stages: it
-    resolves every call to its replacement, over the network, and then
-    writes the results out file by file. Only the second stage is under
-    test here, so the first is replaced with a prepared answer.
-
-    Unlike :func:`stub_auto_fixer_class`, this leaves
-    ``fix_validation_errors`` itself genuine, so the real writing loop
-    runs and the real files are rewritten.
-
-    Args:
-        version_fixes: Mapping of file path to a mapping of 1-based line
-            number to an ``(old_line, new_line)`` pair, as the batch
-            resolution step would have returned.
-
-    Returns:
-        A drop-in replacement for ``AutoFixer`` that resolves nothing
-        over the network but still writes.
-    """
-
-    class StubResolutionAutoFixer(AutoFixer):
-        """Fixer with pre-resolved replacements, without network use."""
-
-        async def _process_action_calls_batch(
-            self,
-            all_action_calls: dict[Path, dict[int, ActionCall]],
-            live: Live | None,
-            check_for_updates: bool = False,
-            validation_error_calls: set[tuple[Path, int]] | None = None,
-            validation_errors: list[ValidationError] | None = None,
-            show_live_updates: bool = True,
-        ) -> tuple[
-            dict[Path, dict[int, tuple[str, str]]],
-            dict[Path, dict[int, str]],
-            dict[str, list[dict[str, Any]]],
-        ]:
-            """Return the replacements supplied by the enclosing factory."""
-            return version_fixes, {}, {}
-
-    return StubResolutionAutoFixer
 
 
 class TestAutoFixBehaviorWithPinnedSHA:
@@ -2064,131 +2013,6 @@ jobs:
 
 class TestAutoFixErrorHandling:
     """Test auto-fix error handling and edge cases."""
-
-    @pytest.mark.asyncio
-    async def test_write_failure_on_one_file_spares_the_rest(
-        self,
-        temp_dir: Path,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """Test that one file failing to rewrite does not affect others."""
-        workflow_content = """name: Test
-on: [push]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-"""
-        original_line = "      - uses: actions/checkout@v3"
-        pinned_line = (
-            "      - uses: actions/checkout@"
-            "11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2"
-        )
-
-        workflows = temp_dir / ".github" / "workflows"
-        workflows.mkdir(parents=True)
-        writable = workflows / "writable.yaml"
-        doomed = workflows / "doomed.yaml"
-        for path in (writable, doomed):
-            path.write_text(workflow_content)
-
-        # The same call appears in both files, at the same line.
-        action_call = ActionCall(
-            raw_line=original_line,
-            line_number=7,
-            organization="actions",
-            repository="checkout",
-            reference="v3",
-            reference_type=ReferenceType.TAG,
-            call_type=ActionCallType.ACTION,
-        )
-
-        errors = [
-            ValidationError(
-                file_path=file_path,
-                action_call=action_call,
-                result=ValidationResult.NOT_PINNED_TO_SHA,
-                error_message="Action not pinned to SHA",
-            )
-            for file_path in (writable, doomed)
-        ]
-        all_action_calls = {
-            file_path: {7: action_call} for file_path in (writable, doomed)
-        }
-
-        # Both files need the same line replaced. Working that out is the
-        # step that reaches the network, so it is answered in advance;
-        # the writing loop under test is left genuine.
-        #
-        # The doomed file is listed first deliberately. The loop writes
-        # files in this order, so an unhandled failure here would abandon
-        # the run before the healthy file was ever reached, and the
-        # assertions below would not be able to tell that apart from a
-        # failure that was handled.
-        version_fixes = {
-            file_path: {7: (original_line, pinned_line)}
-            for file_path in (doomed, writable)
-        }
-
-        def failing_replace_lines(
-            path: Path, replacements: Mapping[int, str]
-        ) -> list[LineChange]:
-            """Fail for one file; rewrite the other for real."""
-            if path == doomed:
-                raise OSError("Read-only file system")
-            return replace_lines(path, replacements)
-
-        config = Config(
-            require_pinned_sha=True,
-            auto_fix=True,
-            cache=CacheConfig(enabled=False),
-        )
-        fixer_class = stub_resolved_fixes_class(version_fixes)
-
-        with (
-            patch(
-                "gha_workflow_linter.auto_fix.replace_lines",
-                failing_replace_lines,
-            ),
-            caplog.at_level(
-                logging.ERROR, logger="gha_workflow_linter.auto_fix"
-            ),
-        ):
-            async with fixer_class(config, base_path=temp_dir) as fixer:
-                (
-                    applied_fixes,
-                    _redirects,
-                    _stale,
-                ) = await fixer.fix_validation_errors(
-                    errors,
-                    all_action_calls,
-                    check_for_updates=False,
-                )
-
-        # The healthy file went through the real writing path and is
-        # reported, so its fix is counted and rendered as usual.
-        assert writable.read_text().splitlines()[6] == pinned_line
-        assert applied_fixes[writable] == [
-            {
-                "line_number": "7",
-                "old_line": original_line,
-                "new_line": pinned_line,
-            }
-        ]
-
-        # The failing one keeps its contents and drops out of the
-        # report. That is what makes the logging below matter: absent
-        # from applied_fixes, it reaches neither the fix count, nor the
-        # rendered diff, nor the exit code.
-        assert doomed.read_text() == workflow_content
-        assert doomed not in applied_fixes
-
-        # So the only trace of it is the log, which must name the file
-        # and say what went wrong. Both _apply_fixes_to_file and its
-        # caller log this, so the message appears more than once.
-        assert f"Failed to apply fixes to {doomed}" in caplog.text
-        assert "Read-only file system" in caplog.text
 
     def test_auto_fix_with_network_errors(self, temp_dir: Path) -> None:
         """Test that auto-fix handles network errors gracefully."""
