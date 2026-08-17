@@ -68,6 +68,29 @@ repos:
     rev: 41e691678310dfd3833f7ab4e180ddb014310356  # frozen: v2.3.0
     hooks:
       - id: mypy
+        # Analyse a fixed tree rather than whatever happens to be staged.
+        # This hook runs in an isolated virtualenv built from
+        # additional_dependencies below, which cannot include
+        # gha_workflow_linter itself. Handed only test files, mypy could
+        # not resolve `from gha_workflow_linter...`, the imported names
+        # degraded to Any, and `strict = true` turned every use of one
+        # into an error -- so committing a change to tests/ alone failed
+        # while `--all-files` passed. Naming the directories puts src/ in
+        # front of mypy every time, so the imports resolve from source.
+        #
+        # args replaces the hook's defaults rather than adding to them,
+        # so --ignore-missing-imports and --scripts-are-modules are
+        # repeated here; dropping them would change what is checked.
+        # Keep the directory list in step with [tool.basedpyright]
+        # include in pyproject.toml.
+        pass_filenames: false
+        args:
+          - --ignore-missing-imports
+          - --scripts-are-modules
+          - src
+          - tests
+          - scripts
+          - examples
         additional_dependencies:
           - pydantic>=2.10.3
           - pydantic-settings>=2.7.0
