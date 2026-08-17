@@ -35,8 +35,7 @@ from rich.progress import (
 from rich.table import Table
 import typer
 
-from . import exit_codes
-from ._version import __version__
+from . import __version__, exit_codes
 from .allow_list_check import AllowListChecker, AllowListOutcome
 from .allow_list_fix import AppliedFix
 from .allow_list_fix import apply_fixes as apply_allow_list_fixes

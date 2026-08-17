@@ -220,6 +220,20 @@ module = [
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# _version.py is generated at build time by hatch-vcs and is not in
+# version control, so it is absent from a bare checkout -- which is how
+# the pre-commit hook and pre-commit.ci see the tree. __init__.py guards
+# the import with try/except and falls back, but mypy reports the
+# missing module regardless of the handler. Every other consumer imports
+# the resolved string from the package, so this exemption covers the one
+# place that must name the generated module.
+#
+# A per-line type: ignore cannot be used here: warn_unused_ignores is
+# enabled, so it would error wherever the file *has* been generated.
+module = ["gha_workflow_linter._version"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = ["tests.*"]
 disallow_untyped_decorators = false
 disallow_untyped_defs = false
