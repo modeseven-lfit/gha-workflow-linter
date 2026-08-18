@@ -300,7 +300,7 @@ class TestCachePrime:
         code because ``_cache_version`` was never updated)."""
         import json
 
-        from gha_workflow_linter._version import __version__
+        from gha_workflow_linter import __version__
 
         # A successful load: cache file's version equals current tool
         # version, so no purge happens. ``_cache_version`` should equal
@@ -333,7 +333,7 @@ class TestCachePrime:
         value)."""
         import json
 
-        from gha_workflow_linter._version import __version__
+        from gha_workflow_linter import __version__
 
         stale = {
             "_metadata": {
@@ -479,7 +479,7 @@ class TestStandaloneCacheConsumers:
         cache_path.write_text(json.dumps(stale))
 
     def test_autofixer_primes_own_cache_on_construct(self) -> None:
-        from gha_workflow_linter._version import __version__
+        from gha_workflow_linter import __version__
         from gha_workflow_linter.auto_fix import AutoFixer
         from gha_workflow_linter.models import Config
 
@@ -508,7 +508,7 @@ class TestStandaloneCacheConsumers:
         """
         import asyncio
 
-        from gha_workflow_linter._version import __version__
+        from gha_workflow_linter import __version__
         from gha_workflow_linter.models import Config, ValidationMethod
         from gha_workflow_linter.validator import ActionCallValidator
 

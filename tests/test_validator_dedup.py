@@ -465,58 +465,6 @@ class TestValidatorDeduplication:
 
         assert len(errors) == 0
 
-    @pytest.mark.skip(
-        reason="Error handling behavior has changed - ValidationAbortedError is now raised"
-    )
-    @pytest.mark.asyncio
-    async def test_network_error_propagation(
-        self,
-        test_config_no_sha_pinning: Config,
-        duplicate_action_calls: dict[Path, dict[int, ActionCall]],
-    ) -> None:
-        """Test that network errors are properly propagated to all duplicate calls."""
-        pytest.skip(
-            "Validator now raises ValidationAbortedError for unexpected errors"
-        )
-        mock_github_client = AsyncMock()
-
-        # Mock network failure
-        mock_github_client.validate_repositories_batch.side_effect = Exception(
-            "Network timeout"
-        )
-        mock_stats = APICallStats(
-            total_calls=0,
-            graphql_calls=0,
-            rest_calls=0,
-            git_calls=0,
-            cache_hits=0,
-            rate_limit_delays=0,
-            failed_calls=0,
-        )
-        mock_github_client.get_api_stats = Mock(return_value=mock_stats)
-        mock_github_client.get_rate_limit_info = Mock(
-            return_value=GitHubRateLimitInfo(
-                limit=5000,
-                remaining=5000,
-                reset_at=0,
-                used=0,
-            )
-        )
-
-        validator = ActionCallValidator(test_config_no_sha_pinning)
-        validator._github_client = mock_github_client
-
-        errors = await validator.validate_action_calls_async(
-            duplicate_action_calls
-        )
-
-        # Should have errors for all 5 action calls
-        assert len(errors) == 5
-
-        # All errors should be invalid repository errors (current behavior when network fails)
-        for error in errors:
-            assert error.result == ValidationResult.INVALID_REPOSITORY
-
     def test_synchronous_wrapper(
         self,
         test_config_no_sha_pinning: Config,

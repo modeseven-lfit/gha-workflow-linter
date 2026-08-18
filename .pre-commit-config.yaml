@@ -68,29 +68,32 @@ repos:
     rev: 41e691678310dfd3833f7ab4e180ddb014310356  # frozen: v2.3.0
     hooks:
       - id: mypy
-        # Analyse a fixed tree rather than whatever happens to be staged.
-        # This hook runs in an isolated virtualenv built from
-        # additional_dependencies below, which cannot include
-        # gha_workflow_linter itself. Handed only test files, mypy could
-        # not resolve `from gha_workflow_linter...`, the imported names
-        # degraded to Any, and `strict = true` turned every use of one
-        # into an error -- so committing a change to tests/ alone failed
-        # while `--all-files` passed. Naming the directories puts src/ in
-        # front of mypy every time, so the imports resolve from source.
+        # Analyse a fixed set rather than whatever happens to be staged.
+        # The hook runs in an isolated virtualenv built from
+        # additional_dependencies, which carries the third-party packages
+        # but not gha_workflow_linter itself. Passed only test files, the
+        # imports from the package cannot resolve and every imported name
+        # degrades to Any, which under strict = true turns each use into
+        # an error (disallow_subclassing_any, warn_return_any). Passing
+        # src/ alongside the rest lets the imports resolve from source,
+        # so the checking gets stronger rather than weaker: no
+        # strictness setting is relaxed here, and what may go
+        # unresolved is stated per module in [tool.mypy] rather than
+        # waved through wholesale. One such exemption exists, for the
+        # generated _version module; see the note beside it.
+        # The set matches [tool.basedpyright] include in pyproject.toml,
+        # which lists every tracked Python location; keep them in step.
         #
         # args replaces the hook's defaults rather than adding to them,
-        # so --ignore-missing-imports and --scripts-are-modules are
-        # repeated here; dropping them would change what is checked.
-        # Keep the directory list in step with [tool.basedpyright]
-        # include in pyproject.toml.
+        # and its --ignore-missing-imports is deliberately not repeated
+        # here. That flag overrode ignore_missing_imports = false in
+        # pyproject.toml, so anything absent from the virtualenv below
+        # became Any and every use of it went unchecked in silence --
+        # pytest among them, which is why it now appears there. Dropping
+        # the flag is what makes the per-module overrides in
+        # [tool.mypy] the single account of what may go unresolved.
         pass_filenames: false
-        args:
-          - --ignore-missing-imports
-          - --scripts-are-modules
-          - src
-          - tests
-          - scripts
-          - examples
+        args: ['src', 'tests', 'scripts', 'examples']
         additional_dependencies:
           - pydantic>=2.10.3
           - pydantic-settings>=2.7.0
@@ -100,6 +103,10 @@ repos:
           - rich>=13.9.4
           - httpx>=0.28.1
           - typing-extensions>=4.12.0
+          # Needed now that tests/ is analysed: the isolated virtualenv
+          # has to resolve what the test modules import, or every use of
+          # an unresolved name becomes an error under strict = true.
+          - pytest>=8.0.0
 
   # Requires a mirror, primary repo lacks .pre-commit-hooks.yaml
   - repo: https://github.com/DetachHead/basedpyright-prek-mirror

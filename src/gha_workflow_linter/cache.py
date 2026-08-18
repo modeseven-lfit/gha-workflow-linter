@@ -12,7 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ._version import __version__
+from . import __version__
 from .models import (  # noqa: TC001
     CacheConfig,
     ValidationMethod,
