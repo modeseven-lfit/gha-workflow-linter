@@ -247,11 +247,15 @@ def _validation(
 def _autofix(
     fixed_files: dict[Path, list[dict[str, str]]] | None = None,
     stale: dict[str, list[dict[str, Any]]] | None = None,
+    write_failures: list[Path] | None = None,
+    stage_error: str | None = None,
 ) -> _AutoFixOutcome:
     return _AutoFixOutcome(
         fixed_files or {},
         {"actions_moved": 0, "calls_updated": 0},
         stale or {},
+        write_failures or [],
+        stage_error,
     )
 
 
@@ -437,6 +441,99 @@ class TestPresentationDoesNotAffectExitCode:
         assert code == exit_codes.SUCCESS
 
 
+class TestWriteFailureExitCode:
+    """A rewrite the caller asked for that could not be written.
+
+    Such a failure appears in no other tally: the planned change is
+    absent from the applied fixes, and under ``--update-actions`` the
+    call was never recorded as stale either. Reporting success would
+    tell the caller the work was done.
+    """
+
+    def test_a_failed_rewrite_fails_the_run(self) -> None:
+        """Nothing else in the outcome would reveal it."""
+        code = _exit_code(
+            _options(),
+            _validation(),
+            _autofix(write_failures=[Path(".github/workflows/ci.yaml")]),
+        )
+
+        assert code == exit_codes.DEFECTS_FOUND
+
+    def test_a_run_that_wrote_everything_still_succeeds(self) -> None:
+        """The guard against failing every run that rewrites nothing."""
+        assert (
+            _exit_code(_options(), _validation(), _autofix())
+            == exit_codes.SUCCESS
+        )
+
+    def test_presentation_does_not_change_it(self) -> None:
+        """Exit codes stay independent of how results are shown."""
+        codes = {
+            _exit_code(
+                _options(**presentation),
+                _validation(),
+                _autofix(write_failures=[Path("a.yaml")]),
+            )
+            for presentation in (
+                {},
+                {"quiet": True},
+                {"output_format": "json", "quiet": True},
+            )
+        }
+
+        assert codes == {exit_codes.DEFECTS_FOUND}
+
+
+class TestAutoFixStageFailureExitCode:
+    """A stage that failed outright leaves nothing else behind.
+
+    Auto-fix runs by default, so a stage failure alone stays advisory:
+    a developer who cannot reach the network must still be able to
+    commit, exactly as the allow-list check degrades. Asking for
+    ``--update-actions`` is asking for work to be done, so silently
+    doing none of it is a different matter.
+    """
+
+    def test_an_update_run_fails_when_the_stage_did(self) -> None:
+        """The requested updating never happened."""
+        config = Config()
+        config.update_actions = True
+
+        code = _exit_code(
+            _options(),
+            _validation(),
+            _autofix(stage_error="boom"),
+            config=config,
+        )
+
+        assert code == exit_codes.DEFECTS_FOUND
+
+    def test_an_ordinary_run_stays_advisory(self) -> None:
+        """The guard against failing every offline run.
+
+        ``auto_fix`` defaults to true, so failing here would stop a
+        developer committing whenever the network was unavailable.
+        """
+        code = _exit_code(
+            _options(),
+            _validation(),
+            _autofix(stage_error="boom"),
+        )
+
+        assert code == exit_codes.SUCCESS
+
+    def test_an_update_run_that_worked_still_succeeds(self) -> None:
+        """The guard against failing every update run."""
+        config = Config()
+        config.update_actions = True
+
+        assert (
+            _exit_code(_options(), _validation(), _autofix(), config=config)
+            == exit_codes.SUCCESS
+        )
+
+
 def _allow_list_outcome(
     *, unsuppressed: int = 0, unresolved: bool = False
 ) -> AllowListOutcome:
@@ -582,12 +679,13 @@ class TestAllowListStageFailure:
 
     @staticmethod
     def _stage(
-        *, verify: bool, quiet: bool = True
+        *, verify: bool, quiet: bool = True, update: bool = False
     ) -> tuple[AllowListOutcome | None, Config]:
         from gha_workflow_linter.cli import _run_allow_list_stage
 
         config = Config()
         config.allow_list.verify = verify
+        config.allow_list.update = update
         cache = ValidationCache(config.cache)
         options = _options(quiet=quiet, path=Path("/nonexistent-path-xyz"))
 
@@ -620,6 +718,29 @@ class TestAllowListStageFailure:
             _options(), _validation(), _autofix(), outcome, config
         )
         assert code == exit_codes.SUCCESS
+
+    def test_a_requested_update_reports_its_failure(self) -> None:
+        """Asking for an update and getting none must not read as clean.
+
+        Advisory mode skips a broken check, which is right when nothing
+        was asked for. But ``--update-allow-list`` asks for work to be
+        done, and returning ``None`` leaves no applied-fix count and no
+        failure -- so the repository is labelled clean and the run
+        exits zero, possibly after earlier files were already rewritten.
+        """
+        outcome, _ = self._stage(verify=False, update=True)
+
+        assert outcome is not None
+        assert outcome.unresolved
+
+    def test_a_requested_update_exits_unresolved(self) -> None:
+        """The failure has to reach the exit code, not just the outcome."""
+        outcome, config = self._stage(verify=False, update=True)
+        code = _exit_code(
+            _options(), _validation(), _autofix(), outcome, config
+        )
+
+        assert code == exit_codes.ALLOW_LIST_UNRESOLVED
 
 
 class TestShowSuppressedIsConfigDriven:

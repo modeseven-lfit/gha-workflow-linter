@@ -249,7 +249,9 @@ class TestCLICommands:
             )
 
         assert result.exit_code == 1
-        assert "Configuration error" in result.stdout
+        # Diagnostics go to standard error, keeping standard output
+        # reserved for results.
+        assert "Configuration error" in result.stderr
 
     def test_lint_purge_cache(self) -> None:
         """Test that lint command does NOT have --purge-cache flag (it was removed)."""
@@ -284,7 +286,9 @@ class TestCLICommands:
             result = self.runner.invoke(app, ["lint", tmpdir])
 
         assert result.exit_code == 1
-        assert "Error scanning workflows" in result.stdout
+        # Diagnostics go to standard error, keeping standard output
+        # reserved for results.
+        assert "Error scanning workflows" in result.stderr
 
     @patch("gha_workflow_linter.cli.ConfigManager")
     @patch("gha_workflow_linter.cli.WorkflowScanner")
@@ -411,7 +415,9 @@ class TestCLICommands:
 
         # Should fail with validation error
         assert result.exit_code == 1
-        assert "Output format must be one of: text, json" in result.stdout
+        # Diagnostics go to standard error, keeping standard output
+        # reserved for results.
+        assert "Output format must be one of: text, json" in result.stderr
 
     @patch("gha_workflow_linter.cli.ConfigManager")
     @patch("gha_workflow_linter.cli.WorkflowScanner")

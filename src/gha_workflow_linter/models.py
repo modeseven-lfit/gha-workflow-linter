@@ -531,6 +531,17 @@ class AllowListConfig(BaseModel):
             "then the 'upstream' git remote, then 'origin'"
         ),
     )
+    use_environment_org: bool = Field(
+        default=True,
+        description=(
+            "Whether GITHUB_REPOSITORY_OWNER may supply the workflow "
+            "organisation. The variable names the repository a workflow "
+            "was launched for, which is right for a single run but wrong "
+            "for every repository of a multi-repository sweep bar one, so "
+            "the sweep clears it and each checkout resolves from its own "
+            "remotes. An explicit 'org' still takes precedence either way"
+        ),
+    )
     filename: str = Field(
         default="allow_list.txt",
         description=(
@@ -755,6 +766,15 @@ class CLIOptions(BaseModel):
     allow_list_org: str | None = Field(
         default=None,
         description="Workflow organisation for '@<sha>' shorthand resolution",
+    )
+    multi_repo: bool = Field(
+        default=False,
+        description="Treat the given path as a container of repositories",
+    )
+    repo_depth: int = Field(
+        default=1,
+        ge=0,
+        description="How deep below the path to look for repositories",
     )
 
     @field_validator("output_format")

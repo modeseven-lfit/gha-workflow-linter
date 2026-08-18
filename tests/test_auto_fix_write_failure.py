@@ -248,6 +248,66 @@ class TestPerFileWriteFailure:
         assert bad not in applied, "a failed rewrite was reported as applied"
 
     @pytest.mark.asyncio
+    async def test_the_failure_is_recorded_on_the_fixer(
+        self, config: Config, tmp_path: Path
+    ) -> None:
+        """A failed rewrite must leave a trace the caller can read.
+
+        It appears in no other tally: the planned change is absent from
+        the applied fixes, and under ``--update-actions`` the call was
+        never recorded as stale either, so a run that failed to write
+        would otherwise look like a run with nothing to do.
+
+        Args:
+            config: Auto-fixer configuration.
+            tmp_path: Directory holding the workflows.
+        """
+        bad = write_workflow(tmp_path, "bad.yaml")
+        good = write_workflow(tmp_path, "good.yaml")
+        call = action_call()
+        errors = [validation_error(bad, call), validation_error(good, call)]
+        all_calls = {bad: {USES_LINE: call}, good: {USES_LINE: call}}
+
+        with (
+            stubbed_resolution(),
+            patch(
+                "gha_workflow_linter.auto_fix.replace_lines",
+                failing_writer(bad),
+            ),
+        ):
+            async with AutoFixer(config, base_path=tmp_path) as fixer:
+                await fixer.fix_validation_errors(
+                    errors, all_calls, check_for_updates=False
+                )
+                failures = list(fixer.write_failures)
+
+        assert failures == [bad]
+
+    @pytest.mark.asyncio
+    async def test_a_clean_run_records_no_failure(
+        self, config: Config, tmp_path: Path
+    ) -> None:
+        """The guard against reporting a failure for every rewrite.
+
+        Args:
+            config: Auto-fixer configuration.
+            tmp_path: Directory holding the workflows.
+        """
+        good = write_workflow(tmp_path, "good.yaml")
+        call = action_call()
+
+        with stubbed_resolution():
+            async with AutoFixer(config, base_path=tmp_path) as fixer:
+                await fixer.fix_validation_errors(
+                    [validation_error(good, call)],
+                    {good: {USES_LINE: call}},
+                    check_for_updates=False,
+                )
+                failures = list(fixer.write_failures)
+
+        assert failures == []
+
+    @pytest.mark.asyncio
     async def test_surviving_file_is_written_to_disk(
         self, config: Config, tmp_path: Path
     ) -> None:

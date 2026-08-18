@@ -369,7 +369,9 @@ def _owner_from_remote_url(url: str) -> str:
     return owner if ORG_RE.match(owner) else ""
 
 
-def resolve_workflow_org(root: Path, *, configured: str = "") -> str:
+def resolve_workflow_org(
+    root: Path, *, configured: str = "", use_environment: bool = True
+) -> str:
     """Determine the org that owns the workflows being scanned.
 
     The shorthand ``@<sha>`` pin form names no host org and takes it from
@@ -377,7 +379,8 @@ def resolve_workflow_org(root: Path, *, configured: str = "") -> str:
     read?". Precedence follows design section 6.3:
 
     1. ``configured`` -- the config key, itself fed by the CLI flag.
-    2. The ``GITHUB_REPOSITORY_OWNER`` environment variable.
+    2. The ``GITHUB_REPOSITORY_OWNER`` environment variable, when
+       ``use_environment`` is set.
     3. The owner of the ``upstream`` Git remote.
     4. The owner of the ``origin`` Git remote.
 
@@ -389,6 +392,13 @@ def resolve_workflow_org(root: Path, *, configured: str = "") -> str:
             the Git remote probes.
         configured: Explicit org from configuration or the
             ``--allow-list-org`` flag.
+        use_environment: Whether ``GITHUB_REPOSITORY_OWNER`` may answer.
+            The variable describes the repository a workflow was
+            launched for, which is a sound default for a single run but
+            false for every repository of a multi-repository sweep bar
+            one. Callers visiting several checkouts clear it so each
+            resolves from its own remotes; an explicit ``configured``
+            value still outranks both.
 
     Returns:
         The org name, or ``""`` when it cannot be determined. An empty
@@ -412,9 +422,10 @@ def resolve_workflow_org(root: Path, *, configured: str = "") -> str:
             )
         return explicit
 
-    from_env = os.environ.get(ORG_ENV_VAR, "").strip()
-    if from_env and ORG_RE.match(from_env):
-        return from_env
+    if use_environment:
+        from_env = os.environ.get(ORG_ENV_VAR, "").strip()
+        if from_env and ORG_RE.match(from_env):
+            return from_env
 
     for remote in REMOTE_PRECEDENCE:
         url = _git_remote_url(root, remote)
@@ -707,7 +718,11 @@ class AllowListChecker:
             self.logger.debug("Allow-list check disabled by configuration")
             return _empty_outcome()
 
-        org = resolve_workflow_org(root, configured=settings.org)
+        org = resolve_workflow_org(
+            root,
+            configured=settings.org,
+            use_environment=settings.use_environment_org,
+        )
         pins = self._scan(paths, root, org)
         if not pins:
             if org:

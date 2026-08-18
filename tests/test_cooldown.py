@@ -7,13 +7,17 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import logging
-from typing import TYPE_CHECKING, Any
+import time
+from typing import TYPE_CHECKING, Any, cast
+
+import pytest
 
 from gha_workflow_linter import cli
 from gha_workflow_linter.auto_fix import (
     AutoFixer,
 )
-from gha_workflow_linter.models import Config
+from gha_workflow_linter.cache import ValidationCache
+from gha_workflow_linter.models import CacheConfig, Config, ValidationMethod
 from gha_workflow_linter.version_utils import (
     _parse_iso_datetime,
     _select_version_with_cooldown,
@@ -22,7 +26,17 @@ from gha_workflow_linter.version_utils import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from gha_workflow_linter.github_api import GitHubGraphQLClient
+
 NOW = datetime(2026, 6, 12, tzinfo=timezone.utc)
+
+REPO_KEY = "actions/checkout"
+# The version a previous run left in the persistent cache.
+CACHED_TAG = "v4"
+CACHED_SHA = "a" * 40
+# The version this run resolves from a (stubbed) backend.
+FRESH_TAG = "v5"
+FRESH_SHA = "b" * 40
 
 
 def _days_ago(days: int) -> datetime:
@@ -33,16 +47,131 @@ def _iso_days_ago(days: int) -> str:
     return _days_ago(days).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _make_fixer(cooldown_days: int) -> AutoFixer:
+def _make_fixer(
+    cooldown_days: int, *, allow_prerelease: bool = False
+) -> AutoFixer:
     """Build an AutoFixer without running its heavyweight ``__init__``.
 
     The cooldown selection helpers only rely on ``config`` and ``logger``,
     so we bypass the cache priming and network client setup.
+
+    Args:
+        cooldown_days: Cooldown window to apply, in days.
+        allow_prerelease: Whether prereleases are eligible candidates.
+
+    Returns:
+        A fixer carrying nothing but the release policy under test.
     """
     fixer = AutoFixer.__new__(AutoFixer)
-    fixer.config = Config(cooldown_days=cooldown_days)
+    fixer.config = Config(
+        cooldown_days=cooldown_days, allow_prerelease=allow_prerelease
+    )
     fixer.logger = logging.getLogger("test.cooldown")
     return fixer
+
+
+def _make_batch_fixer(
+    cooldown_days: int,
+    cache_dir: Path,
+    *,
+    allow_prerelease: bool = False,
+    graphql: bool = False,
+) -> tuple[AutoFixer, ValidationCache]:
+    """Build a fully initialised AutoFixer over a throwaway disk cache.
+
+    Args:
+        cooldown_days: Cooldown window to apply, in days.
+        cache_dir: Directory backing the persistent ``ValidationCache``.
+        allow_prerelease: Whether prereleases are eligible candidates.
+        graphql: Whether to arm the batched GraphQL path. The client is a
+            bare sentinel purely to satisfy the ``self._graphql_client``
+            gate; the batch call itself is always stubbed, so no test
+            reaches the network.
+
+    Returns:
+        The fixer and the cache it was handed, so tests can inspect what
+        the run persisted.
+    """
+    config = Config(
+        cooldown_days=cooldown_days,
+        allow_prerelease=allow_prerelease,
+        validation_method=ValidationMethod.GITHUB_API,
+        cache=CacheConfig(enabled=True, cache_dir=cache_dir),
+    )
+    cache = ValidationCache(config.cache)
+    fixer = AutoFixer(config, base_path=cache_dir, cache=cache)
+    if graphql:
+        fixer._graphql_client = cast("GitHubGraphQLClient", object())
+    return fixer, cache
+
+
+def _stub_single_lookup(
+    fixer: AutoFixer,
+    monkeypatch: pytest.MonkeyPatch,
+    result: tuple[str, str] | None,
+) -> list[str]:
+    """Replace the per-repository backend lookup with a canned answer.
+
+    Args:
+        fixer: Fixer whose lookup should be stubbed.
+        monkeypatch: Fixture used to patch the bound method.
+        result: The ``(tag, sha)`` pair to answer with, or ``None``.
+
+    Returns:
+        A list, appended to in call order, of every repository the fixer
+        could not answer from a cache and therefore queued for
+        resolution.
+    """
+    fetched: list[str] = []
+
+    async def fake_single(repo_key: str) -> tuple[str, str] | None:
+        """Answer one repository without touching the network.
+
+        Args:
+            repo_key: Repository queued for resolution.
+
+        Returns:
+            The canned pair supplied by the caller.
+        """
+        fetched.append(repo_key)
+        return result
+
+    monkeypatch.setattr(fixer, "_get_latest_version_single", fake_single)
+    return fetched
+
+
+def _stub_graphql_lookup(
+    fixer: AutoFixer,
+    monkeypatch: pytest.MonkeyPatch,
+    results: dict[str, tuple[str, str]],
+) -> list[list[str]]:
+    """Replace the batched GraphQL lookup with a canned answer.
+
+    Args:
+        fixer: Fixer whose batch lookup should be stubbed.
+        monkeypatch: Fixture used to patch the bound method.
+        results: The ``repo_key -> (tag, sha)`` mapping to answer with.
+
+    Returns:
+        A list, appended to in call order, of every batch the fixer could
+        not answer from a cache and therefore queued for resolution.
+    """
+    batches: list[list[str]] = []
+
+    async def fake_batch(repo_keys: list[str]) -> dict[str, tuple[str, str]]:
+        """Answer a whole batch without touching the network.
+
+        Args:
+            repo_keys: Repositories queued for resolution.
+
+        Returns:
+            The canned mapping supplied by the caller.
+        """
+        batches.append(repo_keys)
+        return results
+
+    monkeypatch.setattr(fixer, "_get_latest_versions_graphql_batch", fake_batch)
+    return batches
 
 
 class TestParseIsoDatetime:
@@ -272,3 +401,200 @@ class TestResolveCooldownDays:
         )
         assert result == 7
         assert printed == []
+
+
+class TestPersistentCacheUnderReleasePolicy:
+    """A non-default release policy must not share persisted versions.
+
+    ``ValidationCache`` keys latest versions on the repository alone and
+    records no policy, so an answer written by one run could be read back
+    by a run whose policy would have chosen differently. Two settings
+    make up that policy: a **cooldown** shifts the answer to an older
+    release, and **prerelease eligibility** changes which releases are
+    candidates at all. The fixer therefore bypasses the persistent cache
+    entirely unless both are at their defaults, mirroring
+    ``AllowListResolver.cache_usable``.
+
+    The session cache is deliberately left alone: it lives on one
+    ``AutoFixer``, which serves exactly one repository and therefore one
+    policy.
+    """
+
+    @pytest.mark.parametrize(
+        ("cooldown_days", "allow_prerelease", "usable"),
+        [
+            pytest.param(0, False, True, id="default-policy"),
+            pytest.param(7, False, False, id="cooldown"),
+            pytest.param(0, True, False, id="prerelease"),
+            pytest.param(7, True, False, id="cooldown-and-prerelease"),
+        ],
+    )
+    def test_only_the_default_policy_is_cacheable(
+        self, cooldown_days: int, allow_prerelease: bool, usable: bool
+    ) -> None:
+        """Only a default-policy entry means the same to every reader."""
+        fixer = _make_fixer(cooldown_days, allow_prerelease=allow_prerelease)
+
+        assert fixer._persistent_cache_usable is usable
+
+    @pytest.mark.asyncio
+    async def test_a_cooldown_run_ignores_a_persisted_version(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The persisted v4 is passed over and the repository re-resolved."""
+        fixer, cache = _make_batch_fixer(7, tmp_path)
+        cache.put_latest_version(REPO_KEY, CACHED_TAG, CACHED_SHA)
+        fetched = _stub_single_lookup(
+            fixer, monkeypatch, (FRESH_TAG, FRESH_SHA)
+        )
+
+        results = await fixer._get_latest_versions_batch([REPO_KEY])
+
+        assert fetched == [REPO_KEY]
+        assert results == {REPO_KEY: (FRESH_TAG, FRESH_SHA)}
+
+    @pytest.mark.asyncio
+    async def test_a_cooldown_run_does_not_persist_a_resolved_version(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A version resolved per-repository stays out of the cache."""
+        fixer, cache = _make_batch_fixer(7, tmp_path)
+        _stub_single_lookup(fixer, monkeypatch, (FRESH_TAG, FRESH_SHA))
+
+        results = await fixer._get_latest_versions_batch([REPO_KEY])
+
+        assert results == {REPO_KEY: (FRESH_TAG, FRESH_SHA)}
+        assert cache.get_latest_version(REPO_KEY) is None
+
+    @pytest.mark.asyncio
+    async def test_a_cooldown_run_does_not_persist_a_batched_version(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The GraphQL path suppresses its write for the same reason."""
+        fixer, cache = _make_batch_fixer(7, tmp_path, graphql=True)
+        batches = _stub_graphql_lookup(
+            fixer, monkeypatch, {REPO_KEY: (FRESH_TAG, FRESH_SHA)}
+        )
+
+        results = await fixer._get_latest_versions_batch([REPO_KEY])
+
+        assert batches == [[REPO_KEY]]
+        assert results == {REPO_KEY: (FRESH_TAG, FRESH_SHA)}
+        assert cache.get_latest_version(REPO_KEY) is None
+
+    @pytest.mark.asyncio
+    async def test_a_cooldown_run_still_uses_the_session_cache(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the *persistent* cache crosses release policies.
+
+        One ``AutoFixer`` serves one repository and therefore one
+        cooldown, so a session entry cannot have been produced under a
+        different policy. Guarding it too would cost a lookup per
+        repository for no safety gain.
+        """
+        fixer, _ = _make_batch_fixer(7, tmp_path)
+        fixer._latest_versions_cache[REPO_KEY] = (
+            CACHED_TAG,
+            CACHED_SHA,
+            time.time(),
+        )
+        fetched = _stub_single_lookup(
+            fixer, monkeypatch, (FRESH_TAG, FRESH_SHA)
+        )
+
+        results = await fixer._get_latest_versions_batch([REPO_KEY])
+
+        assert fetched == []
+        assert results == {REPO_KEY: (CACHED_TAG, CACHED_SHA)}
+
+    @pytest.mark.asyncio
+    async def test_a_prerelease_run_ignores_a_persisted_version(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stable-only entry could hide a newer prerelease."""
+        fixer, cache = _make_batch_fixer(0, tmp_path, allow_prerelease=True)
+        cache.put_latest_version(REPO_KEY, CACHED_TAG, CACHED_SHA)
+        fetched = _stub_single_lookup(
+            fixer, monkeypatch, (FRESH_TAG, FRESH_SHA)
+        )
+
+        results = await fixer._get_latest_versions_batch([REPO_KEY])
+
+        assert fetched == [REPO_KEY]
+        assert results == {REPO_KEY: (FRESH_TAG, FRESH_SHA)}
+
+    @pytest.mark.asyncio
+    async def test_a_prerelease_run_does_not_persist_a_resolved_version(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A default run must not later consume a cached prerelease."""
+        fixer, cache = _make_batch_fixer(0, tmp_path, allow_prerelease=True)
+        _stub_single_lookup(fixer, monkeypatch, (FRESH_TAG, FRESH_SHA))
+
+        results = await fixer._get_latest_versions_batch([REPO_KEY])
+
+        assert results == {REPO_KEY: (FRESH_TAG, FRESH_SHA)}
+        assert cache.get_latest_version(REPO_KEY) is None
+
+    @pytest.mark.asyncio
+    async def test_a_prerelease_run_does_not_persist_a_batched_version(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The GraphQL path suppresses its write for the same reason."""
+        fixer, cache = _make_batch_fixer(
+            0, tmp_path, allow_prerelease=True, graphql=True
+        )
+        batches = _stub_graphql_lookup(
+            fixer, monkeypatch, {REPO_KEY: (FRESH_TAG, FRESH_SHA)}
+        )
+
+        results = await fixer._get_latest_versions_batch([REPO_KEY])
+
+        assert batches == [[REPO_KEY]]
+        assert results == {REPO_KEY: (FRESH_TAG, FRESH_SHA)}
+        assert cache.get_latest_version(REPO_KEY) is None
+
+    @pytest.mark.asyncio
+    async def test_a_default_policy_run_reads_a_persisted_version(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression guard: the fix must not disable caching outright."""
+        fixer, cache = _make_batch_fixer(0, tmp_path)
+        cache.put_latest_version(REPO_KEY, CACHED_TAG, CACHED_SHA)
+        fetched = _stub_single_lookup(
+            fixer, monkeypatch, (FRESH_TAG, FRESH_SHA)
+        )
+
+        results = await fixer._get_latest_versions_batch([REPO_KEY])
+
+        assert fetched == []
+        assert results == {REPO_KEY: (CACHED_TAG, CACHED_SHA)}
+
+    @pytest.mark.asyncio
+    async def test_a_default_policy_run_persists_a_resolved_version(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression guard for the per-repository write site."""
+        fixer, cache = _make_batch_fixer(0, tmp_path)
+        _stub_single_lookup(fixer, monkeypatch, (FRESH_TAG, FRESH_SHA))
+
+        results = await fixer._get_latest_versions_batch([REPO_KEY])
+
+        assert results == {REPO_KEY: (FRESH_TAG, FRESH_SHA)}
+        assert cache.get_latest_version(REPO_KEY) == (FRESH_TAG, FRESH_SHA)
+
+    @pytest.mark.asyncio
+    async def test_a_default_policy_run_persists_a_batched_version(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression guard for the GraphQL write site."""
+        fixer, cache = _make_batch_fixer(0, tmp_path, graphql=True)
+        _stub_graphql_lookup(
+            fixer, monkeypatch, {REPO_KEY: (FRESH_TAG, FRESH_SHA)}
+        )
+
+        results = await fixer._get_latest_versions_batch([REPO_KEY])
+
+        assert results == {REPO_KEY: (FRESH_TAG, FRESH_SHA)}
+        assert cache.get_latest_version(REPO_KEY) == (FRESH_TAG, FRESH_SHA)

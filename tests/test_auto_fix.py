@@ -1867,10 +1867,12 @@ jobs:
         # Scanner handles syntax errors gracefully, skips invalid files
         # So we get exit code 0 if no valid workflows found
         assert result.exit_code == 0
-        # Should report scanning issues (as WARNING), not validation errors
+        # Should report scanning issues (as WARNING), not validation errors.
+        # Diagnostics go to standard error, keeping standard output
+        # reserved for results.
         assert (
-            "Invalid YAML" in result.stdout
-            or "parsing" in result.stdout.lower()
+            "Invalid YAML" in result.stderr
+            or "parsing" in result.stderr.lower()
         )
 
     def test_auto_fix_exit_codes(self, temp_dir: Path) -> None:
