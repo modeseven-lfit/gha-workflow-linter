@@ -10,8 +10,10 @@ hastily-retracted releases.
 
 This module locates the repository's ``.github/dependabot.yml`` (or
 ``.yaml``) file by walking up the directory hierarchy from a starting
-path, then extracts the ``cooldown.default-days`` value so the linter can
-apply the same policy when updating action calls.
+path -- stopping at the enclosing repository root, since a cooldown is
+that repository's own release policy -- then extracts the
+``cooldown.default-days`` value so the linter can apply the same policy
+when updating action calls.
 """
 
 from __future__ import annotations
@@ -21,6 +23,8 @@ import logging
 from typing import TYPE_CHECKING
 
 import yaml
+
+from .multi_repo import is_repository
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -57,7 +61,16 @@ def find_dependabot_config(start_path: Path) -> Path | None:
 
     Walks up the directory hierarchy from ``start_path`` (or its parent if
     ``start_path`` is a file) until a Dependabot configuration file is
-    found or the filesystem root is reached.
+    found, a repository root is passed, or the filesystem root is
+    reached.
+
+    The search stops at a repository root because a cooldown is that
+    repository's own release policy. Without the boundary, a checkout
+    lacking a Dependabot file inherits whatever directory happens to
+    contain it -- so a multi-repository sweep whose container carries a
+    configuration would silently apply it to every repository beneath,
+    and a lone checkout would answer differently depending on where it
+    was cloned.
 
     Args:
         start_path: Path to begin searching from (typically the directory
@@ -65,19 +78,23 @@ def find_dependabot_config(start_path: Path) -> Path | None:
 
     Returns:
         Path to the Dependabot configuration file, or ``None`` if no file
-        is found.
+        is found at or below the enclosing repository root.
     """
     start = start_path.resolve()
     search_dir = start if start.is_dir() else start.parent
 
     for directory in (search_dir, *search_dir.parents):
         github_dir = directory / ".github"
-        if not github_dir.is_dir():
-            continue
-        for filename in _DEPENDABOT_FILENAMES:
-            candidate = github_dir / filename
-            if candidate.is_file():
-                return candidate
+        if github_dir.is_dir():
+            for filename in _DEPENDABOT_FILENAMES:
+                candidate = github_dir / filename
+                if candidate.is_file():
+                    return candidate
+        # Checked after this directory's own configuration, so a
+        # repository root's file is still found -- it is ascending
+        # *past* the root that leaks policy across the boundary.
+        if is_repository(directory):
+            break
 
     return None
 

@@ -78,6 +78,89 @@ class TestFindDependabotConfig:
         assert find_dependabot_config(tmp_path) == yml
 
 
+class TestRepositoryBoundary:
+    """A cooldown is the scanned repository's own release policy.
+
+    The search walks upwards, which is right within a checkout but wrong
+    past its root: a sweep container carrying a Dependabot file would
+    otherwise impose its cooldown on every repository beneath it, and a
+    lone checkout would answer differently depending on where it was
+    cloned.
+    """
+
+    @staticmethod
+    def _make_repository(path: Path) -> Path:
+        """Create a directory that looks like a checkout.
+
+        Args:
+            path: Directory to create; parents are created as needed.
+
+        Returns:
+            The same path, now carrying a ``.git`` directory.
+        """
+        (path / ".git").mkdir(parents=True)
+        return path
+
+    def test_a_checkout_does_not_inherit_its_containers_cooldown(
+        self, tmp_path: Path
+    ) -> None:
+        """The container's policy stops at the repository boundary.
+
+        Args:
+            tmp_path: Container directory, carrying a Dependabot file.
+        """
+        _write_dependabot(tmp_path, GITHUB_ACTIONS_CONFIG)
+        repository = self._make_repository(tmp_path / "checkout")
+
+        assert find_dependabot_config(repository) is None
+
+    def test_a_checkouts_own_configuration_is_still_found(
+        self, tmp_path: Path
+    ) -> None:
+        """The boundary is checked after the directory's own file.
+
+        Args:
+            tmp_path: Container directory, carrying a Dependabot file.
+        """
+        _write_dependabot(tmp_path, GITHUB_ACTIONS_CONFIG)
+        repository = self._make_repository(tmp_path / "checkout")
+        own = _write_dependabot(repository, GITHUB_ACTIONS_CONFIG)
+
+        assert find_dependabot_config(repository) == own
+
+    def test_a_subdirectory_still_reaches_the_repository_root(
+        self, tmp_path: Path
+    ) -> None:
+        """Walking up within a checkout is the behaviour being kept.
+
+        Args:
+            tmp_path: Container directory.
+        """
+        repository = self._make_repository(tmp_path / "checkout")
+        own = _write_dependabot(repository, GITHUB_ACTIONS_CONFIG)
+        nested = repository / "a" / "b"
+        nested.mkdir(parents=True)
+
+        assert find_dependabot_config(nested) == own
+
+    def test_a_worktree_marker_file_is_also_a_boundary(
+        self, tmp_path: Path
+    ) -> None:
+        """Worktrees and submodules mark their root with a ``.git`` file.
+
+        Args:
+            tmp_path: Container directory, carrying a Dependabot file.
+        """
+        _write_dependabot(tmp_path, GITHUB_ACTIONS_CONFIG)
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        (worktree / ".git").write_text(
+            "gitdir: ../.git/worktrees/wt\n", encoding="utf-8"
+        )
+
+        assert find_dependabot_config(worktree) is None
+
+
 class TestResolveCooldown:
     """Tests for resolving the cooldown value from configuration."""
 

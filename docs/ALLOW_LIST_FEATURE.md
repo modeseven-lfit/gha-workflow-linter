@@ -1143,12 +1143,29 @@ Semantics:
   parallelism already saturates the API budget, and sequential
   processing keeps the Rich progress output legible and per-repo failures
   attributable.
-- **Shared state across repositories**: one `ValidationCache`, one
-  GitHub client, one allow-list resolution per host repo. Scanning
-  twenty repositories that all pin `lfreleng-actions/.github` costs
-  **one** latest-release lookup, not twenty. This is the main efficiency
+- **Shared state across repositories**: one `ValidationCache`, so one
+  allow-list resolution per host repository. Scanning twenty
+  repositories that all pin `lfreleng-actions/.github` costs **one**
+  latest-release lookup, not twenty. This is the main efficiency
   argument for building multi-repo into the tool rather than looping in
   a shell script.
+
+  The GitHub client is **not** shared. An earlier draft of this section
+  called for one client across the sweep; the implementation opens one
+  per repository, because the validator and auto-fixer each build their
+  client inside their own async context and threading a shared one
+  through both would mean either reordering those lifetimes or handing
+  each stage a client it does not own. What that would save is
+  connection setup, not API calls -- the calls themselves are already
+  saved by the shared cache -- so the trade was not judged worth the
+  coupling. Recorded here rather than left as an unmet claim; still
+  open as an optimisation if a sweep ever proves connection-bound.
+
+  Note also that cache sharing is suspended under a non-default release
+  policy: a cooldown or prerelease eligibility makes a cached
+  `(tag, sha)` policy-dependent, and the cache records no policy, so
+  each repository resolves for itself rather than inheriting another's
+  answer.
 - **Per-repository state**: workflow org (§6.3) and Dependabot cooldown
   (`dependabot.resolve_cooldown`) are resolved per repository, because
   both are repository properties.
@@ -1557,6 +1574,17 @@ endings.
 Phases 1–4 land in `gha-workflow-linter` and can proceed in parallel with
 nothing blocking them. Phase 5 depends on Phase 2 being released to PyPI
 (the workflow consumes the published tool via `uvx`).
+
+### Status
+
+All six phases have shipped. Phases 0 to 4 landed in
+`gha-workflow-linter`; phase 5 lives in `lfreleng-actions/.github` as
+`allow-list-bump.yaml`.
+
+Two kinds deferred along the way, per the rule that nothing ships until
+something emits it: `SHA_COMMENT_MISMATCH` and `OUTDATED_ACTION` remain
+unimplemented, and `--verify-actions` reports outdated action calls
+without them. Both return with whatever work produces them.
 
 ## 19. Risks, edge cases and open questions
 

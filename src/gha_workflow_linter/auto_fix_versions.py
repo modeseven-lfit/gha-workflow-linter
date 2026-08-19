@@ -46,6 +46,46 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
     higher-level latest-version lookups that build on them.
     """
 
+    @property
+    def _persistent_cache_usable(self) -> bool:
+        """Whether persisted latest versions may be read or written.
+
+        The persistent cache is keyed on the repository alone, so it
+        cannot record which release policy produced an entry. Two
+        settings make up that policy.
+
+        A **cooldown** deliberately selects an *older* release, so a
+        shared entry would cross policies in both directions: a
+        repository with a short cooldown could publish a version that a
+        longer-cooled repository is not yet entitled to, and a
+        cooldown-shifted entry could later suppress a valid update for a
+        repository running no cooldown at all.
+
+        **Prerelease eligibility** changes which releases are candidates
+        at all, so a prerelease-enabled run could cache a prerelease that
+        a later default run consumes, or consume a stable-only entry and
+        miss a newer prerelease.
+
+        This matters most in a multi-repository sweep, where one cache
+        serves every repository and each resolves its own policy, but it
+        applies equally to successive single-repository runs sharing the
+        on-disk cache.
+
+        The session cache is unaffected: it lives on one ``AutoFixer``,
+        which serves exactly one repository and therefore one policy.
+
+        Mirrors
+        :attr:`gha_workflow_linter.allow_list_resolver.AllowListResolver.cache_usable`,
+        which bypasses its own cache under the same conditions.
+
+        Returns:
+            ``True`` when the default policy applies, so a stored answer
+            means the same thing to every reader.
+        """
+        return (
+            self.config.cooldown_days <= 0 and not self.config.allow_prerelease
+        )
+
     async def _get_latest_versions_batch(
         self, repo_keys: list[str]
     ) -> dict[str, tuple[str, str]]:
@@ -70,7 +110,11 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
                     session_cache_hits += 1
                     continue
 
-            cached_version = self._cache.get_latest_version(repo_key)
+            cached_version = (
+                self._cache.get_latest_version(repo_key)
+                if self._persistent_cache_usable
+                else None
+            )
             if cached_version:
                 tag, sha = cached_version
                 results[repo_key] = (tag, sha)
@@ -108,7 +152,8 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
                         sha,
                         current_time,
                     )
-                    self._cache.put_latest_version(repo_key, tag, sha)
+                    if self._persistent_cache_usable:
+                        self._cache.put_latest_version(repo_key, tag, sha)
 
                 repos_to_fetch = [
                     repo
@@ -147,8 +192,12 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
                 results[repo_key] = (tag, sha)
                 # Cache in both session and persistent storage
                 self._latest_versions_cache[repo_key] = (tag, sha, current_time)
-                self._cache.put_latest_version(repo_key, tag, sha)
+                if self._persistent_cache_usable:
+                    self._cache.put_latest_version(repo_key, tag, sha)
 
+        # Saved unconditionally: the cache holds validation results
+        # written elsewhere in the run, and those are unaffected by the
+        # cooldown that suppressed the latest-version writes above.
         self._cache.save()
 
         return results

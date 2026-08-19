@@ -1055,7 +1055,9 @@ class TestCLIIntegration:
             result = self.runner.invoke(app, ["lint", temp_dir])
 
             assert result.exit_code == 1
-            assert "Fatal error" in result.stdout
+            # Diagnostics go to standard error, keeping standard output
+            # reserved for results.
+            assert "Fatal error" in result.stderr
 
     @patch("gha_workflow_linter.cli.ConfigManager")
     @patch("gha_workflow_linter.cli.run_linter")

@@ -436,6 +436,118 @@ at a worktree scans that worktree. Pointing it at a directory that
 merely *contains* repositories finds nothing, since each child is a
 boundary.
 
+### Multi-Repository Mode
+
+`--multi-repo` treats the given path as a container of git repositories
+and visits each in turn:
+
+```bash
+# Audit every checkout under a directory
+gha-workflow-linter lint ~/Repositories/lfreleng-actions --multi-repo
+
+# Fail if anything anywhere is stale
+gha-workflow-linter lint ~/Repositories --multi-repo --verify-allow-list
+
+# Bulk remediation across the estate
+gha-workflow-linter lint ~/Repositories --multi-repo --update-allow-list
+```
+
+A directory counts as a repository when it holds a `.git` entry, so
+clones, worktrees and submodules all qualify. `--repo-depth` controls how
+far below the path to look, defaulting to one level. Discovery stops at
+each repository rather than descending into it, so a checkout keeping
+worktrees under `.worktrees/` gets one visit, not one per branch.
+
+Pointing the linter at a repository with `--multi-repo` visits that
+repository alone, so the flag is safe to leave in a wrapper script.
+
+#### Why this rather than a shell loop
+
+The sweep builds one cache and shares it, so repositories pinning the
+same allow-list host share a single latest-release lookup.
+Twenty repositories cost one query rather than twenty.
+
+That sharing stops under a non-default release policy. A cooldown
+targets an older release by design, and prerelease eligibility changes
+which releases count as candidates; the cache records no more than a
+tag and a SHA, so a cached answer cannot say which policy produced it.
+Rather than let one repository's policy leak into another's, the sweep
+repeats the lookup per repository — twenty such repositories cost
+twenty queries. Correctness wins over the saving here, and the saving
+returns as soon as the default policy applies.
+
+Each repository still gets its own workflow organisation and its own
+Dependabot cooldown, since both belong to the repository rather than to
+the sweep.
+
+#### Failures and exit codes
+
+The sweep visits repositories one at a time, and one failing does not
+stop the others: it records the failure, carries on, and closes with a
+table listing every repository, its pin counts and its status.
+
+| Status       | Meaning                                              |
+| ------------ | ---------------------------------------------------- |
+| `clean`      | Nothing outstanding                                  |
+| `updated`    | The run rewrote something, leaving nothing to do     |
+| `findings`   | Something needs attention                            |
+| `unresolved` | A host did not resolve, leaving the check incomplete |
+| `failed`     | The sweep could not scan the repository              |
+
+`unresolved` gets its own label because an incomplete check says nothing
+about the repository: its counts are empty for want of an answer, not
+for want of a problem.
+
+What remains outranks what the run achieved, so a partial remediation —
+some pins rewritten, others still stale — reports `findings` rather than
+`updated`. Reading `updated` means the repository needs no further
+attention.
+
+The exit code is the most significant across the sweep, following the
+precedence in [Exit Codes](#exit-codes). A configuration error is the one
+exception: a bad setting applies to every repository, so it stops the run
+rather than repeating once per checkout.
+
+#### JSON output
+
+`--multi-repo --format json` emits a single document covering the whole
+sweep, rather than one object per repository:
+
+```json
+{
+  "repositories": [
+    {
+      "repository": "example-workflows",
+      "exit_code": 3,
+      "error": null,
+      "write_failures": 0,
+      "autofix_error": null,
+      "results": { "scan_summary": {}, "allow_list": {} }
+    }
+  ],
+  "summary": { "repositories": 1, "failed": 0, "exit_code": 3 }
+}
+```
+
+A repository the sweep could not scan carries its reason in `error`, so a
+failure stays distinguishable from a clean result. An empty container
+still emits a document, for the same reason.
+
+`write_failures` and `autofix_error` record the two failures that
+produce no validation error of their own: a rewrite that could not reach
+disk, and an auto-fix stage that did not complete. Without them a
+consumer reading `results` alone would find nothing to explain a
+non-zero `exit_code`.
+
+In this mode the sweep prints neither progress commentary nor the
+closing table. Diagnostics go to standard error throughout, so a
+redirect captures the document alone:
+
+```bash
+gha-workflow-linter lint ~/Repositories --multi-repo --format json \
+  > sweep.json
+```
+
 ### As a Pre-commit Hook
 
 Add to your `.pre-commit-config.yaml`:
@@ -794,6 +906,10 @@ Validation Errors:
 ```bash
 gha-workflow-linter lint --format json
 ```
+
+The tool writes the document to standard output on its own. Log records,
+warnings and progress commentary all go to standard error, so a parser
+can consume the output directly.
 
 ```json
 {

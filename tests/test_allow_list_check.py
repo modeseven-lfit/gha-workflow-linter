@@ -497,6 +497,147 @@ class TestCachedTargetDirection:
         assert classify_pins([pin], hosts, verify=False) == []
 
 
+class TestPolicyScopedCaching:
+    """Only a default-policy run may share the persistent cache.
+
+    ``ValidationCache`` stores ``(tag, sha)`` and records no policy, so
+    one entry means different things to runs configured differently.
+    :class:`TestCachedTargetDirection` covers the cooldown hazard through
+    its user-visible consequence; this class pins the guard itself --
+    which policies may touch the cache at all -- and the prerelease
+    hazard, which is about *which releases are candidates* rather than
+    about direction.
+    """
+
+    @pytest.mark.parametrize(
+        ("cooldown_days", "allow_prerelease", "usable"),
+        [
+            (0, False, True),
+            (7, False, False),
+            (0, True, False),
+            (7, True, False),
+        ],
+    )
+    def test_only_the_default_policy_is_cacheable(
+        self,
+        tmp_path: Path,
+        cooldown_days: int,
+        allow_prerelease: bool,
+        usable: bool,
+    ) -> None:
+        """A stored answer must mean the same to every reader."""
+        config = Config(
+            cooldown_days=cooldown_days,
+            allow_prerelease=allow_prerelease,
+            cache=CacheConfig(enabled=False, cache_dir=tmp_path),
+        )
+        resolver = AllowListResolver(config, ValidationCache(config.cache))
+
+        assert resolver.cache_usable is usable
+
+    @pytest.mark.asyncio
+    async def test_a_prerelease_run_ignores_a_cached_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An entry chosen under another policy could hide a prerelease.
+
+        The seeded v0.1.1 stands in for any target a differently
+        configured run left behind. Consuming it would report the
+        correctly-pinned v0.12.2 as stale, since a restored record
+        carries no commit map.
+        """
+        config = Config(
+            allow_prerelease=True,
+            cache=CacheConfig(enabled=True, cache_dir=tmp_path),
+        )
+        cache = ValidationCache(config.cache)
+        cache.put_latest_version(HOST_REPO, STALE_TAG, STALE_SHA)
+        resolver = AllowListResolver(config, cache)
+        resolved: list[list[str]] = []
+
+        async def fake_uncached(
+            repo_keys: list[str],
+        ) -> dict[str, LatestRelease | None]:
+            """Answer with the current target, carrying its commit map.
+
+            Args:
+                repo_keys: Keys the resolver could not answer locally.
+
+            Returns:
+                The unconstrained target for every key.
+            """
+            resolved.append(repo_keys)
+            return dict.fromkeys(repo_keys, CURRENT_TARGET)
+
+        monkeypatch.setattr(resolver, "_resolve_uncached", fake_uncached)
+        hosts = await resolver.resolve([HOST_REPO])
+
+        pin = make_pin(ref=CURRENT_SHA, version_comment=CURRENT_TAG)
+        assert resolved == [[HOST_REPO]]
+        assert classify_pins([pin], hosts, verify=False) == []
+
+    @pytest.mark.asyncio
+    async def test_a_prerelease_run_does_not_cache_its_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A later default run must not read back a prerelease."""
+        config = Config(
+            allow_prerelease=True,
+            cache=CacheConfig(enabled=True, cache_dir=tmp_path),
+        )
+        cache = ValidationCache(config.cache)
+        resolver = AllowListResolver(config, cache)
+
+        async def fake_uncached(
+            repo_keys: list[str],
+        ) -> dict[str, LatestRelease | None]:
+            """Answer every key without reaching a backend.
+
+            Args:
+                repo_keys: Keys the resolver could not answer locally.
+
+            Returns:
+                The unconstrained target for every key.
+            """
+            return dict.fromkeys(repo_keys, CURRENT_TARGET)
+
+        monkeypatch.setattr(resolver, "_resolve_uncached", fake_uncached)
+        hosts = await resolver.resolve([HOST_REPO])
+
+        assert hosts == {HOST_REPO: CURRENT_TARGET}
+        assert cache.get_latest_version(HOST_REPO) is None
+
+    @pytest.mark.asyncio
+    async def test_a_default_policy_run_caches_its_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression guard: the bypass must stay policy-scoped."""
+        config = Config(
+            cache=CacheConfig(enabled=True, cache_dir=tmp_path),
+        )
+        cache = ValidationCache(config.cache)
+        resolver = AllowListResolver(config, cache)
+
+        async def fake_uncached(
+            repo_keys: list[str],
+        ) -> dict[str, LatestRelease | None]:
+            """Answer every key without reaching a backend.
+
+            Args:
+                repo_keys: Keys the resolver could not answer locally.
+
+            Returns:
+                The unconstrained target for every key.
+            """
+            return dict.fromkeys(repo_keys, CURRENT_TARGET)
+
+        monkeypatch.setattr(resolver, "_resolve_uncached", fake_uncached)
+        hosts = await resolver.resolve([HOST_REPO])
+
+        assert hosts == {HOST_REPO: CURRENT_TARGET}
+        assert cache.get_latest_version(HOST_REPO) == (CURRENT_TAG, CURRENT_SHA)
+
+
 class TestOutOfScopeKinds:
     """``INVALID_SPEC`` and ``UNRESOLVABLE`` are never manufactured."""
 
@@ -934,6 +1075,40 @@ class TestWorkflowOrgPrecedence:
         self._git_repo(tmp_path, {"upstream": "git@github.com:up-org/r.git"})
 
         assert resolve_workflow_org(tmp_path) == "env-org"
+
+    def test_environment_is_ignored_when_not_trusted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A sweep resolves each checkout from its own remotes.
+
+        ``GITHUB_REPOSITORY_OWNER`` names the repository a workflow was
+        launched for. That is right for a single run, but in a
+        multi-repository sweep it answers identically for every
+        checkout, resolving them all against one organisation's
+        ``.github`` repository.
+        """
+        monkeypatch.setenv(ORG_ENV_VAR, "env-org")
+        self._git_repo(
+            tmp_path, {"upstream": "https://github.com/up-org/r.git"}
+        )
+
+        assert resolve_workflow_org(tmp_path, use_environment=False) == "up-org"
+
+    def test_configured_still_wins_when_not_trusted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit --allow-list-org outranks both sources."""
+        monkeypatch.setenv(ORG_ENV_VAR, "env-org")
+        self._git_repo(
+            tmp_path, {"upstream": "https://github.com/up-org/r.git"}
+        )
+
+        assert (
+            resolve_workflow_org(
+                tmp_path, configured="asked-for", use_environment=False
+            )
+            == "asked-for"
+        )
 
     def test_upstream_beats_origin(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

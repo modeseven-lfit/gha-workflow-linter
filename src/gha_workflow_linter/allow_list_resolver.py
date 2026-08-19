@@ -97,7 +97,11 @@ class AllowListResolver:
     def cache_usable(self) -> bool:
         """Whether persisted results may be used and written this run.
 
-        The cache stores ``(tag, sha)`` and nothing else, so a restored
+        The cache stores ``(tag, sha)`` and nothing else, so it cannot
+        record which release policy produced an entry. Two settings make
+        up that policy.
+
+        Under a **cooldown**, a restored
         :class:`~gha_workflow_linter.latest_release.LatestRelease` has an
         empty ``commit_tags`` and cannot say whether a pin is behind the
         target or ahead of it. That is harmless without a cooldown --
@@ -106,15 +110,22 @@ class AllowListResolver:
         release, and losing direction would turn a correct pin into a
         recommendation to downgrade.
 
-        Bypassing the cache while a cooldown is active also keeps the
-        stored entries honest: only unconstrained "newest release"
-        answers are ever written, so a later run without a cooldown
-        cannot read back a cooldown-shifted target.
+        **Prerelease eligibility** changes which releases are candidates
+        at all, so a prerelease-enabled run could cache a prerelease that
+        a later default run consumes, or consume a stable-only entry and
+        miss a newer prerelease.
+
+        Bypassing the cache under either also keeps the stored entries
+        honest: only default-policy answers are ever written, so a later
+        run cannot read back a policy-shifted target.
 
         Returns:
-            ``True`` when no cooldown is in force.
+            ``True`` when the default policy applies, so a stored answer
+            means the same thing to every reader.
         """
-        return self.config.cooldown_days <= 0
+        return self.config.cooldown_days <= 0 and not (
+            self.config.allow_prerelease
+        )
 
     async def resolve(
         self, repo_keys: Iterable[str]
@@ -158,8 +169,9 @@ class AllowListResolver:
 
         if not cache_usable:
             self.logger.debug(
-                "Cooldown active; bypassing the latest-release cache so "
-                "the release each pinned commit belongs to stays known"
+                "Non-default release policy (cooldown or prerelease "
+                "eligibility); bypassing the latest-release cache so the "
+                "release each pinned commit belongs to stays known"
             )
 
         self.logger.debug(

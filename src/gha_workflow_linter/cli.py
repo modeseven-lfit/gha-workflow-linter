@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 import dataclasses
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import logging
 from pathlib import Path
@@ -69,6 +69,7 @@ from .models import (
     ValidationMethod,
     ValidationResult,
 )
+from .multi_repo import find_repositories, is_repository
 from .scanner import WorkflowScanner
 from .system_utils import get_default_workers
 from .utils import has_test_comment
@@ -265,6 +266,7 @@ def _preprocess_args_for_default_command(
         "-f",
         "--files",
         "--allow-list-org",
+        "--repo-depth",
     }
 
     # No args at all: behave like the explicit `lint` subcommand.
@@ -388,8 +390,12 @@ def setup_logging(log_level: LogLevel, quiet: bool = False) -> None:
         root_logger.removeHandler(handler)
 
     # Add our handler
+    # Diagnostics belong on standard error. The JSON output modes write
+    # their document to standard output, and a single log record landing
+    # there would make it unparsable -- a certainty in a sweep, which
+    # logs an error for every repository it survives.
     rich_handler = RichHandler(
-        console=console,
+        console=err_console,
         show_time=False,
         show_path=False,
         markup=True,
@@ -775,6 +781,24 @@ def lint(
             "remote, then 'origin', when not given"
         ),
     ),
+    multi_repo: bool = typer.Option(
+        False,
+        "--multi-repo",
+        "-M",
+        help=(
+            "Treat PATH as a container of git repositories and visit each "
+            "in turn, sharing one cache across them"
+        ),
+    ),
+    repo_depth: int = typer.Option(
+        1,
+        "--repo-depth",
+        help=(
+            "How many levels below PATH to look for repositories when "
+            "--multi-repo is given"
+        ),
+        min=0,
+    ),
     _help: bool = typer.Option(
         False,
         "--help",
@@ -895,6 +919,11 @@ def lint(
         config_manager = ConfigManager()
         config = config_manager.load_config(config_file)
 
+        # Refused before any backend preflight: that preflight makes
+        # network calls and can exit on a rate limit, which would retire
+        # an invalid invocation as a success without ever reporting it.
+        _reject_files_with_multi_repo(files, multi_repo=multi_repo)
+
         # Override config with CLI options
         cli_options = CLIOptions(
             path=path,
@@ -925,6 +954,8 @@ def lint(
             update_allow_list=update_allow_list,
             show_suppressed=show_suppressed,
             allow_list_org=allow_list_org,
+            multi_repo=multi_repo,
+            repo_depth=repo_depth,
         )
 
         # Apply CLI overrides to config
@@ -933,8 +964,17 @@ def lint(
         # Resolve the action-update cooldown window. Precedence: explicit
         # --cooldown flag, then the repository's Dependabot configuration,
         # then 0 (no cooldown / original behaviour).
-        config.cooldown_days = _resolve_cooldown_days(
-            cooldown, path, quiet, output_format
+        #
+        # A sweep skips this. The cooldown belongs to each checkout, and
+        # ``_run_repository_in_sweep`` resolves it there from that
+        # repository's own configuration, so reading the container's
+        # would announce a value that is then discarded -- and an
+        # unreadable one would abort the whole command before the
+        # per-repository failure boundary exists.
+        config.cooldown_days = (
+            0
+            if multi_repo
+            else _resolve_cooldown_days(cooldown, path, quiet, output_format)
         )
 
         logger.debug(f"Starting gha-workflow-linter {__version__}")
@@ -1097,11 +1137,45 @@ class _ValidationOutcome:
 
 @dataclass(frozen=True)
 class _AutoFixOutcome:
-    """Files changed and statistics produced by the auto-fixer."""
+    """Files changed and statistics produced by the auto-fixer.
+
+    Attributes:
+        fixed_files: Changes applied, per file.
+        redirect_stats: Repository-redirect counters.
+        stale_actions_summary: Outdated calls detected but not applied.
+        write_failures: Files a rewrite was planned for but could not be
+            written.
+        stage_error: Why the stage failed outright, or None. Failures
+            here are logged and swallowed so validation results still
+            reach the reader, which leaves nothing else to show that the
+            requested fixing never happened.
+    """
 
     fixed_files: dict[Path, list[dict[str, str]]]
     redirect_stats: dict[str, int]
     stale_actions_summary: dict[str, list[dict[str, Any]]]
+    write_failures: list[Path] = field(default_factory=list)
+    stage_error: str | None = None
+
+
+@dataclass(frozen=True)
+class _ScanShortCircuit:
+    """A scan/validate stage that ended before producing results.
+
+    Carries the reason as well as the code, so a caller aggregating many
+    repositories can tell a repository that *failed* from one that merely
+    had findings. Collapsing both to an integer made an unreadable
+    checkout indistinguishable from a lint result, which is the sharper
+    edge of reporting an unusable input as an absence of problems.
+
+    Attributes:
+        exit_code: What this stage alone would exit with.
+        error: Why the run stopped, or ``None`` when nothing went wrong
+            (there was simply nothing to validate).
+    """
+
+    exit_code: int
+    error: str | None = None
 
 
 def _handle_validation_aborted(
@@ -1163,17 +1237,67 @@ def _handle_validation_aborted(
     return 1
 
 
+def _describe_exception(error: Exception) -> str:
+    """Describe a failure, even one carrying no message.
+
+    ``str(RuntimeError())`` is empty, and every consumer of a recorded
+    reason tests it for truth, so an empty description reads as no
+    failure at all. The class name is a poor description but an honest
+    one.
+
+    Args:
+        error: The exception to describe.
+
+    Returns:
+        The exception's message, or its class name when it has none.
+    """
+    return str(error) or type(error).__name__
+
+
+def _reject_files_with_multi_repo(
+    files: list[str] | None, *, multi_repo: bool
+) -> None:
+    """Refuse ``--files`` combined with ``--multi-repo``.
+
+    ``--files`` names individual paths, and the scanner honours an
+    absolute one whatever root it is given. Combined with a sweep it
+    would scan -- and under ``--update-allow-list`` rewrite -- the same
+    file once per repository, attributing it to each in turn. The two
+    options ask for different things, so the combination is refused
+    rather than given an arbitrary meaning.
+
+    Called from the command before any backend preflight, since that
+    preflight makes network calls and can exit on a rate limit, which
+    would retire an invalid invocation as a success. Called again from
+    the sweep itself, which a library caller can reach directly.
+
+    Args:
+        files: Individual paths the caller named, if any.
+        multi_repo: Whether a sweep was requested.
+
+    Raises:
+        ConfigurationError: If both were given.
+    """
+    if multi_repo and files:
+        raise ConfigurationError(
+            "--files cannot be combined with --multi-repo: --files names "
+            "individual paths, which a sweep would scan once per "
+            "repository. Run the linter in the repository that owns "
+            "those files instead."
+        )
+
+
 def _scan_and_validate(
     config: Config,
     options: CLIOptions,
     scanner: WorkflowScanner,
     shared_cache: ValidationCache,
-) -> int | _ValidationOutcome:
+) -> _ScanShortCircuit | _ValidationOutcome:
     """Scan workflows and validate their action calls.
 
-    Returns an ``int`` exit code when the run short-circuits (scan error,
-    nothing to validate, or aborted validation); otherwise returns a
-    :class:`_ValidationOutcome` for downstream processing.
+    Returns a :class:`_ScanShortCircuit` when the run stops early (scan
+    error, nothing to validate, or aborted validation); otherwise returns
+    a :class:`_ValidationOutcome` for downstream processing.
     """
     logger = logging.getLogger(__name__)
 
@@ -1193,13 +1317,16 @@ def _scan_and_validate(
                 options.path, progress, scan_task, specific_files=options.files
             )
         except Exception as e:
-            logger.error(f"Error scanning workflows: {e}")
-            return 1
+            reason = _describe_exception(e)
+            logger.error(f"Error scanning workflows: {reason}")
+            return _ScanShortCircuit(1, f"Error scanning workflows: {reason}")
 
         if not workflow_calls:
             if not options.quiet:
                 console.print("[yellow]No workflows found to validate[/yellow]")
-            return 0
+            # Not a failure: a repository with no workflows is a valid,
+            # clean result rather than one that could not be scanned.
+            return _ScanShortCircuit(0)
 
         # Count total calls for progress tracking
         total_calls = sum(len(calls) for calls in workflow_calls.values())
@@ -1214,14 +1341,24 @@ def _scan_and_validate(
                 workflow_calls, progress, validate_task
             )
         except ValidationAbortedError as e:
-            return _handle_validation_aborted(
-                e,
-                suppress_console=options.quiet
-                or options.output_format == "json",
+            return _ScanShortCircuit(
+                _handle_validation_aborted(
+                    e,
+                    suppress_console=options.quiet
+                    or options.output_format == "json",
+                ),
+                # str(e) rather than e.message: the message is the
+                # generic summary and the reason carries the underlying
+                # failure, so reporting the message alone would drop the
+                # network or authentication detail a reader needs.
+                f"Validation aborted: {e}",
             )
         except Exception as e:
-            logger.error(f"Unexpected error validating action calls: {e}")
-            return 1
+            reason = _describe_exception(e)
+            logger.error(f"Unexpected error validating action calls: {reason}")
+            return _ScanShortCircuit(
+                1, f"Unexpected error validating action calls: {reason}"
+            )
 
     return _ValidationOutcome(
         workflow_calls, validation_errors, validator, total_calls
@@ -1241,9 +1378,18 @@ def _run_auto_fix_stage(
     """
     logger = logging.getLogger(__name__)
 
+    # Derived once and used for every display in this stage. The fixer's
+    # live progress, the applied-changes listing and the failure notice
+    # all write to standard output, which in JSON mode carries the
+    # document -- and a programmatic caller of ``run_linter`` gets none
+    # of the command layer's quiet coercion.
+    silent = options.quiet or options.output_format == "json"
+
     fixed_files: dict[Path, list[dict[str, str]]] = {}
     redirect_stats: dict[str, int] = {"actions_moved": 0, "calls_updated": 0}
     stale_actions_summary: dict[str, list[dict[str, Any]]] = {}
+    write_failures: list[Path] = []
+    stage_error: str | None = None
 
     # Determine if we should run auto-fix:
     # - If auto_fix is enabled, fix validation errors and check for outdated
@@ -1263,11 +1409,13 @@ def _run_auto_fix_stage(
             dict[Path, list[dict[str, str]]],
             dict[str, int],
             dict[str, list[dict[str, Any]]],
+            list[Path],
         ]:
             async with AutoFixer(
                 config,
                 base_path=options.path,
                 cache=shared_cache,
+                quiet=silent,
             ) as auto_fixer:
                 # When auto_fix is enabled, always pass all action calls to
                 # check. check_for_updates=True only when update_actions is
@@ -1275,25 +1423,42 @@ def _run_auto_fix_stage(
                 # validation errors, report outdated versions.
                 all_calls = validation.workflow_calls if config.auto_fix else {}
                 check_for_updates = config.update_actions
-                return await auto_fixer.fix_validation_errors(
+                result = await auto_fixer.fix_validation_errors(
                     validation.validation_errors,
                     all_calls,
                     check_for_updates=check_for_updates,
                 )
+                # Read inside the context: a rewrite that failed leaves
+                # no trace in the returned tuple.
+                return (*result, list(auto_fixer.write_failures))
 
-        fixed_files, redirect_stats, stale_actions_summary = asyncio.run(
-            run_auto_fix()
-        )
+        (
+            fixed_files,
+            redirect_stats,
+            stale_actions_summary,
+            write_failures,
+        ) = asyncio.run(run_auto_fix())
 
-        if fixed_files and not options.quiet:
+        if fixed_files and not silent:
             _display_auto_fix_changes(fixed_files, options)
 
     except Exception as e:
-        logger.warning(f"Auto-fix failed: {e}")
-        if not options.quiet:
-            console.print(f"[yellow]Auto-fix failed: {e} ⚠️[/yellow]")
+        # Swallowed so validation results still reach the reader, but
+        # recorded: with nothing applied, nothing stale and no
+        # validation error, an all-empty outcome would otherwise report
+        # a successful run that did no fixing at all.
+        stage_error = _describe_exception(e)
+        logger.warning(f"Auto-fix failed: {stage_error}")
+        if not silent:
+            console.print(f"[yellow]Auto-fix failed: {stage_error} ⚠️[/yellow]")
 
-    return _AutoFixOutcome(fixed_files, redirect_stats, stale_actions_summary)
+    return _AutoFixOutcome(
+        fixed_files,
+        redirect_stats,
+        stale_actions_summary,
+        write_failures,
+        stage_error,
+    )
 
 
 def _display_auto_fix_changes(
@@ -1368,8 +1533,26 @@ def _emit_results(
     autofix: _AutoFixOutcome,
     config: Config,
     allow_list: AllowListOutcome | None = None,
-) -> None:
-    """Generate and display the scan/validation results."""
+    *,
+    collect_json: bool = False,
+) -> dict[str, Any] | None:
+    """Generate and display the scan/validation results.
+
+    Args:
+        options: Resolved CLI options.
+        scanner: The scanner that produced the workflow calls.
+        validation: Outcome of the scan/validate stage.
+        autofix: Outcome of the auto-fix stage.
+        config: Resolved configuration.
+        allow_list: Outcome of the allow-list stage, when it ran.
+        collect_json: Return the JSON payload instead of printing it, so
+            a sweep can assemble one document from many repositories.
+
+    Returns:
+        The JSON payload when ``collect_json`` is set and the output
+        format is JSON, so a caller may aggregate it; ``None``
+        otherwise.
+    """
     scan_summary = scanner.get_scan_summary(validation.workflow_calls)
 
     # Calculate unique calls for statistics
@@ -1384,6 +1567,17 @@ def _emit_results(
     )
 
     if options.output_format == "json":
+        if collect_json:
+            # The caller is assembling one document from several
+            # repositories, so hand back the payload rather than
+            # printing a top-level object of our own.
+            return build_json_results(
+                scan_summary,
+                validation_summary,
+                validation.validation_errors,
+                options.path,
+                allow_list,
+            )
         output_json_results(
             scan_summary,
             validation_summary,
@@ -1391,25 +1585,27 @@ def _emit_results(
             options.path,
             allow_list,
         )
-    else:
-        output_text_results(
-            scan_summary,
-            validation_summary,
-            validation.validation_errors,
-            options.path,
-            options.quiet,
-            autofix.fixed_files,
-            autofix.redirect_stats,
-            autofix.stale_actions_summary,
+        return None
+
+    output_text_results(
+        scan_summary,
+        validation_summary,
+        validation.validation_errors,
+        options.path,
+        options.quiet,
+        autofix.fixed_files,
+        autofix.redirect_stats,
+        autofix.stale_actions_summary,
+    )
+    if allow_list is not None and not options.quiet:
+        # Only suggest remediation when it has not already run.
+        render_allow_list(
+            allow_list,
+            root=options.path,
+            show_suppressed=config.allow_list.show_suppressed,
+            update_hint=not config.allow_list.update,
         )
-        if allow_list is not None and not options.quiet:
-            # Only suggest remediation when it has not already run.
-            render_allow_list(
-                allow_list,
-                root=options.path,
-                show_suppressed=config.allow_list.show_suppressed,
-                update_hint=not config.allow_list.update,
-            )
+    return None
 
 
 #: Sentinel host key used when the allow-list stage itself fails, rather
@@ -1463,7 +1659,24 @@ def _run_allow_list_stage(
         # --allow-list-org would silently disable the whole check.
         raise
     except Exception as e:  # noqa: BLE001 - advisory unless enforcing
-        logger.warning(f"Allow-list check failed: {e}")
+        logger.warning(f"Allow-list check failed: {_describe_exception(e)}")
+        if config.allow_list.update:
+            # Updating was explicitly requested, so silently doing none
+            # of it -- or part of it, if earlier files were already
+            # rewritten -- must not report success. Same reasoning as
+            # the action fixer's stage error.
+            if not options.quiet:
+                console.print(
+                    f"[red]Allow-list update could not complete: "
+                    f"{_describe_exception(e)} ❌[/red]"
+                )
+            return AllowListOutcome(
+                findings=[],
+                hosts={},
+                unresolved={STAGE_FAILURE_HOST: _describe_exception(e)},
+                suppressed_count=0,
+                checked=True,
+            )
         if not config.allow_list.verify:
             # Advisory mode: a developer offline on a train must still be
             # able to commit, so the check is skipped entirely.
@@ -1474,12 +1687,13 @@ def _run_allow_list_stage(
         # ALLOW_LIST_UNRESOLVED.
         if not options.quiet:
             console.print(
-                f"[red]Allow-list verification could not run: {e} ❌[/red]"
+                f"[red]Allow-list verification could not run: "
+                f"{_describe_exception(e)} ❌[/red]"
             )
         return AllowListOutcome(
             findings=[],
             hosts={},
-            unresolved={STAGE_FAILURE_HOST: str(e)},
+            unresolved={STAGE_FAILURE_HOST: _describe_exception(e)},
             suppressed_count=0,
             checked=True,
         )
@@ -1621,6 +1835,24 @@ def _determine_exit_code(
     """
     codes: list[int] = []
 
+    # A rewrite the caller asked for that could not be written is a
+    # failure, and one that shows up nowhere else: the planned change is
+    # absent from the applied fixes, and under --update-actions the call
+    # was never recorded as stale either. Reporting success would tell
+    # the caller the work was done.
+    if autofix.write_failures:
+        codes.append(exit_codes.DEFECTS_FOUND)
+
+    # A stage that failed outright leaves even less behind. It only
+    # fails the run when updating was explicitly requested, though:
+    # auto-fix runs by default, and a stage that could not reach the
+    # network must not stop a developer committing, exactly as the
+    # allow-list check degrades in advisory mode. Asking for
+    # --update-actions is asking for work to be done, so silently doing
+    # none of it is a different matter.
+    if autofix.stage_error and config.update_actions:
+        codes.append(exit_codes.DEFECTS_FOUND)
+
     # Files modified on disk are reported as a failure so a CI job or a
     # pre-commit hook notices that the tree changed underneath it.
     if autofix.fixed_files:
@@ -1656,13 +1888,18 @@ def _determine_exit_code(
             # Files changed on disk, so the caller must notice, exactly as
             # for the action-call fixer.
             codes.append(exit_codes.DEFECTS_FOUND)
-        if config.allow_list.verify:
-            if allow_list.unresolved:
-                codes.append(exit_codes.ALLOW_LIST_UNRESOLVED)
-            elif allow_list.outstanding:
-                # Anything remediation already rewrote is no longer a
-                # problem, so only what remains can fail the run.
-                codes.append(exit_codes.ALLOW_LIST_STALE)
+        # An incomplete check fails when enforcement was requested, and
+        # equally when updating was: asking for an update and silently
+        # getting none of it -- or part of it, if earlier files were
+        # already rewritten -- must not report success.
+        if allow_list.unresolved and (
+            config.allow_list.verify or config.allow_list.update
+        ):
+            codes.append(exit_codes.ALLOW_LIST_UNRESOLVED)
+        elif config.allow_list.verify and allow_list.outstanding:
+            # Anything remediation already rewrote is no longer a
+            # problem, so only what remains can fail the run.
+            codes.append(exit_codes.ALLOW_LIST_STALE)
 
     return exit_codes.combine(*codes) if codes else exit_codes.SUCCESS
 
@@ -1682,6 +1919,42 @@ def _has_outdated_actions(autofix: _AutoFixOutcome) -> bool:
     )
 
 
+@dataclasses.dataclass(frozen=True)
+class RunOutcome:
+    """What one repository's run produced.
+
+    Attributes:
+        exit_code: The code this repository alone would have exited with.
+        allow_list: Outcome of the allow-list stage, when it ran.
+        files_changed: How many files a fixer rewrote.
+        defects: Validation errors left unrepaired, excluding test
+            references and anything the auto-fixer rewrote.
+        outdated: Action calls with a newer release available. Advisory
+            unless ``--verify-actions``, so the exit code alone cannot
+            reveal them.
+        write_failures: Files a rewrite was planned for but could not be
+            written. Counted separately because such a file appears in
+            no other tally.
+        autofix_error: Why the auto-fix stage failed outright, or None.
+            Recorded for the same reason: a stage that never ran leaves
+            nothing else behind.
+        error: Description of a failure that stopped the run, or None.
+        json_payload: This repository's JSON results, present only when
+            the caller asked for them to be collected rather than
+            printed.
+    """
+
+    exit_code: int
+    allow_list: AllowListOutcome | None = None
+    files_changed: int = 0
+    defects: int = 0
+    outdated: int = 0
+    write_failures: int = 0
+    autofix_error: str | None = None
+    error: str | None = None
+    json_payload: dict[str, Any] | None = None
+
+
 def run_linter(config: Config, options: CLIOptions) -> int:
     """
     Run the main linting process.
@@ -1693,29 +1966,61 @@ def run_linter(config: Config, options: CLIOptions) -> int:
     Returns:
         Exit code from :mod:`gha_workflow_linter.exit_codes`.
     """
-    scanner = WorkflowScanner(config)
+    if options.multi_repo:
+        return _run_multi_repo(config, options)
 
-    # Build a single ValidationCache and share it across the validator
-    # and (later) the auto-fixer to avoid duplicate disk I/O and
-    # competing save() calls.
     shared_cache = ValidationCache(config.cache)
-
     # Eagerly load the cache and run all startup-time checks so any
     # banners render *before* opening the Rich Progress UI (printing
     # inside the progress block would interleave with the active
     # spinner and corrupt output).
     _render_cache_prime_banners(shared_cache.prime(), quiet=options.quiet)
+    return _run_one_repository(config, options, shared_cache).exit_code
+
+
+def _run_one_repository(
+    config: Config,
+    options: CLIOptions,
+    shared_cache: ValidationCache,
+    *,
+    collect_json: bool = False,
+) -> RunOutcome:
+    """Scan, validate, fix and report a single repository.
+
+    Args:
+        config: Resolved configuration for this repository.
+        options: Resolved CLI options, with ``path`` set to it.
+        shared_cache: Cache shared with every other stage, and across
+            repositories in a multi-repository run.
+        collect_json: Return the JSON payload on the outcome instead of
+            printing it, so a sweep can assemble one document rather
+            than emitting several.
+
+    Returns:
+        What the run produced, for aggregation by the caller.
+    """
+    scanner = WorkflowScanner(config)
 
     scan_result = _scan_and_validate(config, options, scanner, shared_cache)
-    if isinstance(scan_result, int):
-        return scan_result
+    if isinstance(scan_result, _ScanShortCircuit):
+        return RunOutcome(
+            exit_code=scan_result.exit_code, error=scan_result.error
+        )
     validation = scan_result
 
     autofix = _run_auto_fix_stage(config, options, shared_cache, validation)
 
     allow_list = _run_allow_list_stage(config, options, shared_cache)
 
-    _emit_results(options, scanner, validation, autofix, config, allow_list)
+    payload = _emit_results(
+        options,
+        scanner,
+        validation,
+        autofix,
+        config,
+        allow_list,
+        collect_json=collect_json,
+    )
 
     # Report outdated actions when auto-fix repaired validation errors but
     # version bumps were only detected, not applied. This is presentation
@@ -1731,9 +2036,447 @@ def run_linter(config: Config, options: CLIOptions) -> int:
             autofix.stale_actions_summary, options
         )
 
-    return _determine_exit_code(
-        options, validation, autofix, config, allow_list
+    repaired = _repaired_locations(autofix)
+
+    return RunOutcome(
+        exit_code=_determine_exit_code(
+            options, validation, autofix, config, allow_list
+        ),
+        allow_list=allow_list,
+        files_changed=sum(
+            1
+            for changes in autofix.fixed_files.values()
+            if any(change.get("skipped") != "true" for change in changes)
+        ),
+        defects=sum(
+            1
+            for error in validation.validation_errors
+            if not has_test_comment(error.action_call)
+            and (error.file_path, error.action_call.line_number) not in repaired
+        ),
+        outdated=sum(
+            len(items) for items in autofix.stale_actions_summary.values()
+        ),
+        write_failures=len(autofix.write_failures),
+        autofix_error=autofix.stage_error,
+        json_payload=payload,
     )
+
+
+def _repaired_locations(autofix: _AutoFixOutcome) -> set[tuple[Path, int]]:
+    """Locate the calls the auto-fixer actually rewrote.
+
+    Used to keep a repaired call out of the outstanding-defect tally: it
+    was a validation error when the run began, but it is not one the
+    reader still has to deal with, and counting it as both fixed and
+    outstanding reads as a contradiction.
+
+    Skipped entries are excluded, since those record a call the fixer
+    deliberately left alone.
+
+    Args:
+        autofix: Outcome of the auto-fix stage.
+
+    Returns:
+        ``(file path, line number)`` pairs that were rewritten on disk.
+    """
+    repaired: set[tuple[Path, int]] = set()
+    for file_path, changes in autofix.fixed_files.items():
+        for change in changes:
+            if change.get("skipped") == "true":
+                continue
+            line_number = change.get("line_number")
+            if line_number is None:
+                continue
+            try:
+                repaired.add((file_path, int(line_number)))
+            except ValueError:  # pragma: no cover - defensive
+                continue
+    return repaired
+
+
+def _repository_label(repository: Path, root: Path) -> str:
+    """Name a repository for the sweep's output.
+
+    Grouped layouts put more than one ``service`` under a container, so
+    the basename alone cannot attribute a finding. The path relative to
+    the sweep root can, except when the two are the same -- the
+    root-repository shortcut -- where it degrades to ``.``.
+
+    That shortcut takes the basename instead, but of the *resolved*
+    path: a caller may name a repository ``Path(".")``, whose basename
+    is empty, and a blank label loses the attribution this exists to
+    provide. A checkout at the filesystem root has no basename either,
+    so the path itself is the last resort.
+
+    Args:
+        repository: The repository being described.
+        root: The container the sweep was pointed at.
+
+    Returns:
+        A non-empty label distinguishing this repository from its
+        siblings.
+    """
+    relative = str(_get_relative_path(repository, root))
+    if relative != ".":
+        return relative
+
+    try:
+        resolved = repository.resolve()
+    except OSError:  # pragma: no cover - defensive
+        resolved = repository
+    return resolved.name or str(resolved)
+
+
+def _run_multi_repo(config: Config, options: CLIOptions) -> int:
+    """Visit every repository beneath the given path in turn.
+
+    Repositories are processed sequentially. The intra-repository
+    parallelism already saturates the API budget, and one repository at a
+    time keeps the progress output legible and attributes a failure to
+    the repository that caused it.
+
+    The cache is built once and shared, so twenty repositories pinning
+    the same allow-list host cost one latest-release lookup rather than
+    twenty -- under the default release policy. A cooldown or prerelease
+    eligibility makes a cached answer policy-dependent, so both bypass
+    the cache and each repository resolves the host for itself.
+    Configuration is copied per repository, because the workflow
+    organisation and the Dependabot cooldown are properties of each one.
+
+    In JSON output mode every repository's payload is collected into a
+    single document rather than printed as it goes, so standard output
+    stays parseable, and the progress commentary is suppressed for the
+    same reason.
+
+    Args:
+        config: Resolved configuration, used as the template per
+            repository.
+        options: Resolved CLI options, with ``path`` as the container.
+
+    Returns:
+        The most significant exit code across every repository.
+    """
+    logger = logging.getLogger(__name__)
+
+    _reject_files_with_multi_repo(options.files, multi_repo=True)
+
+    json_mode = options.output_format == "json"
+    # Anything written to standard output would sit alongside the JSON
+    # document, so the commentary goes quiet in JSON mode as well.
+    silent = options.quiet or json_mode
+
+    try:
+        repositories = find_repositories(options.path, depth=options.repo_depth)
+    except ValueError as error:
+        logger.error(f"Invalid repository depth: {error}")
+        return exit_codes.RUNTIME_ERROR
+    except OSError as error:
+        # An unreadable root means nothing was examined. Reporting an
+        # empty sweep would be indistinguishable from a container with
+        # no repositories in it, and would exit successfully.
+        logger.error(
+            f"Cannot read {options.path}: {_describe_exception(error)}"
+        )
+        return exit_codes.RUNTIME_ERROR
+
+    if not repositories:
+        if json_mode:
+            # An empty sweep still owes the caller a document, or a
+            # consumer cannot tell it from a crash.
+            _output_multi_repo_json([], options.path)
+        elif not options.quiet:
+            console.print(
+                f"[yellow]No repositories found under {options.path} "
+                f"at depth {options.repo_depth} ⚠️[/yellow]"
+            )
+        return exit_codes.SUCCESS
+
+    shared_cache = ValidationCache(config.cache)
+    _render_cache_prime_banners(shared_cache.prime(), quiet=silent)
+
+    if not silent:
+        console.print(
+            f"\n[bold]Scanning {len(repositories)} repositories under "
+            f"{options.path}[/bold]\n"
+        )
+
+    results: list[tuple[Path, RunOutcome]] = []
+    for repository in repositories:
+        results.append(
+            (
+                repository,
+                _run_repository_in_sweep(
+                    config,
+                    options,
+                    shared_cache,
+                    repository,
+                    silent=silent,
+                    # Pointing --multi-repo at a checkout visits that one
+                    # repository, which is the case
+                    # GITHUB_REPOSITORY_OWNER describes correctly, so the
+                    # shortcut keeps whatever was configured. A genuine
+                    # sweep forces it off regardless.
+                    use_environment_org=(
+                        config.allow_list.use_environment_org
+                        and is_repository(options.path)
+                    ),
+                    label=_repository_label(repository, options.path),
+                ),
+            )
+        )
+
+    if json_mode:
+        _output_multi_repo_json(results, options.path)
+    elif not options.quiet:
+        _display_multi_repo_summary(results, options.path)
+
+    return exit_codes.combine(*(outcome.exit_code for _, outcome in results))
+
+
+def _output_multi_repo_json(
+    results: list[tuple[Path, RunOutcome]],
+    root: Path,
+) -> None:
+    """Emit one JSON document covering the whole sweep.
+
+    Printing each repository's payload as it completed would put several
+    top-level objects on standard output, which no JSON parser accepts.
+    Wrapping them keeps ``--multi-repo --format json`` machine-readable.
+
+    Args:
+        results: Per-repository outcomes, in visit order.
+        root: The container the sweep was pointed at, used to label each
+            repository relatively.
+    """
+    document = {
+        "repositories": [
+            {
+                "repository": _repository_label(repository, root),
+                "exit_code": outcome.exit_code,
+                "error": outcome.error,
+                # Both are otherwise-invisible reasons for a non-zero
+                # exit: neither produces a validation error, so a
+                # consumer reading only ``results`` would find nothing
+                # to explain the code.
+                "write_failures": outcome.write_failures,
+                "autofix_error": outcome.autofix_error,
+                "results": outcome.json_payload,
+            }
+            for repository, outcome in results
+        ],
+        "summary": {
+            "repositories": len(results),
+            "failed": sum(1 for _, o in results if o.error),
+            "exit_code": exit_codes.combine(
+                *(outcome.exit_code for _, outcome in results)
+            )
+            if results
+            else exit_codes.SUCCESS,
+        },
+    }
+
+    # Plain print() avoids Rich formatting/ANSI codes in JSON output.
+    print(json.dumps(document, indent=2))
+
+
+def _run_repository_in_sweep(
+    config: Config,
+    options: CLIOptions,
+    shared_cache: ValidationCache,
+    repository: Path,
+    *,
+    silent: bool = False,
+    use_environment_org: bool = False,
+    label: str | None = None,
+) -> RunOutcome:
+    """Run one repository of a sweep, surviving its failure.
+
+    A repository that raises is recorded and the sweep continues: one
+    unreadable checkout in twenty must not cost the other nineteen their
+    results.
+
+    Args:
+        config: Template configuration.
+        options: Template CLI options.
+        shared_cache: Cache shared across the sweep.
+        repository: The repository to visit.
+        silent: Suppress this repository's console commentary, either
+            because the caller asked for quiet or because a JSON
+            document is being assembled on standard output.
+        use_environment_org: Whether ``GITHUB_REPOSITORY_OWNER`` may name
+            this repository's workflow organisation. False for a genuine
+            sweep, where the variable describes one repository at most;
+            true for the root-repository shortcut, which is the ordinary
+            single-repository case wearing a different flag.
+        label: How to name the repository in output. Defaults to its
+            basename.
+
+    Returns:
+        What that repository produced, or a runtime error outcome.
+    """
+    logger = logging.getLogger(__name__)
+
+    if not silent:
+        console.print(f"[bold cyan]── {label or repository.name}[/bold cyan]")
+
+    # Both the workflow organisation and the cooldown are properties of
+    # the repository being scanned, so each gets its own copy rather than
+    # inheriting whatever the previous one resolved.
+    # Preparation sits inside the failure boundary alongside the run
+    # itself. Resolving the cooldown reads this repository's
+    # ``dependabot.yml``, and a malformed one raises past the narrow
+    # handling in the resolver -- which outside the boundary would abort
+    # the whole sweep, contradicting the promise that one bad checkout
+    # costs only itself.
+    try:
+        repo_config = config.model_copy(deep=True)
+        # ``silent`` rather than ``options.quiet``: the repository's own
+        # run prints progress and messages such as "No workflows found
+        # to validate" to standard output, which would sit inside the
+        # aggregate JSON document. The command layer coerces quiet for
+        # JSON output already, but relying on that leaves the sweep
+        # correct only by distance, and a programmatic caller of
+        # ``run_linter`` gets no such coercion.
+        repo_options = options.model_copy(
+            update={"path": repository, "quiet": silent}
+        )
+        repo_config.cooldown_days = _resolve_cooldown_days(
+            options.cooldown, repository, quiet=True, output_format="text"
+        )
+        # GITHUB_REPOSITORY_OWNER names the repository the workflow was
+        # launched for, so across a sweep it would answer identically
+        # for every checkout and resolve their shorthand pins against
+        # one, possibly foreign, organisation. Each repository resolves
+        # from its own remotes instead; an explicit --allow-list-org
+        # still outranks both.
+        repo_config.allow_list.use_environment_org = use_environment_org
+
+        return _run_one_repository(
+            repo_config,
+            repo_options,
+            shared_cache,
+            collect_json=options.output_format == "json",
+        )
+    except ConfigurationError:
+        # A bad setting is a usage error and applies to every repository,
+        # so there is nothing to be gained by continuing.
+        raise
+    except Exception as e:  # noqa: BLE001 - one repository must not stop the sweep
+        # Computed once so the log, the console and the outcome all
+        # describe the failure the same way.
+        reason = _describe_exception(e)
+        logger.error(f"Failed to scan {repository}: {reason}")
+        if not silent:
+            console.print(f"[red]  failed: {reason} ❌[/red]")
+        return RunOutcome(
+            exit_code=exit_codes.RUNTIME_ERROR,
+            error=reason,
+        )
+
+
+def _display_multi_repo_summary(
+    results: list[tuple[Path, RunOutcome]],
+    root: Path,
+) -> None:
+    """Render the aggregate table closing a sweep.
+
+    Args:
+        results: Per-repository outcomes, in visit order.
+        root: The container the sweep was pointed at. Rows are labelled
+            relative to it, so grouped layouts such as ``group-a/service``
+            and ``group-b/service`` stay distinguishable.
+    """
+    table = Table(title="Repository Summary")
+    table.add_column("Repository", style="cyan")
+    table.add_column("Pins", justify="right")
+    table.add_column("Stale", justify="right")
+    table.add_column("Fixed", justify="right")
+    table.add_column("Defects", justify="right")
+    table.add_column("Status")
+
+    for repository, outcome in results:
+        allow_list = outcome.allow_list
+        pins = len(allow_list.findings) if allow_list else 0
+        # What still needs attention, not what was found: a pin the
+        # sweep rewrote is no longer stale, and showing it as both
+        # stale and fixed reads as a contradiction.
+        stale = len(allow_list.outstanding) if allow_list else 0
+        fixed = allow_list.fixed_count if allow_list else 0
+        table.add_row(
+            _repository_label(repository, root),
+            str(pins),
+            str(stale),
+            str(fixed),
+            str(outcome.defects),
+            _sweep_status(outcome),
+        )
+
+    console.print()
+    console.print(table)
+
+    failures = [name for name, o in results if o.error]
+    if failures:
+        console.print(
+            f"\n[red]{len(failures)} repository(s) could not be "
+            f"scanned ❌[/red]"
+        )
+
+
+def _sweep_status(outcome: RunOutcome) -> str:
+    """Describe one repository's outcome for the summary table.
+
+    ``clean`` is reserved for a repository with nothing outstanding, and
+    ``updated`` for one whose outstanding work is *finished*. The exit
+    code alone can establish neither: allow-list findings and outdated
+    action calls both stay advisory unless ``--verify-*`` asks
+    otherwise, and defects survive ``--no-fail-on-error``. Reading the
+    code alone produced rows marked ``clean`` beside a non-zero Stale
+    column, which is a contradiction in the same row.
+
+    What remains is therefore tested before what was done. A partial
+    remediation changes files *and* leaves pins outstanding, and calling
+    that ``updated`` would tell the reader the repository needs no
+    further attention when it does.
+
+    A repository whose hosts could not be resolved gets its own label
+    rather than sharing ``findings``: the check did not complete, so its
+    empty counts say nothing, and a row of zeros marked ``findings``
+    gives the reader no way to tell the two apart. The order below
+    follows the exit-code precedence in ``exit_codes``, so an unresolved
+    check outranks work that was carried out.
+
+    Args:
+        outcome: What the repository produced.
+
+    Returns:
+        A short, styled status.
+    """
+    if outcome.error:
+        return "[red]failed[/red]"
+
+    allow_list = outcome.allow_list
+    if allow_list and allow_list.unresolved:
+        return "[red]unresolved[/red]"
+
+    if (
+        (allow_list and allow_list.outstanding)
+        or outcome.defects
+        or outcome.outdated
+        or outcome.write_failures
+        or outcome.autofix_error
+    ):
+        return "[yellow]findings[/yellow]"
+
+    # Nothing outstanding, so any rewriting that happened finished the
+    # job. Allow-list rewrites are tracked on their own outcome rather
+    # than in the action-call fixer's tally, so both count here.
+    if outcome.files_changed or (allow_list and allow_list.fixed_count):
+        return "[yellow]updated[/yellow]"
+
+    if outcome.exit_code == exit_codes.SUCCESS:
+        return "[green]clean[/green]"
+    return "[yellow]findings[/yellow]"
 
 
 def _create_scan_summary_table(
@@ -2185,15 +2928,19 @@ def output_text_results(
                 _print_deduplicated_action_refs(test_warnings[file_path])
 
 
-def output_json_results(
+def build_json_results(
     scan_summary: dict[str, Any],
     validation_summary: dict[str, Any],
     errors: list[Any],
     scan_path: Path,
     allow_list: AllowListOutcome | None = None,
-) -> None:
+) -> dict[str, Any]:
     """
-    Output results in JSON format.
+    Build the JSON results document for one repository.
+
+    Kept separate from printing so a multi-repository sweep can collect
+    each repository's payload and emit a single document, rather than
+    concatenating several top-level objects onto standard output.
 
     Args:
         scan_summary: Scan statistics
@@ -2202,6 +2949,9 @@ def output_json_results(
         scan_path: Base path for computing relative paths
         allow_list: Allow-list outcome, merged in under an ``allow_list``
             key when the check ran
+
+    Returns:
+        The results as a JSON-serialisable mapping.
     """
     result = {
         "scan_summary": scan_summary,
@@ -2227,6 +2977,31 @@ def output_json_results(
 
     if allow_list is not None:
         result.update(build_allow_list_json(allow_list, root=scan_path))
+
+    return result
+
+
+def output_json_results(
+    scan_summary: dict[str, Any],
+    validation_summary: dict[str, Any],
+    errors: list[Any],
+    scan_path: Path,
+    allow_list: AllowListOutcome | None = None,
+) -> None:
+    """
+    Output results in JSON format.
+
+    Args:
+        scan_summary: Scan statistics
+        validation_summary: Validation statistics
+        errors: List of validation errors
+        scan_path: Base path for computing relative paths
+        allow_list: Allow-list outcome, merged in under an ``allow_list``
+            key when the check ran
+    """
+    result = build_json_results(
+        scan_summary, validation_summary, errors, scan_path, allow_list
+    )
 
     # Use plain print() to avoid Rich formatting/ANSI codes in JSON output
     print(json.dumps(result, indent=2))

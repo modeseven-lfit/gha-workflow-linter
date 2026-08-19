@@ -100,10 +100,20 @@ class ActionCallValidator:
         self._cache = (
             cache if cache is not None else ValidationCache(config.cache)
         )
+        # Refreshed on context entry; see ``_own_cache_hits``.
+        self._cache_hits_at_start = self._cache.stats.hits
         self._validation_method: ValidationMethod | None = None
 
     async def __aenter__(self) -> ActionCallValidator:
         """Async context manager entry."""
+        # The cache's hit counter is cumulative, and a multi-repository
+        # sweep shares one cache across every repository. Taking the
+        # baseline here rather than at construction means each context
+        # reports the hits *it* caused: a validator entered twice does
+        # not count the first pass again, and hits made through the
+        # shared cache before this one began are not claimed.
+        self._cache_hits_at_start = self._cache.stats.hits
+
         # Determine validation method
         self._validation_method = self._determine_validation_method()
 
@@ -137,8 +147,10 @@ class ActionCallValidator:
                 git_stats.repositories_validated
             )
 
-        # Merge cache stats into API stats
-        self.api_stats.cache_hits += self._cache.stats.hits
+        # Merge cache stats into API stats. Counted as a delta, since a
+        # shared cache carries the hits of every repository visited
+        # before this one. This is the only place the tally is merged.
+        self.api_stats.cache_hits += self._own_cache_hits
         self._cache.save()
 
     async def validate_action_calls_async(
@@ -704,28 +716,52 @@ class ActionCallValidator:
             )
         return all_repo_results, all_ref_results, all_subpath_results
 
+    @property
+    def _own_cache_hits(self) -> int:
+        """Cache hits this validator is responsible for.
+
+        The cache's counter is cumulative and a multi-repository sweep
+        shares one cache, so the raw value credits this validator with
+        every hit since the sweep began. The baseline is taken on
+        context entry, so each pass reports only its own.
+
+        Returns:
+            Hits recorded since this validator's context was entered.
+        """
+        return self._cache.stats.hits - self._cache_hits_at_start
+
     def _log_final_statistics(self, use_github_api: bool) -> None:
-        """Emit end-of-run API/Git statistics at debug level."""
+        """Emit end-of-run API/Git statistics at debug level.
+
+        Reads the cache tally rather than merging it. The merge belongs
+        to ``__aexit__``, and performing it here as well counted every
+        hit twice on the Git path.
+
+        Args:
+            use_github_api: Whether the GitHub API backend was used.
+        """
+        # What __aexit__ will add, shown here so the debug line agrees
+        # with the final statistics without altering them.
+        cache_hits = self.api_stats.cache_hits + self._own_cache_hits
+
         if use_github_api and self._github_client:
             rate_limit_info = self._github_client.get_rate_limit_info()
             self.logger.debug(
                 f"API Statistics: {self.api_stats.total_calls} total calls "
                 f"(GraphQL: {self.api_stats.graphql_calls}, "
                 f"REST: {self.api_stats.rest_calls}, "
-                f"Cache hits: {self.api_stats.cache_hits})"
+                f"Cache hits: {cache_hits})"
             )
             self.logger.debug(
                 f"GitHub Rate Limit: {rate_limit_info.remaining}/{rate_limit_info.limit} remaining"
             )
         else:
-            # Merge cache statistics before printing
-            self.api_stats.cache_hits += self._cache.stats.hits
             self.logger.debug(
                 f"Git Statistics: {self.api_stats.total_calls} total calls "
                 f"(Git: {self.api_stats.git_calls}, "
                 f"Clone ops: {self.api_stats.git_clone_operations}, "
                 f"ls-remote ops: {self.api_stats.git_ls_remote_operations}, "
-                f"Cache hits: {self.api_stats.cache_hits})"
+                f"Cache hits: {cache_hits})"
             )
 
         if self.api_stats.rate_limit_delays > 0:

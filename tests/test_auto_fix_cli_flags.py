@@ -186,11 +186,12 @@ jobs:
             ],
         )
 
-        # Should fail due to invalid configuration
+        # Should fail due to invalid configuration. Diagnostics go to
+        # standard error, keeping standard output reserved for results.
         assert result.exit_code != 0
         assert (
-            "Configuration validation failed" in result.stdout
-            or "validation" in result.stdout.lower()
+            "Configuration validation failed" in result.stderr
+            or "validation" in result.stderr.lower()
         )
 
     def test_default_config_generation_includes_auto_fix_settings(

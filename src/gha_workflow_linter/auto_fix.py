@@ -43,6 +43,8 @@ class AutoFixer(_VersionResolutionMixin):
         config: Config,
         base_path: Path | None = None,
         cache: ValidationCache | None = None,
+        *,
+        quiet: bool = False,
     ) -> None:
         """
         Initialize the auto-fixer.
@@ -53,10 +55,22 @@ class AutoFixer(_VersionResolutionMixin):
             cache: Optional pre-built ``ValidationCache`` shared with the
                 validator. When ``None`` the auto-fixer builds its own
                 cache.
+            quiet: Suppress the live progress display outright. Without
+                it the display is gated on the logger level, which the
+                CLI sets but a library caller does not -- so a caller
+                assembling JSON on standard output would find Rich
+                progress in the middle of it.
         """
         self.config = config
         self.base_path = base_path or Path.cwd()
         self.logger = logging.getLogger(__name__)
+        self._quiet = quiet
+        #: Files a rewrite was planned for but could not be written. A
+        #: failure here is invisible everywhere else: the planned change
+        #: is absent from ``applied_fixes``, and under ``update_actions``
+        #: the call was never recorded as stale either, so the run would
+        #: otherwise look like one with nothing to do.
+        self.write_failures: list[Path] = []
         self._http_client: httpx.AsyncClient | None = None
         self._graphql_client: GitHubGraphQLClient | None = None
         if cache is not None:
@@ -86,6 +100,23 @@ class AutoFixer(_VersionResolutionMixin):
         )  # Track unique redirected actions
         self._redirect_updates: int = (
             0  # Count of action calls updated due to redirects
+        )
+
+    def _show_live_updates(self) -> bool:
+        """Whether to open the live progress display.
+
+        The display writes to standard output, so anything assembling a
+        JSON document there must be able to switch it off. The logger
+        level alone cannot serve: the CLI sets it, but a library caller
+        never runs that setup, and would find Rich progress in the
+        middle of its document.
+
+        Returns:
+            True when neither the caller nor the logger level has asked
+            for silence.
+        """
+        return (
+            not self._quiet and self.logger.getEffectiveLevel() < logging.ERROR
         )
 
     async def __aenter__(self) -> AutoFixer:
@@ -238,8 +269,7 @@ class AutoFixer(_VersionResolutionMixin):
             )
 
         # Use batch processing for performance
-        # Check if we should show live updates (not in quiet mode)
-        show_live_updates = self.logger.getEffectiveLevel() < logging.ERROR
+        show_live_updates = self._show_live_updates()
 
         # Use Live context only when not in quiet mode, otherwise use nullcontext
         live_context = (
@@ -282,6 +312,7 @@ class AutoFixer(_VersionResolutionMixin):
                 changes = await self._apply_fixes_to_file(file_path, line_fixes)
                 applied_fixes[file_path] = changes
             except Exception as e:
+                self.write_failures.append(file_path)
                 self.logger.error(f"Failed to apply fixes to {file_path}: {e}")
 
         # Add skipped items to the output
