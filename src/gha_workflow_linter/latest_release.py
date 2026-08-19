@@ -94,12 +94,14 @@ class LatestRelease:
             persist it.
         commit_tags: Reverse map of lowercased commit SHA to the tag of
             the policy-eligible release behind it, covering every release
-            the backend considered and not only the selected one. Empty
-            when the record was restored from the cache, which persists
-            only ``(tag, sha)``. Excluded from equality and ``repr``: it
-            is derived context about the repository, not part of the
-            identity of the release. Prefer :meth:`tag_for_commit` over
-            indexing it directly.
+            the backend considered and not only the selected one. A
+            record restored from the cache carries the map the original
+            resolution built, so it can place any commit that resolution
+            saw -- but not one published since. Empty when a caller
+            constructs a record without one. Excluded from equality and
+            ``repr``: it is derived context about the repository, not
+            part of the identity of the release. Prefer
+            :meth:`tag_for_commit` over indexing it directly.
     """
 
     tag: str
@@ -122,9 +124,9 @@ class LatestRelease:
 
         Returns:
             The tag of the release whose peeled commit is ``commit_sha``,
-            or ``None`` when the commit belongs to no eligible release --
-            including when :attr:`commit_tags` is empty because the record
-            came from the cache.
+            or ``None`` when the commit belongs to no release this record
+            covers -- including one published after a cached record was
+            written.
         """
         return self.commit_tags.get(commit_sha.strip().lower())
 

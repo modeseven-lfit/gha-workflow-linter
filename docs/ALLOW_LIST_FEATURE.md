@@ -1162,10 +1162,12 @@ Semantics:
   open as an optimisation if a sweep ever proves connection-bound.
 
   Note also that cache sharing is suspended under a non-default release
-  policy: a cooldown or prerelease eligibility makes a cached
-  `(tag, sha)` policy-dependent, and the cache records no policy, so
-  each repository resolves for itself rather than inheriting another's
-  answer.
+  policy: a cooldown or prerelease eligibility makes a cached target
+  policy-dependent, and the cache records no policy, so each repository
+  resolves for itself rather than inheriting another's answer. A single
+  host is likewise re-resolved when a pin names a commit the cached
+  entry cannot place, since an entry written before that release existed
+  would report a current pin as stale and rewrite it backwards.
 - **Per-repository state**: workflow org (§6.3) and Dependabot cooldown
   (`dependabot.resolve_cooldown`) are resolved per repository, because
   both are repository properties.

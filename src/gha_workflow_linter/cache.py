@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,6 +18,9 @@ from .models import (  # noqa: TC001
     ValidationMethod,
     ValidationResult,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 # Re-export CacheConfig for backward compatibility
 __all__ = [
@@ -64,6 +67,17 @@ class LatestVersionEntry(BaseModel):
     latest_tag: str = Field(..., description="Latest release/tag name")
     latest_sha: str = Field(..., description="SHA for the latest tag")
     timestamp: float = Field(..., description="Unix timestamp when cached")
+    commit_tags: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Lowercased commit SHA to release tag, covering every release "
+            "the resolution considered and not only the selected one. "
+            "Retains the ordering information a bare (tag, sha) pair "
+            "cannot carry, so a restored entry can still say whether a "
+            "pinned commit is behind the cached target or ahead of it. "
+            "Empty for entries written by a caller that has no such map."
+        ),
+    )
 
     def is_expired(self, ttl_seconds: int) -> bool:
         """Check if the cache entry has expired."""
@@ -931,6 +945,28 @@ class ValidationCache:
         Returns:
             Tuple of (tag, sha) if cached and not expired, None otherwise
         """
+        entry = self.get_latest_version_entry(repository)
+        if entry is None:
+            return None
+        return (entry.latest_tag, entry.latest_sha)
+
+    def get_latest_version_entry(
+        self, repository: str
+    ) -> LatestVersionEntry | None:
+        """
+        Get the whole cached latest-version entry for a repository.
+
+        Callers that only need the target take :meth:`get_latest_version`.
+        This exists for the one that also needs
+        :attr:`LatestVersionEntry.commit_tags`, which is what tells a pin
+        that is *behind* the cached target from one that is *ahead* of it.
+
+        Args:
+            repository: Repository name (org/repo)
+
+        Returns:
+            The entry if cached and not expired, None otherwise.
+        """
         if not self.config.enabled:
             return None
 
@@ -949,12 +985,16 @@ class ValidationCache:
             self.logger.debug(
                 f"Cache hit for latest version: {repository} -> {version_entry.latest_tag}"
             )
-            return (version_entry.latest_tag, version_entry.latest_sha)
+            return version_entry
 
         return None
 
     def put_latest_version(
-        self, repository: str, latest_tag: str, latest_sha: str
+        self,
+        repository: str,
+        latest_tag: str,
+        latest_sha: str,
+        commit_tags: Mapping[str, str] | None = None,
     ) -> None:
         """
         Cache the latest version information for a repository.
@@ -963,6 +1003,11 @@ class ValidationCache:
             repository: Repository name (org/repo)
             latest_tag: Latest release/tag name
             latest_sha: SHA for the latest tag
+            commit_tags: Lowercased commit SHA to release tag for every
+                release the resolution considered. Supplying it lets a
+                later run place a pinned commit relative to the stored
+                target instead of assuming the target is newer; a caller
+                with no such map omits it.
         """
         if not self.config.enabled:
             return
@@ -974,6 +1019,7 @@ class ValidationCache:
             latest_tag=latest_tag,
             latest_sha=latest_sha,
             timestamp=time.time(),
+            commit_tags=dict(commit_tags or {}),
         )
 
         self._latest_versions[repository] = version_entry

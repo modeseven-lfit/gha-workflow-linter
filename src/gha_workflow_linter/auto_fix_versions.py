@@ -26,9 +26,12 @@ from .exceptions import GitError
 from .git_validator import _get_remote_tags
 from .models import ValidationMethod
 from .patterns import ActionCallPatterns
+from .utils import comment_text
+from .utils import version_or_none as _version_or_none
 from .version_utils import (
     _find_most_specific_version_tag,
     _get_version_specificity,
+    _is_downgrade,
     _parse_iso_datetime,
     _parse_version,
     _select_version_with_cooldown,
@@ -36,6 +39,8 @@ from .version_utils import (
 
 if TYPE_CHECKING:
     from datetime import datetime
+
+    from .models import ActionCall
 
 
 class _VersionResolutionMixin(_ReferenceResolutionMixin):
@@ -85,6 +90,167 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
         return (
             self.config.cooldown_days <= 0 and not self.config.allow_prerelease
         )
+
+    def _moves_backwards(
+        self,
+        current: str | None,
+        target_tag: str,
+        repo_key: str,
+        *,
+        repo_changed: bool,
+    ) -> bool:
+        """Report whether retargeting a call would move it backwards.
+
+        A resolved "latest" release names the newest at the moment of
+        discovery, and a cached one can be older still: nothing stops
+        Dependabot, Renovate, a colleague or an earlier run advancing a
+        pin inside the cache TTL. The update path treats any differing
+        target as a change to apply, so without this a run rewrites the
+        pin *backwards* and reports the downgrade as a successful update
+        -- reverting a supply-chain fix nobody asked to revert.
+
+        Args:
+            current: The version the call pins now, or ``None`` when it
+                names none. Callers decide which sources may answer;
+                the invalid-reference repair excludes the reference
+                itself, having already established that it is broken.
+            target_tag: The version the run proposes to move it to.
+            repo_key: Repository the call names, for the log line.
+            repo_changed: Whether the call is being moved to another
+                repository. Two projects' version numbers are not
+                comparable -- an action that has moved starts its new
+                home's numbering wherever that project happens to be --
+                so a redirect answers ``False`` outright. Required
+                rather than defaulted, because omitting it is exactly
+                the mistake it exists to prevent, and every call site
+                must state it.
+
+        Returns:
+            ``True`` only when the call provably pins a higher version
+            than the target within one repository. A call naming no
+            version establishes no direction and is left to the ordinary
+            update path.
+        """
+        if repo_changed or current is None:
+            return False
+        if not _is_downgrade(current, target_tag):
+            return False
+
+        self.logger.debug(
+            f"Refusing to move {repo_key} backwards from {current} to "
+            f"{target_tag}: the resolved latest release is older than "
+            f"the pinned one"
+        )
+        return True
+
+    async def _repair_invalid_reference(
+        self,
+        action_call: ActionCall,
+        repo_key: str,
+        sha_map: dict[tuple[str, str], str],
+        latest_versions: dict[str, tuple[str, str]],
+        *,
+        repo_changed: bool,
+    ) -> tuple[str | None, str | None]:
+        """Find a valid reference to replace an invalid one.
+
+        Three sources are consulted in order of fidelity to what the file
+        already says: the version its comment names, the repository's
+        latest release, then a salvaged reference or the default branch.
+
+        The last two are guarded, because both can name a *version*. The
+        comment reaches them only when the version it names could not be
+        resolved at all, which is as likely to mean a rate limit or an
+        outage as a deleted tag -- and the latest release may itself be a
+        cached answer older than the comment. Rewriting a call that
+        claims v5 down to v4 on that evidence would report a downgrade as
+        a repair. The reference is deliberately not consulted for the
+        comparison: it is the thing already established as broken.
+
+        Once something has been refused for going backwards, the repair
+        will accept **only a version at least as new**, and abandons the
+        call otherwise. The branch sources are not a neutral fallback
+        here: replacing a pin that claims v5 with a floating ``main``
+        loses the pin as well as the version, which is a worse outcome
+        than the broken reference it replaces. Leaving it alone is not
+        silent, since the call keeps its validation error.
+
+        Args:
+            action_call: The call carrying the invalid reference.
+            repo_key: Base repository the call names, after any redirect.
+            sha_map: References already resolved in this batch.
+            latest_versions: Latest ``(tag, sha)`` per repository.
+            repo_changed: Whether the call was redirected to another
+                repository, which exempts it from the comparison.
+
+        Returns:
+            The replacement reference and its commit SHA, either of which
+            may be ``None`` when nothing could be established or when
+            everything on offer was older than the version claimed.
+        """
+        # Only a clean version tag is ordering evidence. An arbitrary
+        # comment is not: '# 2026-08-19' would parse as version 2026 and
+        # veto every repair the call could possibly need.
+        claimed = _version_or_none(comment_text(action_call))
+        if claimed:
+            sha = await self._resolve_ref(repo_key, claimed, sha_map)
+            if sha:
+                return claimed, sha
+
+        refused = False
+        latest = latest_versions.get(repo_key)
+        if latest:
+            if not self._moves_backwards(
+                claimed, latest[0], repo_key, repo_changed=repo_changed
+            ):
+                tag, cached_sha = latest
+                return tag, cached_sha or await self._resolve_ref(
+                    repo_key, tag, sha_map
+                )
+            refused = True
+
+        salvaged = await self._find_valid_reference(
+            repo_key, action_call.reference
+        )
+        if salvaged and self._moves_backwards(
+            claimed, salvaged, repo_key, repo_changed=repo_changed
+        ):
+            return None, None
+        if refused and not _version_or_none(salvaged):
+            return None, None
+
+        salvaged = salvaged or await self._get_fallback_reference(
+            repo_key, action_call.reference
+        )
+        if not salvaged:
+            # Last resort: use default branch
+            repo_info = await self._get_repository_info(repo_key)
+            salvaged = (
+                repo_info.get("default_branch", "main") if repo_info else "main"
+            )
+
+        return salvaged, await self._resolve_ref(repo_key, salvaged, sha_map)
+
+    async def _resolve_ref(
+        self,
+        repo_key: str,
+        ref: str,
+        sha_map: dict[tuple[str, str], str],
+    ) -> str | None:
+        """Resolve one reference to a commit, preferring the batch.
+
+        Args:
+            repo_key: Repository the reference belongs to.
+            ref: The reference to resolve.
+            sha_map: References already resolved in this batch.
+
+        Returns:
+            The commit SHA, or ``None`` when it could not be resolved.
+        """
+        if (repo_key, ref) in sha_map:
+            return sha_map[(repo_key, ref)]
+        sha_info = await self._get_commit_sha_for_reference(repo_key, ref)
+        return sha_info["sha"] if sha_info else None
 
     async def _get_latest_versions_batch(
         self, repo_keys: list[str]
