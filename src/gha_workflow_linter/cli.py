@@ -474,12 +474,18 @@ def _configure_validation_backend(
     options: CLIOptions,
     github_token: str | None,
     workers: int | None,
-) -> None:
+) -> bool:
     """Resolve the GitHub token, select a validation method, and pre-flight it.
 
     Applies the resolved method/token back onto ``config`` and prints the
     chosen backend (unless quiet/JSON). When the GitHub API backend is
     selected, this also performs the rate-limit pre-flight check.
+
+    Returns:
+        ``True`` when the API reported the client is rate-limited. The
+        caller decides what that means: pre-flight reports the state and
+        terminates nothing, so the command still reaches its output
+        contract and the validation that follows this stage still runs.
     """
     logger = logging.getLogger(__name__)
 
@@ -529,16 +535,14 @@ def _configure_validation_backend(
         from .github_api import GitHubGraphQLClient
 
         github_client = GitHubGraphQLClient(config.github_api)
-        try:
-            github_client.check_rate_limit_and_exit_if_needed()
-            # If we get here, we're not rate limited
-            if not effective_token and not options.quiet:
-                logger.warning(
-                    "No GitHub token available; API requests may be rate-limited ⚠️"
-                )
-        except SystemExit:
-            # Rate limit check triggered exit, re-raise to exit cleanly
-            raise
+        if github_client.check_rate_limit():
+            return True
+        if not effective_token and not options.quiet:
+            logger.warning(
+                "No GitHub token available; API requests may be rate-limited ⚠️"
+            )
+
+    return False
 
 
 def _resolve_update_actions(
@@ -980,14 +984,14 @@ def lint(
         logger.debug(f"Starting gha-workflow-linter {__version__}")
 
         # Resolve token, select validation method, and pre-flight it
-        _configure_validation_backend(
+        rate_limited = _configure_validation_backend(
             config, cli_options, github_token, workers
         )
 
         # Only show scanning path if we're actually going to proceed
         logger.debug(f"Scanning path: {path}")
 
-        exit_code = run_linter(config, cli_options)
+        exit_code = run_linter(config, cli_options, rate_limited=rate_limited)
 
     except typer.Exit:
         # Re-raise typer.Exit to avoid catching it as a general exception
@@ -1292,6 +1296,8 @@ def _scan_and_validate(
     options: CLIOptions,
     scanner: WorkflowScanner,
     shared_cache: ValidationCache,
+    *,
+    rate_limited: bool = False,
 ) -> _ScanShortCircuit | _ValidationOutcome:
     """Scan workflows and validate their action calls.
 
@@ -1320,6 +1326,27 @@ def _scan_and_validate(
             reason = _describe_exception(e)
             logger.error(f"Error scanning workflows: {reason}")
             return _ScanShortCircuit(1, f"Error scanning workflows: {reason}")
+
+        if rate_limited:
+            # Nothing can be validated, but the scan already succeeded,
+            # so the run returns an outcome rather than short-circuiting:
+            # the caller still emits its document, still reports what it
+            # scanned, and still reaches the exit-code decision. Zero
+            # errors here means "none observed", which is why the exit
+            # code -- not this outcome -- carries the fact that nothing
+            # was checked.
+            #
+            # This is decided before the empty-scan check below, because
+            # that check reports a clean result -- a repository with
+            # nothing to validate -- and a run that never looked is not
+            # entitled to claim one.
+            validator = ActionCallValidator(config, cache=shared_cache)
+            return _ValidationOutcome(
+                workflow_calls,
+                [],
+                validator,
+                sum(len(calls) for calls in workflow_calls.values()),
+            )
 
         if not workflow_calls:
             if not options.quiet:
@@ -1535,6 +1562,7 @@ def _emit_results(
     allow_list: AllowListOutcome | None = None,
     *,
     collect_json: bool = False,
+    rate_limited: bool = False,
 ) -> dict[str, Any] | None:
     """Generate and display the scan/validation results.
 
@@ -1547,6 +1575,9 @@ def _emit_results(
         allow_list: Outcome of the allow-list stage, when it ran.
         collect_json: Return the JSON payload instead of printing it, so
             a sweep can assemble one document from many repositories.
+        rate_limited: Whether the checks were skipped because the API was
+            rate-limited, recorded in the JSON document so a consumer can
+            tell that from a clean run.
 
     Returns:
         The JSON payload when ``collect_json`` is set and the output
@@ -1577,6 +1608,7 @@ def _emit_results(
                 validation.validation_errors,
                 options.path,
                 allow_list,
+                rate_limited=rate_limited,
             )
         output_json_results(
             scan_summary,
@@ -1584,6 +1616,7 @@ def _emit_results(
             validation.validation_errors,
             options.path,
             allow_list,
+            rate_limited=rate_limited,
         )
         return None
 
@@ -1596,6 +1629,7 @@ def _emit_results(
         autofix.fixed_files,
         autofix.redirect_stats,
         autofix.stale_actions_summary,
+        rate_limited=rate_limited,
     )
     if allow_list is not None and not options.quiet:
         # Only suggest remediation when it has not already run.
@@ -1809,12 +1843,55 @@ def _allow_list_paths(
     return paths
 
 
+def _demanded_an_answer(options: CLIOptions, config: Config) -> bool:
+    """Whether the run asked the API to verify or change something.
+
+    An advisory run asked nothing: it wanted whatever the tool could
+    tell it, and a throttled API leaves it with less to say rather than
+    with a wrong answer. A run that passed a verification or update flag
+    did ask, and "could not look" answers neither *is this current?* nor
+    *make this current*. Both are already treated that way elsewhere in
+    :func:`_determine_exit_code`, where an incomplete allow-list check
+    fails a verifying run and an updating one alike.
+
+    The allow-list settings are read from ``config`` rather than
+    ``options`` because a configuration file may enable them without any
+    CLI flag, and :func:`_apply_cli_overrides` deliberately lets it:
+    ``config`` holds the effective value.
+
+    Each demand is gated on the stage that would have answered it. A
+    throttle must not fail work that would not have run anyway: with
+    ``--no-allow-list`` the allow-list stage never runs, so
+    ``--verify-allow-list`` beside it asks nothing of the API and is
+    inert whether or not GitHub is throttling. The action-call settings
+    depend on the fixer the same way, since it is what detects an
+    outdated call and what rewrites one.
+
+    Args:
+        options: Resolved CLI options.
+        config: Resolved configuration.
+
+    Returns:
+        ``True`` when reporting success would claim work the run did not
+        do, or an answer it never obtained.
+    """
+    wanted_from_fixer = options.verify_actions or config.update_actions
+    wanted_from_allow_list = (
+        config.allow_list.verify or config.allow_list.update
+    )
+    return (config.auto_fix and wanted_from_fixer) or (
+        config.allow_list.enabled and wanted_from_allow_list
+    )
+
+
 def _determine_exit_code(
     options: CLIOptions,
     validation: _ValidationOutcome,
     autofix: _AutoFixOutcome,
     config: Config,
     allow_list: AllowListOutcome | None = None,
+    *,
+    rate_limited: bool = False,
 ) -> int:
     """Compute the process exit code from fixes and validation errors.
 
@@ -1829,11 +1906,20 @@ def _determine_exit_code(
         autofix: Outcome of the auto-fix stage.
         config: Resolved configuration.
         allow_list: Outcome of the allow-list stage, when it ran.
+        rate_limited: Whether the API was rate-limited, so the checks a
+            verifying or updating run asked for never ran. An advisory
+            run asked no question and still succeeds; a run that did ask
+            gets no answer from "could not look".
 
     Returns:
         A code from :mod:`gha_workflow_linter.exit_codes`.
     """
     codes: list[int] = []
+
+    if rate_limited and _demanded_an_answer(options, config):
+        # Appended rather than returned, so the precedence table in
+        # exit_codes stays the single authority on which condition wins.
+        codes.append(exit_codes.RATE_LIMITED)
 
     # A rewrite the caller asked for that could not be written is a
     # failure, and one that shows up nowhere else: the planned change is
@@ -1942,6 +2028,12 @@ class RunOutcome:
         json_payload: This repository's JSON results, present only when
             the caller asked for them to be collected rather than
             printed.
+        rate_limited: Whether the API was throttled, so no check ran.
+            Recorded rather than inferred from ``exit_code``: an
+            advisory run reports :data:`~gha_workflow_linter.exit_codes.SUCCESS`
+            by design, so the code cannot distinguish a repository that
+            was examined and found clean from one that was never
+            examined at all.
     """
 
     exit_code: int
@@ -1953,21 +2045,28 @@ class RunOutcome:
     autofix_error: str | None = None
     error: str | None = None
     json_payload: dict[str, Any] | None = None
+    rate_limited: bool = False
 
 
-def run_linter(config: Config, options: CLIOptions) -> int:
+def run_linter(
+    config: Config, options: CLIOptions, *, rate_limited: bool = False
+) -> int:
     """
     Run the main linting process.
 
     Args:
         config: Configuration object
         options: CLI options
+        rate_limited: Whether pre-flight found the GitHub API
+            rate-limited. The run still scans, still reports, and still
+            emits its document; it skips every stage that needs the API,
+            and says so in the exit code when the caller asked for one.
 
     Returns:
         Exit code from :mod:`gha_workflow_linter.exit_codes`.
     """
     if options.multi_repo:
-        return _run_multi_repo(config, options)
+        return _run_multi_repo(config, options, rate_limited=rate_limited)
 
     shared_cache = ValidationCache(config.cache)
     # Eagerly load the cache and run all startup-time checks so any
@@ -1975,7 +2074,9 @@ def run_linter(config: Config, options: CLIOptions) -> int:
     # inside the progress block would interleave with the active
     # spinner and corrupt output).
     _render_cache_prime_banners(shared_cache.prime(), quiet=options.quiet)
-    return _run_one_repository(config, options, shared_cache).exit_code
+    return _run_one_repository(
+        config, options, shared_cache, rate_limited=rate_limited
+    ).exit_code
 
 
 def _run_one_repository(
@@ -1984,6 +2085,7 @@ def _run_one_repository(
     shared_cache: ValidationCache,
     *,
     collect_json: bool = False,
+    rate_limited: bool = False,
 ) -> RunOutcome:
     """Scan, validate, fix and report a single repository.
 
@@ -1995,22 +2097,41 @@ def _run_one_repository(
         collect_json: Return the JSON payload on the outcome instead of
             printing it, so a sweep can assemble one document rather
             than emitting several.
+        rate_limited: Whether pre-flight found the API rate-limited. The
+            scan still runs -- so an unreadable path is still reported
+            rather than passing silently -- and the results still emit;
+            every stage that needs the API is skipped.
 
     Returns:
         What the run produced, for aggregation by the caller.
     """
     scanner = WorkflowScanner(config)
 
-    scan_result = _scan_and_validate(config, options, scanner, shared_cache)
+    scan_result = _scan_and_validate(
+        config, options, scanner, shared_cache, rate_limited=rate_limited
+    )
     if isinstance(scan_result, _ScanShortCircuit):
         return RunOutcome(
             exit_code=scan_result.exit_code, error=scan_result.error
         )
     validation = scan_result
 
-    autofix = _run_auto_fix_stage(config, options, shared_cache, validation)
+    if rate_limited:
+        # Both remaining stages reach the GitHub API: the fixer resolves
+        # versions through it, and the allow-list check resolves hosts.
+        # Running them against an API that pre-flight has already found
+        # throttled would issue exactly the requests "Skipping Checks"
+        # promised to avoid, and would turn a throttle into rewrite
+        # failures and unresolved hosts -- findings about the estate,
+        # from a run that never managed to examine it.
+        autofix = _AutoFixOutcome(
+            {}, {"actions_moved": 0, "calls_updated": 0}, {}
+        )
+        allow_list = None
+    else:
+        autofix = _run_auto_fix_stage(config, options, shared_cache, validation)
 
-    allow_list = _run_allow_list_stage(config, options, shared_cache)
+        allow_list = _run_allow_list_stage(config, options, shared_cache)
 
     payload = _emit_results(
         options,
@@ -2020,6 +2141,7 @@ def _run_one_repository(
         config,
         allow_list,
         collect_json=collect_json,
+        rate_limited=rate_limited,
     )
 
     # Report outdated actions when auto-fix repaired validation errors but
@@ -2040,7 +2162,12 @@ def _run_one_repository(
 
     return RunOutcome(
         exit_code=_determine_exit_code(
-            options, validation, autofix, config, allow_list
+            options,
+            validation,
+            autofix,
+            config,
+            allow_list,
+            rate_limited=rate_limited,
         ),
         allow_list=allow_list,
         files_changed=sum(
@@ -2060,6 +2187,7 @@ def _run_one_repository(
         write_failures=len(autofix.write_failures),
         autofix_error=autofix.stage_error,
         json_payload=payload,
+        rate_limited=rate_limited,
     )
 
 
@@ -2128,7 +2256,9 @@ def _repository_label(repository: Path, root: Path) -> str:
     return resolved.name or str(resolved)
 
 
-def _run_multi_repo(config: Config, options: CLIOptions) -> int:
+def _run_multi_repo(
+    config: Config, options: CLIOptions, *, rate_limited: bool = False
+) -> int:
     """Visit every repository beneath the given path in turn.
 
     Repositories are processed sequentially. The intra-repository
@@ -2181,16 +2311,30 @@ def _run_multi_repo(config: Config, options: CLIOptions) -> int:
         return exit_codes.RUNTIME_ERROR
 
     if not repositories:
+        # An empty sweep examined nothing, which is a clean result only
+        # if the run had nothing to ask. Rate-limited, it did not even
+        # establish that the container was empty of work it could act
+        # on, so it answers as a repository with no action calls does.
+        empty_code = (
+            exit_codes.RATE_LIMITED
+            if rate_limited and _demanded_an_answer(options, config)
+            else exit_codes.SUCCESS
+        )
         if json_mode:
             # An empty sweep still owes the caller a document, or a
             # consumer cannot tell it from a crash.
-            _output_multi_repo_json([], options.path)
+            _output_multi_repo_json(
+                [],
+                options.path,
+                rate_limited=rate_limited,
+                exit_code=empty_code,
+            )
         elif not options.quiet:
             console.print(
                 f"[yellow]No repositories found under {options.path} "
                 f"at depth {options.repo_depth} ⚠️[/yellow]"
             )
-        return exit_codes.SUCCESS
+        return empty_code
 
     shared_cache = ValidationCache(config.cache)
     _render_cache_prime_banners(shared_cache.prime(), quiet=silent)
@@ -2212,6 +2356,7 @@ def _run_multi_repo(config: Config, options: CLIOptions) -> int:
                     shared_cache,
                     repository,
                     silent=silent,
+                    rate_limited=rate_limited,
                     # Pointing --multi-repo at a checkout visits that one
                     # repository, which is the case
                     # GITHUB_REPOSITORY_OWNER describes correctly, so the
@@ -2226,17 +2371,29 @@ def _run_multi_repo(config: Config, options: CLIOptions) -> int:
             )
         )
 
+    sweep_code = exit_codes.combine(
+        *(outcome.exit_code for _, outcome in results)
+    )
+
     if json_mode:
-        _output_multi_repo_json(results, options.path)
+        _output_multi_repo_json(
+            results,
+            options.path,
+            rate_limited=rate_limited,
+            exit_code=sweep_code,
+        )
     elif not options.quiet:
         _display_multi_repo_summary(results, options.path)
 
-    return exit_codes.combine(*(outcome.exit_code for _, outcome in results))
+    return sweep_code
 
 
 def _output_multi_repo_json(
     results: list[tuple[Path, RunOutcome]],
     root: Path,
+    *,
+    rate_limited: bool = False,
+    exit_code: int = exit_codes.SUCCESS,
 ) -> None:
     """Emit one JSON document covering the whole sweep.
 
@@ -2248,6 +2405,15 @@ def _output_multi_repo_json(
         results: Per-repository outcomes, in visit order.
         root: The container the sweep was pointed at, used to label each
             repository relatively.
+        rate_limited: Whether pre-flight found the API rate-limited.
+            Pre-flight runs once for the whole sweep, so this describes
+            every repository in the document, including a sweep that
+            found no repositories at all.
+        exit_code: The code the process will exit with. Taken from the
+            caller rather than recomputed here, so the document cannot
+            disagree with the status the sweep actually returns -- an
+            empty sweep has no outcomes to aggregate, and its code comes
+            from the run's own state instead.
     """
     document = {
         "repositories": [
@@ -2268,11 +2434,12 @@ def _output_multi_repo_json(
         "summary": {
             "repositories": len(results),
             "failed": sum(1 for _, o in results if o.error),
-            "exit_code": exit_codes.combine(
-                *(outcome.exit_code for _, outcome in results)
-            )
-            if results
-            else exit_codes.SUCCESS,
+            # Hoisted out of the per-repository payloads so a consumer
+            # need not open one to learn the sweep looked at nothing, and
+            # so an empty sweep -- which has no payloads at all -- can
+            # still say so.
+            "rate_limited": rate_limited,
+            "exit_code": exit_code,
         },
     }
 
@@ -2289,6 +2456,7 @@ def _run_repository_in_sweep(
     silent: bool = False,
     use_environment_org: bool = False,
     label: str | None = None,
+    rate_limited: bool = False,
 ) -> RunOutcome:
     """Run one repository of a sweep, surviving its failure.
 
@@ -2357,6 +2525,7 @@ def _run_repository_in_sweep(
             repo_options,
             shared_cache,
             collect_json=options.output_format == "json",
+            rate_limited=rate_limited,
         )
     except ConfigurationError:
         # A bad setting is a usage error and applies to every repository,
@@ -2442,9 +2611,10 @@ def _sweep_status(outcome: RunOutcome) -> str:
     A repository whose hosts could not be resolved gets its own label
     rather than sharing ``findings``: the check did not complete, so its
     empty counts say nothing, and a row of zeros marked ``findings``
-    gives the reader no way to tell the two apart. The order below
-    follows the exit-code precedence in ``exit_codes``, so an unresolved
-    check outranks work that was carried out.
+    gives the reader no way to tell the two apart. A rate-limited
+    repository gets one for the same reason, and is read from the
+    recorded state rather than the exit code, since an advisory run
+    reports success however little it managed to check.
 
     Args:
         outcome: What the repository produced.
@@ -2454,6 +2624,16 @@ def _sweep_status(outcome: RunOutcome) -> str:
     """
     if outcome.error:
         return "[red]failed[/red]"
+
+    # Read from the recorded state rather than the exit code, because an
+    # advisory run reports SUCCESS by design: the code cannot tell a
+    # repository that was examined and found clean from one that was
+    # never examined. Given its own label for the reason ``unresolved``
+    # has one -- the checks did not run, so the empty counts beside it
+    # say nothing, and ``clean`` or ``findings`` on a row of zeros both
+    # tell the reader the opposite of what happened.
+    if outcome.rate_limited:
+        return "[red]rate-limited[/red]"
 
     allow_list = outcome.allow_list
     if allow_list and allow_list.unresolved:
@@ -2474,9 +2654,11 @@ def _sweep_status(outcome: RunOutcome) -> str:
     if outcome.files_changed or (allow_list and allow_list.fixed_count):
         return "[yellow]updated[/yellow]"
 
-    if outcome.exit_code == exit_codes.SUCCESS:
-        return "[green]clean[/green]"
-    return "[yellow]findings[/yellow]"
+    return (
+        "[green]clean[/green]"
+        if outcome.exit_code == exit_codes.SUCCESS
+        else "[yellow]findings[/yellow]"
+    )
 
 
 def _create_scan_summary_table(
@@ -2818,6 +3000,8 @@ def output_text_results(
     fixed_files: dict[Path, list[dict[str, str]]] | None = None,
     redirect_stats: dict[str, int] | None = None,
     stale_actions_summary: dict[str, list[dict[str, Any]]] | None = None,
+    *,
+    rate_limited: bool = False,
 ) -> None:
     """
     Output results in human-readable text format.
@@ -2831,6 +3015,9 @@ def output_text_results(
         fixed_files: Dictionary of files that were auto-fixed
         redirect_stats: Statistics about redirected/relocated actions
         stale_actions_summary: Dictionary of stale actions to report
+        rate_limited: Whether the API was rate-limited, so no call was
+            checked. The reader is told that instead of being told the
+            calls are valid, which the run never established.
     """
     if not quiet:
         # Count total action calls fixed
@@ -2872,8 +3059,19 @@ def output_text_results(
         )
         _display_validation_summary(
             validation_summary,
-            skip_success=(has_actual_fixes or has_stale_actions),
+            skip_success=(
+                has_actual_fixes or has_stale_actions or rate_limited
+            ),
         )
+
+        if rate_limited:
+            # "All action calls are valid" would be the text-mode twin of
+            # the byte-identical JSON document: a run that checked
+            # nothing, reporting no problems, read as a clean result.
+            console.print(
+                "[yellow]GitHub API rate-limited; no action calls were "
+                "checked ⚠️[/yellow]"
+            )
 
         # Display modification message after scan summary if files were modified
         if has_actual_fixes:
@@ -2934,6 +3132,8 @@ def build_json_results(
     errors: list[Any],
     scan_path: Path,
     allow_list: AllowListOutcome | None = None,
+    *,
+    rate_limited: bool = False,
 ) -> dict[str, Any]:
     """
     Build the JSON results document for one repository.
@@ -2949,11 +3149,19 @@ def build_json_results(
         scan_path: Base path for computing relative paths
         allow_list: Allow-list outcome, merged in under an ``allow_list``
             key when the check ran
+        rate_limited: Whether the API was rate-limited, so the checks
+            never ran
 
     Returns:
         The results as a JSON-serialisable mapping.
     """
     result = {
+        # Always present, and stated even when false: a rate-limited run
+        # produces the same empty ``errors`` list as a clean one, so a
+        # consumer that had to infer this from absence could not tell
+        # "checks skipped" from "checks found nothing" -- the very
+        # confusion this key exists to prevent.
+        "rate_limited": rate_limited,
         "scan_summary": scan_summary,
         "validation_summary": validation_summary,
         "errors": [
@@ -2987,6 +3195,8 @@ def output_json_results(
     errors: list[Any],
     scan_path: Path,
     allow_list: AllowListOutcome | None = None,
+    *,
+    rate_limited: bool = False,
 ) -> None:
     """
     Output results in JSON format.
@@ -2998,9 +3208,16 @@ def output_json_results(
         scan_path: Base path for computing relative paths
         allow_list: Allow-list outcome, merged in under an ``allow_list``
             key when the check ran
+        rate_limited: Whether the API was rate-limited, so the checks
+            never ran
     """
     result = build_json_results(
-        scan_summary, validation_summary, errors, scan_path, allow_list
+        scan_summary,
+        validation_summary,
+        errors,
+        scan_path,
+        allow_list,
+        rate_limited=rate_limited,
     )
 
     # Use plain print() to avoid Rich formatting/ANSI codes in JSON output

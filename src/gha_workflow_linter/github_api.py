@@ -8,10 +8,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sys
 import time
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, Final, NoReturn
 
 import httpx
 
@@ -42,6 +41,12 @@ from .system_utils import get_default_workers
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+
+#: The rate-limit resources this tool spends, and how to name each one in
+#: a warning. GraphQL carries validation; REST carries the auto-fixer and
+#: the reference resolver.
+_BUDGETS: Final = (("graphql", "GraphQL"), ("core", "REST"))
 
 
 class GitHubGraphQLClient:
@@ -1218,27 +1223,31 @@ class GitHubGraphQLClient:
         """Get current rate limit information."""
         return self._rate_limit_info.model_copy()
 
-    def _is_rate_limited(self) -> bool:
-        """Check if we are currently rate-limited."""
-        # Consider rate-limited if we have 0 remaining requests
-        if self._rate_limit_info.remaining == 0:
-            return True
-
-        # Also check if we're very close to being rate-limited (1 request
-        # or less remaining) and the reset time is in the future.
-        current_time = time.time()
-        return (
-            self._rate_limit_info.remaining <= 1
-            and self._rate_limit_info.reset_at > current_time
-        )
-
-    def check_rate_limit_and_exit_if_needed(self) -> None:
+    def check_rate_limit(self) -> bool:
         """
-        Synchronously check rate limits and exit if rate limited.
+        Synchronously check rate limits and report the result.
 
-        This method performs a synchronous HTTP request to check rate limits
-        and exits the program if rate limited. Should be called early in the
-        application flow before showing progress bars.
+        This performs a synchronous HTTP request to check rate limits.
+        It is called early, before any progress bar opens, so a caller
+        can decide what to do while it still owes the user nothing.
+
+        Deciding here is not the same as acting here. An earlier version
+        called ``sys.exit(0)`` on discovering a rate limit, which ended
+        the process from inside the API client: before the command
+        dispatched, before any output contract was met, and before the
+        validation that sits after pre-flight could run. A ``--format
+        json`` run emitted no document at all yet exited successfully,
+        which a consumer cannot tell from a crash. Reporting the state
+        and leaving the decision to the caller keeps both the document
+        and the exit code in the hands of the code that promised them.
+
+        Returns:
+            ``True`` when the API reports the client is rate-limited on
+            any budget the run depends on -- GraphQL for validation, REST
+            for the fixer and the reference resolver. ``False`` when it
+            is not, and also when the check itself could not run -- a
+            failed check is not evidence of a rate limit, and the async
+            flow reports its own errors later.
         """
         # We can check rate limits even without a token for unauthenticated requests
 
@@ -1261,29 +1270,38 @@ class GitHubGraphQLClient:
                 response = client.get(f"{self.config.base_url}/rate_limit")
 
                 if response.status_code == 200:
-                    data = response.json()
-                    resources = data.get("resources") or {}
-                    graphql_limits = resources.get("graphql") or {}
+                    resources = response.json().get("resources") or {}
 
-                    remaining = graphql_limits.get("remaining", 5000)
-                    limit = graphql_limits.get("limit", 5000)
-                    reset_at = graphql_limits.get("reset", 0)
-
-                    self._rate_limit_info = GitHubRateLimitInfo(
-                        limit=limit,
-                        remaining=remaining,
-                        reset_at=reset_at,
-                        used=graphql_limits.get("used", 0),
-                    )
-
-                    # Check if we're rate limited and exit if so
-                    if self._is_rate_limited():
-                        self.logger.warning(
-                            "GitHub API Rate-limited; Skipping Checks ⚠️"
+                    # GitHub counts these budgets separately and the run
+                    # uses both: validation goes through GraphQL, while
+                    # the fixer and the reference resolver call REST.
+                    # Exhausting either leaves work the run cannot do,
+                    # and a throttled REST call is swallowed silently --
+                    # no latest version found, nothing reported outdated,
+                    # and --verify-actions exiting 0 having checked
+                    # nothing. Either one is enough, because the answer
+                    # is all-or-nothing: the run skips every API-backed
+                    # stage, so it needs both.
+                    for resource, label in _BUDGETS:
+                        limits = resources.get(resource) or {}
+                        budget = GitHubRateLimitInfo(
+                            limit=limits.get("limit", 5000),
+                            remaining=limits.get("remaining", 5000),
+                            reset_at=limits.get("reset", 0),
+                            used=limits.get("used", 0),
                         )
-                        sys.exit(0)
+                        if resource == "graphql":
+                            self._rate_limit_info = budget
+                        if budget.exhausted:
+                            self.logger.warning(
+                                f"GitHub {label} API Rate-limited; "
+                                f"Skipping Checks ⚠️"
+                            )
+                            return True
 
         except Exception as e:
-            # If we can't check rate limits, log it but don't exit
-            # The async flow will handle errors later
+            # If we can't check rate limits, log it but carry on.
+            # The async flow will handle errors later.
             self.logger.debug(f"Could not check rate limits synchronously: {e}")
+
+        return False

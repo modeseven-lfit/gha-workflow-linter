@@ -57,6 +57,7 @@ class TestExitCodeConstants:
         assert exit_codes.ALLOW_LIST_STALE == 3
         assert exit_codes.ALLOW_LIST_UNRESOLVED == 4
         assert exit_codes.ACTIONS_OUTDATED == 5
+        assert exit_codes.RATE_LIMITED == 6
 
     def test_codes_are_unique(self) -> None:
         codes = [
@@ -66,6 +67,7 @@ class TestExitCodeConstants:
             exit_codes.ALLOW_LIST_STALE,
             exit_codes.ALLOW_LIST_UNRESOLVED,
             exit_codes.ACTIONS_OUTDATED,
+            exit_codes.RATE_LIMITED,
         ]
         assert len(codes) == len(set(codes))
 
@@ -76,7 +78,7 @@ class TestExitCodeConstants:
 
 
 class TestCombine:
-    """Precedence: 4 > 3 > 5 > 1 > 0."""
+    """Precedence: 6 > 4 > 3 > 5 > 1 > 0."""
 
     def test_empty_is_success(self) -> None:
         assert exit_codes.combine() == exit_codes.SUCCESS
@@ -90,6 +92,16 @@ class TestCombine:
     @pytest.mark.parametrize(
         ("codes", "expected"),
         [
+            # Nothing a run observed can be trusted if it never looked,
+            # so rate-limiting outranks every finding below it.
+            (
+                (exit_codes.RATE_LIMITED, exit_codes.ALLOW_LIST_UNRESOLVED),
+                exit_codes.RATE_LIMITED,
+            ),
+            (
+                (exit_codes.RATE_LIMITED, exit_codes.DEFECTS_FOUND),
+                exit_codes.RATE_LIMITED,
+            ),
             # Infrastructure failure outranks everything: an unresolved
             # check must never look like a clean-or-stale result.
             (
@@ -133,7 +145,7 @@ class TestCombine:
 
 class TestDescribe:
     def test_known_codes_have_descriptions(self) -> None:
-        for code in (0, 1, 2, 3, 4, 5):
+        for code in (0, 1, 2, 3, 4, 5, 6):
             assert "Unknown" not in exit_codes.describe(code)
 
     def test_unknown_code(self) -> None:

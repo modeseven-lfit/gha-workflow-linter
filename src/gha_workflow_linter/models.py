@@ -8,6 +8,7 @@ from __future__ import annotations
 from enum import Enum
 from pathlib import Path
 import re
+import time
 
 from pydantic import (
     AliasChoices,
@@ -460,6 +461,26 @@ class GitHubRateLimitInfo(BaseModel):
         if self.limit == 0:
             return 0.0
         return (self.used / self.limit) * 100
+
+    @property
+    def exhausted(self) -> bool:
+        """Whether this budget leaves nothing usable.
+
+        A single remaining request counts as exhausted while the window
+        is still open, because spending it would leave none for the work
+        that follows. Once the window has passed the figure is stale and
+        says nothing about what is available now.
+
+        The field defaults describe a budget nothing is known about, so
+        a resource the API does not report reads as healthy rather than
+        as spent.
+
+        Returns:
+            ``True`` when the budget cannot support further requests.
+        """
+        if self.remaining == 0:
+            return True
+        return self.remaining <= 1 and self.reset_at > time.time()
 
 
 class CacheConfig(BaseModel):
