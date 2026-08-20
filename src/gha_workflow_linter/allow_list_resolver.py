@@ -27,8 +27,12 @@ caller depends on rather than incidental implementation details:
   whether enforcement was requested.
 * **Each distinct host repository costs one lookup.** Twenty pins naming
   ``lfreleng-actions/.github`` resolve it once, and a repeated run within
-  the cache TTL resolves it zero times -- except while a cooldown is
-  active, when the cache is bypassed entirely. See :attr:`cache_usable`.
+  the cache TTL resolves it zero times -- except while a cooldown or
+  prerelease eligibility applies, when the cache is bypassed entirely
+  (see :attr:`cache_usable`), and except when a pin sits on a release the
+  cached entry never saw, when that one repository is resolved afresh
+  rather than risk recommending a downgrade (see
+  :meth:`AllowListResolver._cache_can_place`).
 """
 
 from __future__ import annotations
@@ -50,7 +54,7 @@ from .models import ValidationMethod
 from .paths import base_repository
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
 
     from .cache import ValidationCache
     from .models import Config
@@ -97,18 +101,15 @@ class AllowListResolver:
     def cache_usable(self) -> bool:
         """Whether persisted results may be used and written this run.
 
-        The cache stores ``(tag, sha)`` and nothing else, so it cannot
-        record which release policy produced an entry. Two settings make
-        up that policy.
+        The cache stores a target and the commit-to-tag map behind it,
+        but no record of the release policy that produced either. Two
+        settings make up that policy.
 
-        Under a **cooldown**, a restored
-        :class:`~gha_workflow_linter.latest_release.LatestRelease` has an
-        empty ``commit_tags`` and cannot say whether a pin is behind the
-        target or ahead of it. That is harmless without a cooldown --
-        the target is then the newest release, so nothing can be ahead of
-        it -- but under a cooldown the target is deliberately an *older*
-        release, and losing direction would turn a correct pin into a
-        recommendation to downgrade.
+        A **cooldown** deliberately selects an *older* release than the
+        newest in existence, so a cooldown-shifted entry read back by a
+        run with no cooldown would suppress a valid update, and a
+        default-policy entry read under a cooldown would offer a release
+        the caller is not yet entitled to.
 
         **Prerelease eligibility** changes which releases are candidates
         at all, so a prerelease-enabled run could cache a prerelease that
@@ -128,7 +129,9 @@ class AllowListResolver:
         )
 
     async def resolve(
-        self, repo_keys: Iterable[str]
+        self,
+        repo_keys: Iterable[str],
+        pinned: Mapping[str, Iterable[str]] | None = None,
     ) -> dict[str, LatestRelease | None]:
         """
         Resolve the latest release of each distinct host repository.
@@ -136,11 +139,17 @@ class AllowListResolver:
         Repository keys are de-duplicated first, so a host shared by many
         pins costs exactly one lookup. Cached repositories are answered
         without touching a backend at all, unless :attr:`cache_usable` is
-        ``False``.
+        ``False`` or the cached answer cannot place one of the commits
+        ``pinned`` names.
 
         Args:
             repo_keys: Host repository keys, ``owner/repo``. Duplicates
                 and empty entries are ignored.
+            pinned: Commits already pinned against each host repository.
+                Supplying them lets a cached answer be checked for
+                sufficiency before it is trusted; omitting them keeps the
+                cache unconditional, which is only safe for a caller that
+                will not rewrite anything.
 
         Returns:
             Dictionary mapping each distinct repository key to its latest
@@ -156,7 +165,9 @@ class AllowListResolver:
         pending: list[str] = []
         for repo_key in unique:
             cached = self._cached(repo_key) if cache_usable else None
-            if cached is not None:
+            if cached is not None and self._cache_can_place(
+                repo_key, cached, (pinned or {}).get(repo_key, ())
+            ):
                 results[repo_key] = cached
             else:
                 pending.append(repo_key)
@@ -184,6 +195,52 @@ class AllowListResolver:
 
         return results
 
+    def _cache_can_place(
+        self,
+        repo_key: str,
+        cached: LatestRelease,
+        pinned: Iterable[str],
+    ) -> bool:
+        """
+        Report whether a cached answer can place every pinned commit.
+
+        A cached entry is the newest release *as of the moment it was
+        written*, and it stays usable for the whole TTL. If anything else
+        advances a pin inside that window -- Dependabot, Renovate, a
+        human, or an earlier repository in the same sweep -- the pin ends
+        up on a release the cached entry never saw. The classifier then
+        finds a commit it cannot place, calls the pin stale, and
+        ``--update-allow-list`` rewrites it *backwards*.
+
+        A commit the entry can place is safe either way: it belongs to a
+        release the resolution ranked, so the classifier can compare
+        versions and decide direction for itself. Only an unplaceable
+        commit forces a live lookup, which makes this cheap in the case
+        that matters -- nothing to do -- and precise in the case that
+        does not.
+
+        Args:
+            repo_key: Host repository key, for the log line.
+            cached: The release restored from the cache.
+            pinned: Commit SHAs pinned against this host repository.
+
+        Returns:
+            ``True`` when every pinned commit is the cached target or
+            belongs to a release the cached entry recorded.
+        """
+        for commit_sha in pinned:
+            if commit_sha.strip().lower() == cached.commit_sha.strip().lower():
+                continue
+            if cached.tag_for_commit(commit_sha) is not None:
+                continue
+            self.logger.debug(
+                f"Cached latest release {cached.tag} of {repo_key} cannot "
+                f"place pinned commit {commit_sha[:8]}; resolving afresh "
+                f"rather than risk recommending a downgrade"
+            )
+            return False
+        return True
+
     def _cached(self, repo_key: str) -> LatestRelease | None:
         """
         Read a repository's latest release from the persistent cache.
@@ -193,26 +250,31 @@ class AllowListResolver:
 
         Returns:
             The cached release, or ``None`` on a miss, an expired entry,
-            or an unreadable cache. ``published_at`` is always ``None``
-            and ``commit_tags`` always empty: the cache stores only
-            ``(tag, sha)``. Neither is needed once a release has been
-            selected without a cooldown, and :attr:`cache_usable` keeps
-            this path out of the runs where they would be.
+            or an unreadable cache. ``published_at`` is always ``None``:
+            the cache does not persist it, and it is not needed once a
+            release has been selected without a cooldown.
+            ``commit_tags`` is restored, so the record can still place a
+            commit among the releases the original resolution ranked --
+            though not one published after it, which
+            :meth:`_cache_can_place` is there to catch.
         """
         try:
-            cached = self.cache.get_latest_version(repo_key)
+            entry = self.cache.get_latest_version_entry(repo_key)
         except Exception as e:
             self.logger.debug(f"Latest-version cache read failed: {e}")
             return None
 
-        if not cached:
+        if not entry:
             return None
 
-        tag, commit_sha = cached
-        if not tag or not commit_sha:
+        if not entry.latest_tag or not entry.latest_sha:
             return None
 
-        return LatestRelease(tag=tag, commit_sha=commit_sha)
+        return LatestRelease(
+            tag=entry.latest_tag,
+            commit_sha=entry.latest_sha,
+            commit_tags=dict(entry.commit_tags),
+        )
 
     def _store(
         self,
@@ -221,6 +283,11 @@ class AllowListResolver:
     ) -> None:
         """
         Persist freshly resolved releases so the next run costs nothing.
+
+        The commit-to-tag map is stored alongside the target, so a later
+        run can still place a pinned commit among the releases this one
+        ranked instead of assuming the stored target is the newer of the
+        two.
 
         Unresolved repositories are deliberately not cached: a transient
         outage must not be remembered as "this repository has no release"
@@ -238,7 +305,10 @@ class AllowListResolver:
                 if release is None:
                     continue
                 self.cache.put_latest_version(
-                    repo_key, release.tag, release.commit_sha
+                    repo_key,
+                    release.tag,
+                    release.commit_sha,
+                    release.commit_tags,
                 )
                 stored = True
             if stored:

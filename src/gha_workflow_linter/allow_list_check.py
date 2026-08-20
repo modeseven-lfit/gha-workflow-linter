@@ -496,10 +496,12 @@ def _pin_is_at_or_ahead(ref: str, latest: LatestRelease) -> bool:
     Returns:
         ``True`` when the pinned commit belongs to a known release whose
         version is greater than or equal to the target's. ``False`` when
-        it belongs to no known release, and whenever the target carries
-        no commit map -- a cache-restored record, which the resolver only
-        produces when no cooldown applied and the target really is the
-        newest release.
+        it belongs to no known release -- a genuinely unknown commit,
+        which keeps the ``STALE`` classification because its position
+        cannot be established. A cache-restored target carries its commit
+        map too, and the resolver re-resolves any host whose cached
+        target cannot place a pinned commit, so this does not silently
+        answer ``False`` for want of data.
     """
     pinned_tag = latest.tag_for_commit(ref)
     if pinned_tag is None:
@@ -672,6 +674,32 @@ def classify_pins(
     return findings
 
 
+def _pinned_commits(
+    pins: Sequence[AllowListPin],
+) -> dict[str, set[str]]:
+    """Group the commits pinned against each host repository.
+
+    The resolver needs these to decide whether a cached answer is still
+    sufficient: a cached target cannot place a commit published after it
+    was written, and treating such a pin as stale would rewrite it
+    backwards.
+
+    Args:
+        pins: The detected pins, in scan order.
+
+    Returns:
+        Host repository key to the lowercased commit SHAs pinned against
+        it. Pins that name no commit at all are omitted: an ``UNPINNED``
+        pin has no position to establish.
+    """
+    commits: dict[str, set[str]] = {}
+    for pin in pins:
+        ref = pin.spec.ref
+        if _SHA_RE.match(ref):
+            commits.setdefault(host_key(pin), set()).add(ref.lower())
+    return commits
+
+
 class AllowListChecker:
     """Scan, resolve and classify allow-list pins in one pass.
 
@@ -752,7 +780,7 @@ class AllowListChecker:
         # the resolver.
         repo_keys = list(dict.fromkeys(host_key(pin) for pin in pins))
         hosts = await AllowListResolver(self.config, self.cache).resolve(
-            repo_keys
+            repo_keys, _pinned_commits(pins)
         )
         unresolved = {
             repo_key: UNRESOLVED_REASON

@@ -63,7 +63,7 @@ from gha_workflow_linter.models import (
 from gha_workflow_linter.version_utils import _parse_version
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
 
 FIXTURES = Path(__file__).parent / "fixtures" / "allow_list"
 
@@ -851,6 +851,7 @@ class _RecordingResolver:
     """Resolver double that records the keys it was asked for."""
 
     calls: list[list[str]] = []
+    pinned_calls: list[dict[str, set[str]]] = []
     hosts: dict[str, LatestRelease | None] = {}
 
     def __init__(self, config: Config, cache: ValidationCache) -> None:
@@ -864,18 +865,24 @@ class _RecordingResolver:
         self.cache = cache
 
     async def resolve(
-        self, repo_keys: Iterable[str]
+        self,
+        repo_keys: Iterable[str],
+        pinned: Mapping[str, Iterable[str]] | None = None,
     ) -> dict[str, LatestRelease | None]:
         """Record the request and answer from the configured mapping.
 
         Args:
             repo_keys: Host repository keys the checker asked for.
+            pinned: Commits pinned against each host repository.
 
         Returns:
             The configured latest release of each key.
         """
         keys = list(repo_keys)
         type(self).calls.append(keys)
+        type(self).pinned_calls.append(
+            {key: set(values) for key, values in (pinned or {}).items()}
+        )
         return {key: type(self).hosts.get(key) for key in keys}
 
 
@@ -900,6 +907,7 @@ async def run_check(
         The check outcome.
     """
     _RecordingResolver.calls = []
+    _RecordingResolver.pinned_calls = []
     _RecordingResolver.hosts = {HOST_REPO: LATEST} if hosts is None else hosts
     monkeypatch.setattr(
         allow_list_check, "AllowListResolver", _RecordingResolver
@@ -1302,7 +1310,7 @@ def _no_release_resolver() -> Any:
     """Return a resolve() stub reporting no release for every host."""
 
     async def _resolve(
-        _self: AllowListResolver, repo_keys: Any
+        _self: AllowListResolver, repo_keys: Any, _pinned: Any = None
     ) -> dict[str, Any]:
         return dict.fromkeys(repo_keys)
 

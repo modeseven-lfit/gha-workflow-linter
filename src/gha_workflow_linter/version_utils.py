@@ -42,6 +42,38 @@ def _parse_version(tag: str) -> tuple[int, int, int]:
     return (major, minor, patch)
 
 
+def _is_downgrade(current_tag: str, target_tag: str) -> bool:
+    """Report whether replacing one version tag with another goes backwards.
+
+    A resolved "latest" version is only ever the newest release *as of
+    the moment it was discovered*. A cached answer can therefore be older
+    than the version a file already pins, because Dependabot, Renovate, a
+    human or an earlier sweep can advance a pin inside the cache TTL. A
+    downgrade is materially worse than a stale pin -- it reverts a
+    supply-chain fix nobody asked to revert -- so callers use this to
+    refuse the rewrite rather than apply it.
+
+    Equality is deliberately not a downgrade: the same version may be
+    re-pinned to pick up a moved tag, and
+    :func:`_parse_version` ignores prerelease suffixes, so a comparison
+    it cannot separate must not block a legitimate rewrite.
+
+    Args:
+        current_tag: The version the file pins now.
+        target_tag: The version the run proposes to move it to.
+
+    Returns:
+        ``True`` only when ``current_tag`` is provably the higher
+        version. An unparsable tag on either side answers ``False``:
+        without two comparable versions there is no established
+        direction, and inventing one would block ordinary rewrites.
+    """
+    try:
+        return _parse_version(current_tag) > _parse_version(target_tag)
+    except ValueError:
+        return False
+
+
 def _get_version_specificity(tag: str) -> int:
     """
     Get the specificity level of a version tag.

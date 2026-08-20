@@ -201,6 +201,22 @@ gha-workflow-linter lint --auto-fix --update-actions
 gha-workflow-linter lint --auto-fix --no-update-actions
 ```
 
+**Updates do not move a pin backwards.** A resolved "latest" release
+names the newest at the moment of discovery, and a cached one can be
+older still — so a pin something else has advanced in the meantime
+(Dependabot, Renovate, a colleague, an earlier run) can be newer than the
+target. The linter leaves such a call alone rather than rewriting it
+backwards and reporting the downgrade as a successful update. The same
+applies when repairing a broken pin: a reference that no longer resolves
+is not replaced by a release older than the one its comment claims.
+
+Establishing that needs a version to compare, which comes from the
+reference when that is a version tag, and otherwise from the version
+comment. A commit pin carrying neither states no version, so it takes
+the ordinary update path. An action that has moved to a new repository
+is likewise exempt, since two projects' version numbers are not
+comparable.
+
 **Skip Testing Actions**: By default, auto-fix skips actions with 'test' in
 their comments (case-insensitive). This is useful when you have experimental or
 testing branches that you don't want to update yet. Use `--fix-test-calls` to
@@ -469,12 +485,19 @@ Twenty repositories cost one query rather than twenty.
 
 That sharing stops under a non-default release policy. A cooldown
 targets an older release by design, and prerelease eligibility changes
-which releases count as candidates; the cache records no more than a
-tag and a SHA, so a cached answer cannot say which policy produced it.
-Rather than let one repository's policy leak into another's, the sweep
-repeats the lookup per repository — twenty such repositories cost
+which releases count as candidates; the cache records the target and
+the releases ranked behind it, but not which policy chose them, so a
+cached answer cannot say whether it means the same thing to the next
+reader. Rather than let one repository's policy leak into another's, the
+sweep repeats the lookup per repository — twenty such repositories cost
 twenty queries. Correctness wins over the saving here, and the saving
 returns as soon as the default policy applies.
+
+One host is also resolved afresh when a pin sits on a release the cached
+entry never saw — the entry names the newest release at the moment of
+writing, and anything else may have advanced the pin inside the cache
+TTL. Trusting it there would report a current pin as stale and rewrite it
+backwards. A pin the cached entry can place still costs nothing.
 
 Each repository still gets its own workflow organisation and its own
 Dependabot cooldown, since both belong to the repository rather than to
