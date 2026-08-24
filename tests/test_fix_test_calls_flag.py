@@ -70,7 +70,10 @@ class TestFixTestCallsFlag:
             yield temp_path
 
     def test_default_behavior_skips_test_comments(
-        self, temp_workflow_dir: Path, runner: CliRunner
+        self,
+        temp_workflow_dir: Path,
+        runner: CliRunner,
+        mock_git_commands: None,
     ) -> None:
         """Test that by default, actions with 'test' comments are skipped."""
         workflow_file = (
@@ -121,10 +124,21 @@ jobs:
             f"Output:\n{clean_output}"
         )
 
+    @pytest.mark.network
     def test_fix_test_calls_flag_enables_fixing(
-        self, temp_workflow_dir: Path, runner: CliRunner
+        self,
+        temp_workflow_dir: Path,
+        runner: CliRunner,
     ) -> None:
-        """Test that --fix-test-calls flag enables fixing of test actions."""
+        """Test that --fix-test-calls flag enables fixing of test actions.
+
+        Unlike its neighbours this one asserts a rewrite *happened*, so it
+        needs a real reference resolved to a real SHA. ``mock_git_commands``
+        stubs the git binary but not the API resolution path the fixer uses,
+        so the mocked run produces no replacement and the assertion fails.
+        Marked rather than stubbed, so the dependency is visible and can be
+        deselected, until the resolution layer has a seam to stub.
+        """
         workflow_file = (
             temp_workflow_dir / ".github" / "workflows" / "test.yaml"
         )
@@ -159,7 +173,10 @@ jobs:
         assert "actions/checkout@" in updated_content
 
     def test_no_fix_test_calls_preserves_test_actions(
-        self, temp_workflow_dir: Path, runner: CliRunner
+        self,
+        temp_workflow_dir: Path,
+        runner: CliRunner,
+        mock_git_commands: None,
     ) -> None:
         """Test that without --fix-test-calls, test actions are not modified."""
         workflow_file = (

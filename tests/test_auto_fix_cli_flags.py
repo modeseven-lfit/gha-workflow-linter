@@ -18,6 +18,7 @@ class TestAutoFixCLIFlags:
     def test_no_auto_fix_flag_disables_auto_fix(
         self,
         temp_dir: Path,
+        mock_git_commands: None,
     ) -> None:
         """Test --no-auto-fix flag disables auto-fix."""
         # Use a workflow with a tag reference that would normally be auto-fixed
@@ -53,6 +54,7 @@ jobs:
     def test_cli_flags_are_accepted(
         self,
         temp_dir: Path,
+        mock_git_commands: None,
     ) -> None:
         """Test that CLI flags are accepted without error."""
         # Use a valid SHA-pinned workflow
