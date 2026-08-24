@@ -840,12 +840,15 @@ is preserved.
 | `3`  | `ALLOW_LIST_STALE`                | `--verify-allow-list` and unsuppressed allow-list `CURRENCY` findings remain                                                                                                                                         |
 | `4`  | `ALLOW_LIST_UNRESOLVED`           | `--verify-allow-list` and the latest release could not be resolved                                                                                                                                                   |
 | `5`  | `ACTIONS_OUTDATED`                | `--verify-actions` and outdated action calls remain (§8.7)                                                                                                                                                           |
+| `6`  | `RATE_LIMITED`                    | The GitHub API was rate-limited and the run had asked it to verify or update something, so none of that happened (§8.8)                                                                                              |
 
 <!-- markdownlint-enable MD013 -->
 
-Precedence: `4` > `3` > `5` > `1` > `0`. An infrastructure failure must
-never be reported as a clean-or-stale result, and a condition the caller
-specifically asked about must not be masked by the generic `1`.
+Precedence: `6` > `4` > `3` > `5` > `1` > `0`. An infrastructure failure
+must never be reported as a clean-or-stale result, and a condition the
+caller specifically asked about must not be masked by the generic `1`.
+`6` leads because every code below it describes something the run
+*observed*, and none of them can be claimed by a run that could not look.
 
 ### 8.6 Confirmed bug: exit-code bypass in `run_linter`
 
@@ -911,6 +914,69 @@ gha-workflow-linter lint --verify-allow-list   # fail if any pin is stale
 Both follow identical semantics: promote `CURRENCY` findings in that
 domain to errors, with a dedicated exit code. **Included in Phase 0**,
 alongside the taxonomy work that makes it possible.
+
+### 8.8 Confirmed bug: rate-limit pre-flight terminates the process
+
+`check_rate_limit_and_exit_if_needed` called `sys.exit(0)` on finding the
+client throttled. The process ended inside the API client: before the
+command dispatched, before any output contract was met, and before the
+validation that sits after pre-flight could run. A `--format json` run
+emitted **no document at all** while exiting successfully — which a
+consumer cannot distinguish from a crash — and an unreadable path went
+unreported.
+
+The intent was sound: being rate-limited should not fail a build. The
+defect was taking that decision by killing the process from inside the
+API client, so no caller could honour a contract it had already promised.
+
+Pre-flight is now a query. `check_rate_limit` returns whether the client
+is throttled and terminates nothing; a check that *itself* fails returns
+`False`, since failing to look is not evidence of a limit. It inspects
+both budgets GitHub counts separately — GraphQL, which validation uses,
+and REST, which the fixer and the reference resolver use — because
+exhausting either leaves work the run cannot do, and a throttled REST
+call is swallowed silently, so nothing is reported as outdated and a
+`--verify-actions` run exits `0` having checked nothing. A resource the
+response does not mention is assumed healthy, so an older or self-hosted
+instance is never read as exhausted. The status travels to the command,
+which decides:
+
+- The run still **scans**, so a path it cannot read is still reported.
+- The run still **emits** its document, marked `"rate_limited": true` at
+  the top level (and in `summary` for a sweep). Without that marker a
+  rate-limited document is identical to a clean one, and the consumer
+  this exists for — the weekly allow-list sweep — cannot tell "checks
+  skipped" from "checks found nothing". A repository with no action calls
+  takes the same path rather than the empty-scan short circuit, which
+  represents a clean result a rate-limited run cannot claim.
+- The run **skips every stage that reaches the API** — validation, the
+  fixer and the allow-list check alike. Leaving the last two running
+  would issue exactly the requests the skip promised to avoid, and would
+  turn a throttle into rewrite failures and unresolved hosts: findings
+  about an estate the run never examined.
+- The run reports `RATE_LIMITED` when it had been asked to verify or
+  update something. The effective settings decide, not the flags, since a
+  configuration file may enable either with no flag present, and each
+  demand is gated on the stage that would have answered it — a throttle
+  must not fail work that `--no-allow-list` or `--no-auto-fix` had
+  already switched off. A sweep that found no repositories has no
+  per-repository outcomes to aggregate, so its code comes from the run's
+  own state, and the emitter takes the code from its caller so the
+  document cannot disagree with the status the process returns.
+- The **text** output says so as well, in place of the usual "All action
+  calls are valid", and the sweep summary labels the repository
+  `rate-limited` rather than `findings` or `clean`. The label is read
+  from state recorded on `RunOutcome`, not from the exit code: an
+  advisory run reports `SUCCESS` by design, so the code cannot tell a
+  repository that was examined and found clean from one that was never
+  examined. Both of these were the same defect as the unmarked JSON
+  document: an unusable result read as an absence of problems.
+
+Advisory runs still exit `0`. Failing them would break every build in the
+estate the moment GitHub throttles, which is the outcome the original
+`sys.exit(0)` was right to avoid. Updating counts alongside verifying for
+the reason §8.5 already gives: asking for work and silently getting none
+of it must not report success.
 
 ## 9. CLI surface
 

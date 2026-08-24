@@ -23,10 +23,12 @@ Code  Name                      Meaning
 3     ALLOW_LIST_STALE          ``--verify-allow-list`` and stale pins remain.
 4     ALLOW_LIST_UNRESOLVED     ``--verify-allow-list`` and no latest release.
 5     ACTIONS_OUTDATED          ``--verify-actions`` and outdated calls remain.
+6     RATE_LIMITED              Rate-limited API, and the run asked it to
+                                verify or update something.
 ===== ========================= ================================================
 
-Precedence is ``4 > 3 > 5 > 1 > 0``. An infrastructure failure must never
-be reported as a clean-or-stale result, and a condition the caller
+Precedence is ``6 > 4 > 3 > 5 > 1 > 0``. An infrastructure failure must
+never be reported as a clean-or-stale result, and a condition the caller
 specifically asked about must not be masked by the generic ``1``.
 """
 
@@ -69,10 +71,27 @@ allow-list host repository could not be resolved."""
 ACTIONS_OUTDATED: Final = 5
 """``--verify-actions`` was requested and outdated action calls remain."""
 
+RATE_LIMITED: Final = 6
+"""The GitHub API was rate-limited, and the run had asked it to verify
+or update something, so none of that happened.
+
+Rate-limiting is not a finding: an advisory run reports
+:data:`SUCCESS` as it always has, because a throttled API must not
+break a build that asked no question of it. A caller that passed a
+verification or update flag *did* ask, and "could not look" answers
+neither *is this current?* nor *make this current*. This is the same
+distinction :data:`ALLOW_LIST_UNRESOLVED` draws, for the same reason,
+and it exists so a scheduled sweep can tell a clean estate from one it
+never managed to examine.
+"""
+
 
 # Ordered most to least significant. The first condition that holds
-# decides the exit code.
+# decides the exit code. RATE_LIMITED leads: every code below it
+# describes something the run observed, and none of them can be trusted
+# from a run that could not look.
 _PRECEDENCE: Final[tuple[int, ...]] = (
+    RATE_LIMITED,
     ALLOW_LIST_UNRESOLVED,
     ALLOW_LIST_STALE,
     ACTIONS_OUTDATED,
@@ -124,6 +143,7 @@ _DESCRIPTIONS: Final[dict[int, str]] = {
     ALLOW_LIST_STALE: "Stale allow-list pins",
     ALLOW_LIST_UNRESOLVED: "Allow-list latest release unresolved",
     ACTIONS_OUTDATED: "Outdated action calls",
+    RATE_LIMITED: "Rate-limited; requested work did not run",
 }
 
 
@@ -133,6 +153,7 @@ __all__ = [
     "ALLOW_LIST_UNRESOLVED",
     "CLI_USAGE_ERROR",
     "DEFECTS_FOUND",
+    "RATE_LIMITED",
     "RUNTIME_ERROR",
     "SUCCESS",
     "combine",

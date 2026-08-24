@@ -264,6 +264,7 @@ class RecordingRun:
         shared_cache: ValidationCache,
         *,
         collect_json: bool = False,
+        rate_limited: bool = False,
     ) -> RunOutcome:
         """Record one visit and return its configured outcome.
 
@@ -275,6 +276,9 @@ class RecordingRun:
             shared_cache: Cache the driver passed in.
             collect_json: Whether the driver asked for the payload to be
                 collected rather than printed.
+            rate_limited: Whether pre-flight found the API
+                rate-limited. Accepted so the double keeps the real
+                signature; the sweep passes it to every repository.
 
         Returns:
             The outcome configured for this repository.
@@ -427,6 +431,7 @@ class TestSharedCache:
             shared_cache: ValidationCache,
             *,
             collect_json: bool = False,  # noqa: ARG001 - matches the driver
+            rate_limited: bool = False,  # noqa: ARG001 - matches the driver
         ) -> RunOutcome:
             """Resolve the host on a cache miss, as a real run would.
 
@@ -435,6 +440,7 @@ class TestSharedCache:
                 options: Supplies the repository being visited.
                 shared_cache: Cache consulted before resolving.
                 collect_json: Unused; accepted to match the driver.
+                rate_limited: Unused; accepted to match the driver.
 
             Returns:
                 A successful outcome.
@@ -972,12 +978,19 @@ class TestMultiRepoCLI:
         write_dependabot_cooldown(tmp_path, 5)
         seen: list[int] = []
 
-        def capture(config: Config, _options: CLIOptions) -> int:
+        def capture(
+            config: Config,
+            _options: CLIOptions,
+            *,
+            rate_limited: bool = False,  # noqa: ARG001 - matches the driver
+        ) -> int:
             """Record the cooldown the command layer resolved.
 
             Args:
                 config: Configuration the command built.
                 _options: Unused.
+                rate_limited: Unused; accepted so the double keeps the
+                    real signature.
 
             Returns:
                 A successful exit code.
@@ -1011,12 +1024,19 @@ class TestMultiRepoCLI:
         write_dependabot_cooldown(tmp_path, 5)
         seen: list[int] = []
 
-        def capture(config: Config, _options: CLIOptions) -> int:
+        def capture(
+            config: Config,
+            _options: CLIOptions,
+            *,
+            rate_limited: bool = False,  # noqa: ARG001 - matches the driver
+        ) -> int:
             """Record the cooldown the command layer resolved.
 
             Args:
                 config: Configuration the command built.
                 _options: Unused.
+                rate_limited: Unused; accepted so the double keeps the
+                    real signature.
 
             Returns:
                 A successful exit code.
@@ -1366,6 +1386,7 @@ class TestSweepJsonOutput:
             _cache: ValidationCache,
             *,
             collect_json: bool = False,
+            rate_limited: bool = False,  # noqa: ARG001 - matches the driver
         ) -> RunOutcome:
             """Answer with a payload, as a collecting run would.
 
@@ -1375,6 +1396,7 @@ class TestSweepJsonOutput:
                 _cache: Unused.
                 collect_json: Recorded on the payload, so the test can
                     show the driver asked for collection.
+                rate_limited: Unused; accepted to match the driver.
 
             Returns:
                 An outcome carrying a JSON payload.
@@ -1411,6 +1433,7 @@ class TestSweepJsonOutput:
             _cache: ValidationCache,
             *,
             collect_json: bool = False,  # noqa: ARG001 - matches the driver
+            rate_limited: bool = False,  # noqa: ARG001 - matches the driver
         ) -> RunOutcome:
             """Answer with a run that failed invisibly.
 
@@ -1419,6 +1442,7 @@ class TestSweepJsonOutput:
                 _options: Unused.
                 _cache: Unused.
                 collect_json: Unused.
+                rate_limited: Unused; accepted to match the driver.
 
             Returns:
                 An outcome carrying both invisible failure kinds.
@@ -1482,6 +1506,7 @@ class TestSweepJsonOutput:
         assert document["summary"] == {
             "repositories": 0,
             "failed": 0,
+            "rate_limited": False,
             "exit_code": exit_codes.SUCCESS,
         }
 

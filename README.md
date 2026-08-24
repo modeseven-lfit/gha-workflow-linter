@@ -258,17 +258,52 @@ Example output (default behavior, test actions skipped):
 | `3`  | `--verify-allow-list` and stale allow-list pins remain                |
 | `4`  | `--verify-allow-list` and the tool could not reach the latest release |
 | `5`  | `--verify-actions` and outdated action calls remain                   |
+| `6`  | Rate-limited API, and the run asked it to verify or update            |
 
 <!-- markdownlint-enable MD013 -->
 
-When more than one applies, the most significant wins: `4`, then `3`,
-then `5`, then `1`. A check that could not run outranks a stale result,
-because enforcement reporting success when it never looked is worse than
-useless. A condition you asked about by name outranks the generic `1`,
-and nothing masks it.
+When more than one applies, the most significant wins: `6`, then `4`,
+then `3`, then `5`, then `1`. A check that could not run outranks a stale
+result, because enforcement reporting success when it never looked is
+worse than useless. A condition you asked about by name outranks the
+generic `1`, and nothing masks it.
 
 Codes `3`, `4` and `5` require the matching `--verify-*` flag. Without
 it, the linter reports those findings and leaves the exit code alone.
+
+#### Rate limiting
+
+A rate-limited run makes no further API request: validation, the fixer
+and the allow-list check are all skipped, as they were when the tool
+ended the process on discovering a throttle. The pre-flight query that
+found the throttle is the last request it makes. The run has nothing to
+report and no grounds for reporting a pass. What it does about that
+depends on whether you asked it for anything:
+
+- **Advisory runs exit `0`**, as they always have. A throttle at GitHub
+  must not break every build that merely wanted advice.
+- **A run that asked exits `6`.** "Could not look" answers neither *is
+  this current?* nor *make this current*, so `--verify-actions`,
+  `--verify-allow-list`, `--update-actions` and `--update-allow-list` all
+  produce `6`, as do the configuration-file settings behind them. This is
+  the same distinction `4` draws for an unresolved allow-list check.
+
+Turning off a stage removes the demand with it, so
+`--no-allow-list --verify-allow-list` exits `0` throttled or not: the
+check that would have answered it never runs either way. The same holds
+for the action-call settings under `--no-auto-fix`.
+
+Either way the run still scans, so a path it cannot read is still
+reported; it still emits its `--format json` document; and that document
+carries `"rate_limited": true`, so a scheduled sweep can tell a clean
+estate from one it never managed to examine. Text output says so too,
+in place of the usual "All action calls are valid", and a sweep summary
+labels the repository `rate-limited` rather than `findings`.
+
+GitHub counts the GraphQL and REST budgets separately, and the linter
+uses both: validation goes through GraphQL, while the fixer and the
+reference resolver call REST. Pre-flight checks both, since exhausting
+either one leaves work the run cannot do.
 
 ### Verifying Action Currency
 
@@ -509,17 +544,19 @@ The sweep visits repositories one at a time, and one failing does not
 stop the others: it records the failure, carries on, and closes with a
 table listing every repository, its pin counts and its status.
 
-| Status       | Meaning                                              |
-| ------------ | ---------------------------------------------------- |
-| `clean`      | Nothing outstanding                                  |
-| `updated`    | The run rewrote something, leaving nothing to do     |
-| `findings`   | Something needs attention                            |
-| `unresolved` | A host did not resolve, leaving the check incomplete |
-| `failed`     | The sweep could not scan the repository              |
+| Status         | Meaning                                              |
+| -------------- | ---------------------------------------------------- |
+| `clean`        | Nothing outstanding                                  |
+| `updated`      | The run rewrote something, leaving nothing to do     |
+| `findings`     | Something needs attention                            |
+| `unresolved`   | A host did not resolve, leaving the check incomplete |
+| `rate-limited` | GitHub throttled the API, so the checks did not run  |
+| `failed`       | The sweep could not scan the repository              |
 
-`unresolved` gets its own label because an incomplete check says nothing
-about the repository: its counts are empty for want of an answer, not
-for want of a problem.
+`unresolved` and `rate-limited` get their own labels because an
+incomplete check says nothing about the repository: its counts are empty
+for want of an answer, not for want of a problem. `rate-limited` appears
+whatever the exit code, since an advisory sweep still exits `0`.
 
 What remains outranks what the run achieved, so a partial remediation —
 some pins rewritten, others still stale — reports `findings` rather than
@@ -545,16 +582,30 @@ sweep, rather than one object per repository:
       "error": null,
       "write_failures": 0,
       "autofix_error": null,
-      "results": { "scan_summary": {}, "allow_list": {} }
+      "results": {
+        "rate_limited": false,
+        "scan_summary": {},
+        "allow_list": {}
+      }
     }
   ],
-  "summary": { "repositories": 1, "failed": 0, "exit_code": 3 }
+  "summary": {
+    "repositories": 1,
+    "failed": 0,
+    "rate_limited": false,
+    "exit_code": 3
+  }
 }
 ```
 
 A repository the sweep could not scan carries its reason in `error`, so a
 failure stays distinguishable from a clean result. An empty container
 still emits a document, for the same reason.
+
+`summary.rate_limited` reports whether the API throttled the sweep. It
+sits in the summary as well as in each repository's `results` because the
+pre-flight check runs once for the whole sweep, and because a sweep that
+found no repositories has no `results` to carry it.
 
 `write_failures` and `autofix_error` record the two failures that
 produce no validation error of their own: a rewrite that could not reach
@@ -936,6 +987,7 @@ can consume the output directly.
 
 ```json
 {
+  "rate_limited": false,
   "scan_summary": {
     "total_files": 12,
     "total_calls": 45,
@@ -971,6 +1023,11 @@ can consume the output directly.
   ]
 }
 ```
+
+`rate_limited` is always present. It reports whether the GitHub API
+throttled the run, in which case the run checked no action call at all,
+and `errors` is empty for want of an answer rather than for want of a
+problem. Without the key those two documents would look identical.
 
 ## GitHub Action Inputs
 
