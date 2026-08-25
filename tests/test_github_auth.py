@@ -19,6 +19,21 @@ from gha_workflow_linter.github_auth import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolate_github_credentials() -> None:
+    """Override the suite-wide credential isolation for this module.
+
+    ``conftest`` clears ``GITHUB_TOKEN`` and stubs the GitHub CLI lookup
+    so no test silently picks up a developer's credentials. This module
+    tests *that lookup itself*, so the stub would replace the code under
+    test and every case would assert against the stub's answer rather
+    than the real one.
+
+    The tests here supply their own environment and their own
+    ``subprocess`` doubles, so they never reach a real credential.
+    """
+
+
 class TestGetGitHubTokenWithFallback:
     """Test get_github_token_with_fallback function."""
 

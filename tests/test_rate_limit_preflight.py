@@ -302,6 +302,47 @@ class TestBudgetExhaustion:
 
         assert budget.exhausted is False
 
+    def test_a_stale_window_says_nothing_at_zero_either(self) -> None:
+        """The rule cannot depend on how depleted the stale figure is.
+
+        This combination was the one row of the table left untested, and
+        the one that diverged: zero remaining short-circuited before the
+        window was consulted, so a spent window reporting zero was called
+        exhausted while the same window reporting one was called healthy.
+        Two figures carrying equally stale information disagreed about
+        what that staleness meant.
+        """
+        stale = int(time.time()) - 3600
+
+        assert (
+            GitHubRateLimitInfo(remaining=0, reset_at=stale).exhausted
+            is GitHubRateLimitInfo(remaining=1, reset_at=stale).exhausted
+            is False
+        )
+
+    def test_an_open_window_is_exhausted_at_zero_and_at_one(self) -> None:
+        """The inverse: a live window still reports both as exhausted.
+
+        Without this, a guard that answered ``False`` unconditionally
+        would satisfy the staleness cases while disabling the check.
+        """
+        live = int(time.time()) + 3600
+
+        assert (
+            GitHubRateLimitInfo(remaining=0, reset_at=live).exhausted
+            is GitHubRateLimitInfo(remaining=1, reset_at=live).exhausted
+            is True
+        )
+
+    def test_an_unreported_reset_is_not_a_passed_window(self) -> None:
+        """A reset of zero means the API said nothing about the window.
+
+        Reading it as "already passed" would turn a spent budget into a
+        healthy one, which is the wrong direction for an answer that
+        decides whether any API work runs.
+        """
+        assert GitHubRateLimitInfo(remaining=0, reset_at=0).exhausted is True
+
     def test_an_unreported_budget_defaults_to_healthy(self) -> None:
         """The defaults must describe ignorance, not exhaustion.
 
@@ -1062,6 +1103,40 @@ class TestAdvisorySweepSummary:
 
         output = capsys.readouterr().out
         assert code == exit_codes.SUCCESS
+        assert "rate-limited" in output
+        assert "clean" not in output
+
+    def test_a_repository_with_no_calls_is_not_reported_clean_either(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Defence in depth for the status of a call-free repository.
+
+        A throttled run reaches its outcome before the empty-scan short
+        circuit, so this repository takes the ordinary path and the
+        status is right for that reason alone. The short circuit still
+        records the rate-limit state on its own outcome, and this holds
+        the pair together: with the ordering regressed *and* that state
+        dropped, the sweep displays a repository it never examined as
+        ``clean``. Either one alone is survivable, which is the point of
+        keeping both.
+
+        Args:
+            tmp_path: Container directory.
+            capsys: Captures standard output.
+        """
+        repository = tmp_path / "alpha"
+        workflows = repository / ".github" / "workflows"
+        workflows.mkdir(parents=True)
+        (workflows / "ci.yaml").write_text(
+            "---\nname: CI\non: [push]\njobs:\n  a:\n"
+            "    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n"
+        )
+        (repository / ".git").mkdir()
+        options = _options(tmp_path, multi_repo=True, quiet=False)
+
+        run_linter(_config(tmp_path), options, rate_limited=True)
+
+        output = capsys.readouterr().out
         assert "rate-limited" in output
         assert "clean" not in output
 

@@ -24,11 +24,38 @@ from gha_workflow_linter.models import (
     ActionCallType,
     APICallStats,
     Config,
+    GitHubAPIConfig,
     ReferenceType,
     ValidationError,
+    ValidationMethod,
     ValidationResult,
 )
 from gha_workflow_linter.validator import ActionCallValidator
+
+
+def _api_config(**overrides: Any) -> Config:
+    """Build a configuration pinned to the GitHub API backend.
+
+    These tests patch ``_validate_with_github_api``, so they only mean
+    anything if the validator actually chooses that backend. Left to
+    resolve on its own it picks one based on whether a token happens to
+    be available, which made the tests pass on a developer machine and
+    silently exercise the Git path everywhere else -- reaching neither
+    the mock nor, once the suite went offline, any answer at all.
+
+    Args:
+        **overrides: Configuration fields to set on top of the defaults.
+
+    Returns:
+        A configuration that selects the API backend deterministically.
+    """
+    fields: dict[str, Any] = {
+        "require_pinned_sha": False,
+        "validation_method": ValidationMethod.GITHUB_API,
+        "github_api": GitHubAPIConfig(token="test-token-not-a-real-credential"),
+    }
+    fields.update(overrides)
+    return Config(**fields)
 
 
 class TestActionCallValidator:
@@ -36,7 +63,7 @@ class TestActionCallValidator:
 
     def setup_method(self) -> None:
         """Set up test fixtures."""
-        self.config = Config(require_pinned_sha=False)
+        self.config = _api_config()
         self.validator = ActionCallValidator(self.config)
 
     def test_init(self) -> None:
@@ -244,7 +271,7 @@ class TestActionCallValidator:
     async def test_validate_action_calls_async_unpinned_sha(self) -> None:
         """Test validation with unpinned SHA when required."""
         # Configure to require pinned SHAs
-        config = Config(require_pinned_sha=True)
+        config = _api_config(require_pinned_sha=True)
         validator = ActionCallValidator(config)
 
         action_call = ActionCall(
@@ -707,7 +734,7 @@ class TestActionCallValidatorDeduplication:
 
     def setup_method(self) -> None:
         """Set up test fixtures."""
-        self.config = Config(require_pinned_sha=False)
+        self.config = _api_config()
         self.validator = ActionCallValidator(self.config)
 
     @pytest.mark.asyncio

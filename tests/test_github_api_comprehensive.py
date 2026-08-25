@@ -27,6 +27,18 @@ from gha_workflow_linter.models import (
 )
 
 
+@pytest.fixture(autouse=True)
+def quiet_client_startup() -> None:
+    """Override the suite-wide stub of the startup rate-limit refresh.
+
+    ``conftest`` neutralises ``_update_rate_limit_info`` so that opening
+    a client does not reach GitHub incidentally. This module tests that
+    method, so the stub would replace the code under test.
+
+    The tests here supply their own HTTP doubles, so nothing leaves.
+    """
+
+
 class TestGitHubGraphQLClient:
     """Test GitHub GraphQL API client."""
 

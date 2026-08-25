@@ -938,8 +938,21 @@ exhausting either leaves work the run cannot do, and a throttled REST
 call is swallowed silently, so nothing is reported as outdated and a
 `--verify-actions` run exits `0` having checked nothing. A resource the
 response does not mention is assumed healthy, so an older or self-hosted
-instance is never read as exhausted. The status travels to the command,
-which decides:
+instance is never read as exhausted.
+
+`GitHubRateLimitInfo.exhausted` decides that, and applies one rule to
+both ends of the range: a budget whose reset has passed describes a
+window that has already refilled and is not read as exhausted however
+low it is, while a budget of one or none inside a live window is. An
+earlier version short-circuited at zero before consulting the window, so
+a spent window reporting *none* was called exhausted while the same
+window reporting *one* was called healthy — two figures carrying equally
+stale information, disagreeing about what that staleness meant. A reset
+of zero means the API reported none, which is not evidence the window
+passed, so it stays exhausted; that is the safe direction for an answer
+gating whether any API work runs.
+
+The status travels to the command, which decides:
 
 - The run still **scans**, so a path it cannot read is still reported.
 - The run still **emits** its document, marked `"rate_limited": true` at

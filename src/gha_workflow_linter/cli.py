@@ -583,6 +583,49 @@ def _resolve_update_actions(
     return auto_latest
 
 
+def _reject_conflicting_verbosity(
+    *,
+    verbose: bool,
+    quiet: bool,
+    output_format: str,
+    multi_repo: bool,
+    path: Path | None,
+) -> None:
+    """Refuse ``--verbose`` with ``--quiet``, in the requested format.
+
+    Checked before anything else, so the refusal predates the command's
+    own error handling and has to report itself. In JSON mode that means
+    the document, not a Rich message on the stream the document belongs
+    to.
+
+    Args:
+        verbose: Whether verbose output was asked for.
+        quiet: Whether quiet output was asked for.
+        output_format: The format the caller asked for.
+        multi_repo: Whether a sweep was requested, deciding the shape.
+        path: The path the run was pointed at, if given.
+
+    Raises:
+        typer.Exit: Always, when both were given.
+    """
+    if not (verbose and quiet):
+        return
+
+    reason = "--verbose and --quiet cannot be used together"
+    if output_format == "json":
+        _emit_setup_failure(
+            f"Configuration error: {reason}",
+            output_format=output_format,
+            multi_repo=multi_repo,
+            path=path or Path.cwd(),
+        )
+    else:
+        console.print(f"[red]Error: {reason}[/red]")
+    # Arguably a usage error (code 2), but this has always exited 1 and
+    # changing it would break callers; see exit_codes.RUNTIME_ERROR.
+    raise typer.Exit(exit_codes.RUNTIME_ERROR)
+
+
 @app.command()
 def lint(
     path: Path | None = typer.Argument(
@@ -892,13 +935,13 @@ def lint(
         # Auto-fix only specific files
         gha-workflow-linter lint --auto-fix --files .github/workflows/release.yml
     """
-    if verbose and quiet:
-        console.print(
-            "[red]Error: --verbose and --quiet cannot be used together[/red]"
-        )
-        # Arguably a usage error (code 2), but this has always exited 1 and
-        # changing it would break callers; see exit_codes.RUNTIME_ERROR.
-        raise typer.Exit(exit_codes.RUNTIME_ERROR)
+    _reject_conflicting_verbosity(
+        verbose=verbose,
+        quiet=quiet,
+        output_format=output_format,
+        multi_repo=multi_repo,
+        path=path,
+    )
 
     # JSON format implies quiet mode (suppress console output)
     if output_format == "json":
@@ -1004,6 +1047,14 @@ def lint(
         logger.error(f"Configuration error: {e}")
         if verbose:
             logger.exception("Full traceback:")
+        # Refused before any scanning, so nothing has been emitted yet
+        # and the promised document is still owed.
+        _emit_setup_failure(
+            f"Configuration error: {e}",
+            output_format=output_format,
+            multi_repo=multi_repo,
+            path=path,
+        )
         raise typer.Exit(exit_codes.RUNTIME_ERROR) from None
     except Exception as e:
         logger.error(f"Fatal error: {e}")
@@ -1258,6 +1309,41 @@ def _describe_exception(error: Exception) -> str:
     return str(error) or type(error).__name__
 
 
+def _emit_setup_failure(
+    reason: str, *, output_format: str, multi_repo: bool, path: Path
+) -> None:
+    """Emit the JSON document for a run that failed before it started.
+
+    A configuration error is refused before any scanning, so the run
+    produces no results of its own -- but it has already promised a
+    document, and returning without one leaves a ``--format json``
+    consumer an empty stream. The shape matches whichever mode was
+    requested, so the caller parses the failure with the same code it
+    would have used for the results.
+
+    Args:
+        reason: Why the run was refused.
+        output_format: The format the caller asked for.
+        multi_repo: Whether a sweep was requested, which decides the
+            document's shape.
+        path: The path the run was pointed at.
+    """
+    if output_format != "json":
+        return
+
+    if multi_repo:
+        _output_multi_repo_json(
+            [], path, exit_code=exit_codes.RUNTIME_ERROR, error=reason
+        )
+        return
+
+    print(
+        json.dumps(
+            build_json_results({}, {}, [], path, None, error=reason), indent=2
+        )
+    )
+
+
 def _reject_files_with_multi_repo(
     files: list[str] | None, *, multi_repo: bool
 ) -> None:
@@ -1313,6 +1399,9 @@ def _scan_and_validate(
         BarColumn(),
         TaskProgressColumn(),
         console=console,
+        # Progress renders to standard output, which in JSON mode
+        # carries the document. run_linter normalises that mode to
+        # quiet before anything runs, so this needs no separate test.
         disable=options.quiet,
     ) as progress:
         # Scan for workflows
@@ -1353,6 +1442,8 @@ def _scan_and_validate(
                 console.print("[yellow]No workflows found to validate[/yellow]")
             # Not a failure: a repository with no workflows is a valid,
             # clean result rather than one that could not be scanned.
+            # The caller still owes a document, which it emits from this
+            # outcome without running any stage over an empty scan.
             return _ScanShortCircuit(0)
 
         # Count total calls for progress tracking
@@ -2065,6 +2156,17 @@ def run_linter(
     Returns:
         Exit code from :mod:`gha_workflow_linter.exit_codes`.
     """
+    # Standard output carries the document in JSON mode, so every
+    # presentational thing that would otherwise land there has to go
+    # quiet -- cache-prime banners before it, a stale-actions summary
+    # after it, allow-list notices around it. Gating each site
+    # separately left the ones nobody had thought of, so the mode is
+    # normalised once here instead, which is what the command layer
+    # already does before calling this. A direct caller gets no such
+    # coercion, and a direct caller is who parses the output.
+    if options.output_format == "json" and not options.quiet:
+        options = options.model_copy(update={"quiet": True})
+
     if options.multi_repo:
         return _run_multi_repo(config, options, rate_limited=rate_limited)
 
@@ -2077,6 +2179,56 @@ def run_linter(
     return _run_one_repository(
         config, options, shared_cache, rate_limited=rate_limited
     ).exit_code
+
+
+def _short_circuit_document(
+    scanner: WorkflowScanner,
+    config: Config,
+    shared_cache: ValidationCache,
+    outcome: _ScanShortCircuit,
+    rate_limited: bool,
+) -> dict[str, Any]:
+    """Build the JSON document for a run that ended before validating.
+
+    Two situations reach here and a consumer must be able to tell them
+    apart. A scan that *failed* has no counts to report and carries its
+    reason in ``error``. A scan that succeeded and found nothing to
+    check reports real, zero-valued summaries and no error, so its
+    document has the same shape as any other clean run.
+
+    Both previously emitted nothing at all, which left the two
+    indistinguishable from each other and from a crash.
+
+    Args:
+        scanner: The scanner that ran, for its summary shape.
+        config: Resolved configuration.
+        shared_cache: Cache the validator would have used.
+        outcome: What the scan stage returned.
+        rate_limited: Whether the API was rate-limited.
+
+    Returns:
+        The document, ready to print or collect.
+    """
+    if outcome.error:
+        return build_json_results(
+            {},
+            {},
+            [],
+            Path(),
+            None,
+            rate_limited=rate_limited,
+            error=outcome.error,
+        )
+
+    validator = ActionCallValidator(config, cache=shared_cache)
+    return build_json_results(
+        scanner.get_scan_summary({}),
+        validator.get_validation_summary([], 0, 0),
+        [],
+        Path(),
+        None,
+        rate_limited=rate_limited,
+    )
 
 
 def _run_one_repository(
@@ -2111,8 +2263,29 @@ def _run_one_repository(
         config, options, scanner, shared_cache, rate_limited=rate_limited
     )
     if isinstance(scan_result, _ScanShortCircuit):
+        payload = None
+        if options.output_format == "json":
+            # The run promised a document whether or not it got far
+            # enough to fill one in. Without this, a failed scan and a
+            # repository with nothing to check both emitted an empty
+            # stream, which a consumer cannot tell from a crash.
+            payload = _short_circuit_document(
+                scanner, config, shared_cache, scan_result, rate_limited
+            )
+            if not collect_json:
+                print(json.dumps(payload, indent=2))
         return RunOutcome(
-            exit_code=scan_result.exit_code, error=scan_result.error
+            exit_code=scan_result.exit_code,
+            error=scan_result.error,
+            json_payload=payload,
+            # Recorded even though the ordering in _scan_and_validate
+            # means a throttled run reaches its outcome before the
+            # empty-scan short circuit, so this is not observable today.
+            # An outcome that misdescribes its own run is a trap for the
+            # next reader of RunOutcome.rate_limited, and it is what
+            # would make a regression in that ordering show up as
+            # "clean" rather than as a wrong status.
+            rate_limited=rate_limited,
         )
     validation = scan_result
 
@@ -2256,6 +2429,49 @@ def _repository_label(repository: Path, root: Path) -> str:
     return resolved.name or str(resolved)
 
 
+def _discover_or_report(
+    options: CLIOptions, *, json_mode: bool, rate_limited: bool
+) -> list[Path] | None:
+    """Find the repositories to sweep, reporting a failure as a document.
+
+    Discovery is the one stage that can fail before the sweep has
+    anything to report, and it used to return straight to the caller.
+    Under ``--format json`` that meant exiting non-zero having printed
+    nothing, which a consumer cannot tell from a crash.
+
+    Args:
+        options: Resolved CLI options, supplying the path and depth.
+        json_mode: Whether the caller owes a JSON document.
+        rate_limited: Whether pre-flight found the API rate-limited.
+
+    Returns:
+        The repositories found, or ``None`` when discovery failed and
+        the reason has been reported.
+    """
+    logger = logging.getLogger(__name__)
+
+    try:
+        return find_repositories(options.path, depth=options.repo_depth)
+    except ValueError as error:
+        reason = f"Invalid repository depth: {error}"
+    except OSError as error:
+        # An unreadable root means nothing was examined. Reporting an
+        # empty sweep would be indistinguishable from a container with
+        # no repositories in it, and would exit successfully.
+        reason = f"Cannot read {options.path}: {_describe_exception(error)}"
+
+    logger.error(reason)
+    if json_mode:
+        _output_multi_repo_json(
+            [],
+            options.path,
+            rate_limited=rate_limited,
+            exit_code=exit_codes.RUNTIME_ERROR,
+            error=reason,
+        )
+    return None
+
+
 def _run_multi_repo(
     config: Config, options: CLIOptions, *, rate_limited: bool = False
 ) -> int:
@@ -2287,27 +2503,29 @@ def _run_multi_repo(
     Returns:
         The most significant exit code across every repository.
     """
-    logger = logging.getLogger(__name__)
-
-    _reject_files_with_multi_repo(options.files, multi_repo=True)
-
     json_mode = options.output_format == "json"
+
+    try:
+        _reject_files_with_multi_repo(options.files, multi_repo=True)
+    except ConfigurationError as error:
+        # The command layer refuses this combination before reaching
+        # here, so only a library caller arrives with it -- and it is
+        # owed the document just the same.
+        _emit_setup_failure(
+            f"Configuration error: {error}",
+            output_format=options.output_format,
+            multi_repo=True,
+            path=options.path,
+        )
+        raise
     # Anything written to standard output would sit alongside the JSON
     # document, so the commentary goes quiet in JSON mode as well.
     silent = options.quiet or json_mode
 
-    try:
-        repositories = find_repositories(options.path, depth=options.repo_depth)
-    except ValueError as error:
-        logger.error(f"Invalid repository depth: {error}")
-        return exit_codes.RUNTIME_ERROR
-    except OSError as error:
-        # An unreadable root means nothing was examined. Reporting an
-        # empty sweep would be indistinguishable from a container with
-        # no repositories in it, and would exit successfully.
-        logger.error(
-            f"Cannot read {options.path}: {_describe_exception(error)}"
-        )
+    repositories = _discover_or_report(
+        options, json_mode=json_mode, rate_limited=rate_limited
+    )
+    if repositories is None:
         return exit_codes.RUNTIME_ERROR
 
     if not repositories:
@@ -2394,6 +2612,7 @@ def _output_multi_repo_json(
     *,
     rate_limited: bool = False,
     exit_code: int = exit_codes.SUCCESS,
+    error: str | None = None,
 ) -> None:
     """Emit one JSON document covering the whole sweep.
 
@@ -2414,8 +2633,13 @@ def _output_multi_repo_json(
             disagree with the status the sweep actually returns -- an
             empty sweep has no outcomes to aggregate, and its code comes
             from the run's own state instead.
+        error: Why the sweep could not run, when it failed before
+            examining anything. Distinguishes that from a container that
+            genuinely holds no repositories, which is otherwise the same
+            empty document.
     """
     document = {
+        "error": error,
         "repositories": [
             {
                 "repository": _repository_label(repository, root),
@@ -3134,6 +3358,7 @@ def build_json_results(
     allow_list: AllowListOutcome | None = None,
     *,
     rate_limited: bool = False,
+    error: str | None = None,
 ) -> dict[str, Any]:
     """
     Build the JSON results document for one repository.
@@ -3151,6 +3376,7 @@ def build_json_results(
             key when the check ran
         rate_limited: Whether the API was rate-limited, so the checks
             never ran
+        error: Why the run could not complete, when it could not
 
     Returns:
         The results as a JSON-serialisable mapping.
@@ -3162,6 +3388,10 @@ def build_json_results(
         # "checks skipped" from "checks found nothing" -- the very
         # confusion this key exists to prevent.
         "rate_limited": rate_limited,
+        # Likewise always present. A run that failed before it could
+        # examine anything reports no findings, which is indistinguishable
+        # from finding none unless it says why.
+        "error": error,
         "scan_summary": scan_summary,
         "validation_summary": validation_summary,
         "errors": [
