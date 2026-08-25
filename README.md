@@ -575,6 +575,7 @@ sweep, rather than one object per repository:
 
 ```json
 {
+  "error": null,
   "repositories": [
     {
       "repository": "example-workflows",
@@ -584,6 +585,7 @@ sweep, rather than one object per repository:
       "autofix_error": null,
       "results": {
         "rate_limited": false,
+        "error": null,
         "scan_summary": {},
         "allow_list": {}
       }
@@ -601,6 +603,11 @@ sweep, rather than one object per repository:
 A repository the sweep could not scan carries its reason in `error`, so a
 failure stays distinguishable from a clean result. An empty container
 still emits a document, for the same reason.
+
+The **top-level** `error` reports a sweep that failed before it examined
+anything — an unreadable container, or a depth it could not use. Without
+it that document is identical to one describing a container that holds no
+repositories at all.
 
 `summary.rate_limited` reports whether the API throttled the sweep. It
 sits in the summary as well as in each repository's `results` because the
@@ -988,6 +995,7 @@ can consume the output directly.
 ```json
 {
   "rate_limited": false,
+  "error": null,
   "scan_summary": {
     "total_files": 12,
     "total_calls": 45,
@@ -1028,6 +1036,13 @@ can consume the output directly.
 throttled the run, in which case the run checked no action call at all,
 and `errors` is empty for want of an answer rather than for want of a
 problem. Without the key those two documents would look identical.
+
+`error` is always present too, and reports why a run could not examine
+its input — an unreadable path, say. A run that completed reports `null`.
+Note the difference from the `errors` list beside it: `errors` holds
+findings *about* the workflows, while `error` says the run never got far
+enough to have any. Every path emits a document, so a consumer never has
+to treat an empty stream as meaningful.
 
 ## GitHub Action Inputs
 
