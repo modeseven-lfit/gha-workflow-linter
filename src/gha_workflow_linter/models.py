@@ -469,18 +469,24 @@ class GitHubRateLimitInfo(BaseModel):
         A single remaining request counts as exhausted while the window
         is still open, because spending it would leave none for the work
         that follows. Once the window has passed the figure is stale and
-        says nothing about what is available now.
+        says nothing about what is available now, so it is not read as
+        exhaustion however low it is: a budget of none and a budget of
+        one describe the same spent window, and treating them
+        differently would report the more depleted of the two as the
+        more usable.
 
-        The field defaults describe a budget nothing is known about, so
-        a resource the API does not report reads as healthy rather than
-        as spent.
+        A reset of zero means the API reported none, which is not
+        evidence that the window passed. Combined with the field
+        defaults, that leaves a resource the API does not mention
+        reading as healthy rather than as spent -- the safe direction,
+        since this answer gates whether any API work runs at all.
 
         Returns:
             ``True`` when the budget cannot support further requests.
         """
-        if self.remaining == 0:
-            return True
-        return self.remaining <= 1 and self.reset_at > time.time()
+        if self.reset_at and self.reset_at <= time.time():
+            return False
+        return self.remaining <= 1
 
 
 class CacheConfig(BaseModel):
