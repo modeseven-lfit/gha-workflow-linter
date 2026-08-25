@@ -11,6 +11,7 @@ import re
 import tempfile
 from unittest.mock import Mock, patch
 
+import pytest
 from typer.testing import CliRunner
 
 from gha_workflow_linter.cli import app
@@ -18,6 +19,25 @@ from gha_workflow_linter.cli import app
 
 class TestFilesOption:
     """Test the --files CLI option."""
+
+    @pytest.fixture(autouse=True)
+    def offline_git(
+        self, mock_git_commands: None, no_repository_redirect: None
+    ) -> None:
+        """Answer git and the redirect probe locally for this class.
+
+        These tests are about which *files* the scanner selects, and
+        each drives the whole CLI to find out. Mocking validation is not
+        enough on its own: the auto-fix stage that follows resolves the
+        references it found, which reaches github.com twice over -- by
+        ``git ls-remote``, and by an HTTP ``HEAD`` that looks for a
+        renamed repository. Both are incidental to file selection, so
+        both are answered here rather than named by each test.
+
+        Args:
+            mock_git_commands: The git double, applied for its effect.
+            no_repository_redirect: The redirect stub, likewise.
+        """
 
     def setup_method(self) -> None:
         """Set up test fixtures."""

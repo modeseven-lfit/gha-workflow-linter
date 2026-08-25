@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 import pytest
 
-from gha_workflow_linter import github_api, github_auth
+from gha_workflow_linter import auto_fix, github_api, github_auth
 from gha_workflow_linter.models import (
     Config,
     GitConfig,
@@ -24,6 +24,11 @@ from gha_workflow_linter.models import (
 )
 
 _ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
+
+
+#: Lets a test run pytest in-process, so the suite can check what its
+#: own fixtures do to a *failing* test rather than only to passing ones.
+pytest_plugins = ["pytester"]
 
 
 def strip_ansi(text: str) -> str:
@@ -328,6 +333,209 @@ def isolate_github_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+#: The genuine startup refresh, captured before it is stubbed, so a test
+#: that exercises it can ask for the real one back.
+REAL_UPDATE_RATE_LIMIT_INFO = (
+    github_api.GitHubGraphQLClient._update_rate_limit_info
+)
+
+
+@pytest.fixture
+def unreachable_git(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make networked git commands fail as an unreachable host would.
+
+    For tests about how the linter *handles* a network failure. They
+    previously produced one by naming repositories that do not exist,
+    which needed a working connection to establish -- so a test named
+    for DNS resolution failing was, in fact, resolving DNS successfully.
+    The git backend builds ``https://github.com/...`` directly and
+    ignores the configured base URL, so pointing the configuration at a
+    reserved domain did not reach the git path at all.
+
+    Only the commands that would have contacted a remote fail. A local
+    ``git --version`` or ``git remote get-url`` still runs, so setup a
+    test does before reaching the call it cares about is unaffected.
+
+    Args:
+        monkeypatch: Used to replace ``subprocess.run``.
+    """
+    _install_failing_git(
+        monkeypatch,
+        "fatal: unable to access 'https://github.com/': "
+        "Could not resolve host: github.com",
+    )
+
+
+@pytest.fixture
+def timing_out_git(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make networked git commands time out rather than fail outright.
+
+    A timeout reaches the linter as an exception rather than a non-zero
+    exit, and is handled by a different branch. Sharing one double
+    between the two would let the timeout test pass while that branch
+    was broken, since it would only ever see the connection failure.
+
+    Args:
+        monkeypatch: Used to replace ``subprocess.run``.
+    """
+    real_run = subprocess.run
+
+    def timing_out(*args: Any, **kwargs: Any) -> Any:
+        """Time out a networked git command, pass anything else through.
+
+        Args:
+            args: Positional arguments as ``subprocess.run`` takes them.
+            kwargs: Keyword arguments, passed through.
+
+        Returns:
+            The real result for a local command.
+
+        Raises:
+            subprocess.TimeoutExpired: For a command reaching a remote.
+        """
+        cmd = args[0] if args else kwargs.get("args", [])
+        if _is_networked_git(cmd):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", timing_out)
+
+
+def _is_networked_git(cmd: object) -> bool:
+    """Whether a command is a git invocation that reaches a remote.
+
+    Defers to the guard's own classifier, including how it renders each
+    token: ``subprocess`` accepts lists and tuples of ``str``, ``bytes``
+    or path-like arguments, and rendering those with ``str()`` turns
+    ``b"--version"`` into ``"b'--version'"`` -- which reads as neither a
+    known local subcommand nor an option, so a local command would be
+    failed as though it had reached out.
+
+    Args:
+        cmd: The command as ``subprocess`` received it.
+
+    Returns:
+        ``True`` when it would contact a remote.
+    """
+    if not isinstance(cmd, (list, tuple)) or len(cmd) < 2:
+        return False
+    if not _is_git(cmd[0]):
+        return False
+    return _reaches_a_remote(["git", *(_token_text(t) for t in cmd[1:])])
+
+
+def _install_failing_git(monkeypatch: pytest.MonkeyPatch, message: str) -> None:
+    """Replace ``subprocess.run`` so networked git fails with ``message``.
+
+    Args:
+        monkeypatch: Used to install the replacement.
+        message: The standard-error text to report.
+    """
+    real_run = subprocess.run
+
+    def failing_run(
+        *args: Any, **kwargs: Any
+    ) -> subprocess.CompletedProcess[Any]:
+        """Fail a networked git command, pass anything else through.
+
+        Args:
+            args: Positional arguments as ``subprocess.run`` takes them.
+            kwargs: Keyword arguments, read for the text mode.
+
+        Returns:
+            A failed process for git, or the real result otherwise.
+        """
+        cmd = args[0] if args else kwargs.get("args", [])
+        if not _is_networked_git(cmd):
+            return real_run(*args, **kwargs)
+
+        text = bool(kwargs.get("text") or kwargs.get("universal_newlines"))
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=128,
+            stdout="" if text else b"",
+            stderr=message if text else message.encode(),
+        )
+
+    monkeypatch.setattr(subprocess, "run", failing_run)
+
+
+@pytest.fixture
+def no_rate_limit_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer the pre-flight rate-limit query without asking GitHub.
+
+    ``_configure_validation_backend`` probes ``/rate_limit`` once, before
+    dispatching, whenever a token selects the API backend. A test about
+    token handling reaches GitHub for that reason alone, which is
+    incidental to what it asserts.
+
+    Reports "not throttled", the ordinary case. A test about throttling
+    stubs this itself with the answer it needs.
+
+    Args:
+        monkeypatch: Used to replace the probe.
+    """
+    monkeypatch.setattr(
+        github_api.GitHubGraphQLClient,
+        "check_rate_limit",
+        lambda _self: False,
+    )
+
+
+@pytest.fixture
+def no_repository_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer the fixer's redirect probe without asking GitHub.
+
+    Before resolving a reference the auto-fixer sends an HTTP ``HEAD``
+    to ``https://github.com/<owner>/<repo>`` to notice a renamed
+    repository. It is a third route out, distinct from the GraphQL API
+    and from ``git ls-remote``, so stubbing those leaves it open -- and
+    it is incidental to most tests that happen to run the fixer.
+
+    Args:
+        monkeypatch: Used to replace the probe.
+    """
+
+    async def no_redirect(_self: object, _repo_key: str) -> None:
+        """Report that the repository has not moved.
+
+        Args:
+            _self: The fixer, unused.
+            _repo_key: The repository asked about, unused.
+
+        Returns:
+            ``None``, meaning no redirect.
+        """
+        return None
+
+    monkeypatch.setattr(
+        auto_fix.AutoFixer, "_detect_repository_redirect", no_redirect
+    )
+
+
+@pytest.fixture
+def real_client_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Restore the startup refresh for a test that is about it.
+
+    ``quiet_client_startup`` stubs the refresh for the whole suite, so a
+    test of the refresh itself would otherwise assert against the stub.
+    Requested per test rather than overridden per module: an override
+    covers every test in the file, and seven of them opened a client for
+    unrelated reasons and reached GitHub as a result.
+
+    A test asking for this must supply its own HTTP double, or the guard
+    will refuse the request it makes.
+
+    Args:
+        monkeypatch: Used to put the genuine method back.
+    """
+    monkeypatch.setattr(
+        github_api.GitHubGraphQLClient,
+        "_update_rate_limit_info",
+        REAL_UPDATE_RATE_LIMIT_INFO,
+    )
+
+
 @pytest.fixture(autouse=True)
 def quiet_client_startup(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stop entering the API client from fetching a rate-limit budget.
@@ -627,35 +835,53 @@ REAL_ASYNC_HTTP_TRANSPORT = httpx.AsyncHTTPTransport.handle_async_request
 REAL_SUBPROCESS_RUN = subprocess.run
 
 
-class NetworkAccessError(RuntimeError):
+class NetworkAccessError(BaseException):
     """A test reached the network without declaring that it would.
 
-    Note that the application catches broadly by design -- git
-    validation turns a failed lookup into an invalid-reference result,
-    and the auto-fixer swallows a failed resolution -- so a test whose
-    request this refuses may still pass, with the refusal recorded as an
-    ordinary finding. The request is prevented either way, which is what
-    keeps the suite offline; making every violation *fail* as well needs
-    ninety-two tests stubbed first, and is tracked separately.
+    Deliberately not an :class:`Exception`. The application catches
+    broadly and by design -- git validation turns a failed lookup into
+    an invalid-reference finding, the rate-limit refresh carries on
+    after any failure, and the auto-fixer swallows a failed resolution.
+    Each is reasonable on its own, and each absorbs a guard raised as an
+    ``Exception``: the request is refused, the test records the refusal
+    as an ordinary result, and it passes. That is worse than no guard,
+    because it looks like one.
+
+    Inheriting from ``BaseException`` puts it past those handlers, so a
+    test that reaches for the network fails for having reached. The one
+    ``except BaseException`` in the source removes a temporary file and
+    re-raises, so nothing absorbs it there either.
     """
 
 
 @pytest.fixture(autouse=True)
 def forbid_network(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
-) -> None:
+) -> Generator[None, None, None]:
     """Fail any unmarked test that reaches the network.
 
-    The suite has twice been slowed and destabilised by tests quietly
-    depending on github.com -- once for 115 seconds against a 120 second
-    timeout. Both times the dependency was invisible until measured,
-    because a networked test looks exactly like a fast one when the
+    The suite has repeatedly been slowed and destabilised by tests
+    quietly depending on github.com -- once for 115 seconds against a
+    120 second timeout. The dependency is invisible until measured,
+    because a networked test looks exactly like a fast one whenever the
     network happens to be quick.
 
-    This makes the dependency loud instead. Both routes out are covered:
-    httpx for the API clients, and ``subprocess`` for the git binary,
-    which no socket-level guard would catch because the traffic belongs
-    to a child process.
+    Refusing the request is only half of it. Raising
+    :class:`NetworkAccessError` from ``BaseException`` carries it past
+    the application's direct ``except Exception`` handlers, but not past
+    ``asyncio.gather(..., return_exceptions=True)``, which *returns*
+    such objects as results: the git validator turns one into a
+    ``NETWORK_ERROR`` finding, and the fixer skips it. Five gather sites
+    sit on exactly the routes this guards.
+
+    So violations are recorded as well as raised, and the test fails at
+    teardown for having attempted one however its exception was
+    disposed of. That holds regardless of what the application catches,
+    which is what makes the guarantee worth stating.
+
+    Both routes out are covered: httpx for the API clients, and
+    ``subprocess`` for the git binary, whose traffic belongs to a child
+    process and which no socket-level guard would see.
 
     The guard sits on httpx's *real* transports rather than on
     ``Client.send``, so a test that installs a ``MockTransport`` is
@@ -671,19 +897,32 @@ def forbid_network(
     local is refused instead.
 
     Tests that genuinely need a live answer declare ``@pytest.mark.network``
-    and are exempt, which is what makes that marker mean something.
+    and are exempt, which is what makes that marker mean something. A
+    test that provokes the guard deliberately declares
+    ``@pytest.mark.expects_network_refusal``, so its own violations do
+    not fail it at teardown.
 
     Args:
         request: Used to read the test's markers.
         monkeypatch: Used to install and remove the guards.
 
+    Yields:
+        Nothing; the guards are active for the test's duration.
+
     Raises:
         NetworkAccessError: When an unmarked test attempts a request.
     """
     if request.node.get_closest_marker("network"):
+        yield
         return
 
+    attempted: list[str] = []
+    # Attached to the node so a test can assert the attempt was seen even
+    # when nothing propagated -- which is the case this records for.
+    request.node.network_attempts = attempted
+
     def refuse(target: str) -> NetworkAccessError:
+        attempted.append(target)
         return NetworkAccessError(
             f"{request.node.name} attempted to reach {target}. Tests must "
             f"not depend on the network: stub the call, or declare the "
@@ -776,6 +1015,24 @@ def forbid_network(
     )
     monkeypatch.setattr(subprocess, "run", guarded_run, raising=True)
 
+    yield
+
+    if attempted and not request.node.get_closest_marker(
+        "expects_network_refusal"
+    ):
+        pytest.fail(
+            f"{request.node.name} attempted to reach the network "
+            f"{len(attempted)} time(s): "
+            f"{', '.join(sorted(set(attempted)))}. Stub the call, or "
+            f"declare the dependency with @pytest.mark.network if a live "
+            f"answer is genuinely required. This is reported at teardown "
+            f"because the refusal may have been caught and discarded -- "
+            f"asyncio.gather returns it as a result, and the application "
+            f"handles failures broadly -- so the attempt is recorded as "
+            f"well as raised.",
+            pytrace=False,
+        )
+
 
 # Markers for test categorization
 pytest_markers = [
@@ -783,6 +1040,8 @@ pytest_markers = [
     "integration: marks tests as integration tests",
     "slow: marks tests as slow running tests",
     "network: marks tests that require network access",
+    "expects_network_refusal: marks tests that provoke the network "
+    "guard deliberately, so their own violations must not fail them",
 ]
 
 

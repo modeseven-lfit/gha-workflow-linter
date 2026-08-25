@@ -385,6 +385,7 @@ jobs:
         self,
         config_pinned_required: Config,
         temp_workflow_file: Path,
+        no_repository_redirect: None,
     ) -> None:
         """Test auto-fix behavior when require_pinned_sha=True."""
         # Mock git operations to return realistic data
@@ -624,6 +625,7 @@ jobs:
         self,
         config_pinned_not_required: Config,
         temp_workflow_file: Path,
+        no_repository_redirect: None,
     ) -> None:
         """Test auto-fix behavior when require_pinned_sha=False."""
         # Mock git operations
@@ -670,6 +672,9 @@ jobs:
                 patch.object(
                     AutoFixer, "_find_valid_reference"
                 ) as mock_find_ref,
+                patch.object(
+                    AutoFixer, "_get_commit_sha_for_reference"
+                ) as mock_commit_sha,
             ):
                 # Mock batch latest version retrieval (returns empty - no updates needed)
                 # The enhanced batch processor will call _find_valid_reference for INVALID_REFERENCE errors
@@ -699,6 +704,30 @@ jobs:
                     return results
 
                 mock_get_shas_batch.side_effect = mock_get_shas_batch_impl
+
+                async def mock_commit_sha_impl(
+                    _repo_key: str, ref: str
+                ) -> dict[str, Any] | None:
+                    """Resolve a single reference without the REST API.
+
+                    The batch lookup above is stubbed, but the fixer
+                    also resolves references one at a time, and that
+                    path reaches api.github.com on its own.
+
+                    Args:
+                        _repo_key: Repository asked about, unused.
+                        ref: The reference to resolve.
+
+                    Returns:
+                        The resolved SHA, or None for anything else.
+                    """
+                    if ref == "main":
+                        return {
+                            "sha": "abc123def456789012345678901234567890abcd"
+                        }
+                    return None
+
+                mock_commit_sha.side_effect = mock_commit_sha_impl
 
                 async with AutoFixer(config_pinned_not_required) as fixer:
                     (
@@ -2323,7 +2352,10 @@ class TestYAMLStructurePreservation:
 
     @pytest.mark.asyncio
     async def test_composite_action_format_preservation(
-        self, tmp_path: Path, config_with_pinned_sha: Config
+        self,
+        tmp_path: Path,
+        config_with_pinned_sha: Config,
+        no_repository_redirect: None,
     ) -> None:
         """Test that composite action.yaml format is preserved during auto-fix."""
         # Create a composite action.yaml with the specific format
@@ -2433,7 +2465,10 @@ runs:
 
     @pytest.mark.asyncio
     async def test_workflow_format_preservation(
-        self, tmp_path: Path, config_with_pinned_sha: Config
+        self,
+        tmp_path: Path,
+        config_with_pinned_sha: Config,
+        no_repository_redirect: None,
     ) -> None:
         """Test that workflow YAML format with dashes is preserved during auto-fix."""
         # Create a workflow file with dash format

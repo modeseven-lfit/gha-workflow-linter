@@ -75,6 +75,7 @@ class TestFixTestCallsFlag:
         temp_workflow_dir: Path,
         runner: CliRunner,
         mock_git_commands: None,
+        no_repository_redirect: None,
     ) -> None:
         """Test that by default, actions with 'test' comments are skipped."""
         workflow_file = (
@@ -130,6 +131,7 @@ jobs:
         temp_workflow_dir: Path,
         runner: CliRunner,
         mock_git_commands: None,
+        no_repository_redirect: None,
     ) -> None:
         """Test that --fix-test-calls flag enables fixing of test actions.
 
@@ -213,6 +215,7 @@ jobs:
         temp_workflow_dir: Path,
         runner: CliRunner,
         mock_git_commands: None,
+        no_repository_redirect: None,
     ) -> None:
         """Test that without --fix-test-calls, test actions are not modified."""
         workflow_file = (
@@ -444,7 +447,12 @@ class TestCLIFixTestCallsIntegration:
         assert "--fix-test-calls" in clean_output
         assert "test" in clean_output.lower()
 
-    def test_fix_test_calls_with_auto_fix(self, runner: CliRunner) -> None:
+    def test_fix_test_calls_with_auto_fix(
+        self,
+        runner: CliRunner,
+        mock_git_commands: None,
+        no_repository_redirect: None,
+    ) -> None:
         """Test that --fix-test-calls works with --auto-fix."""
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -476,7 +484,9 @@ jobs:
             assert result.exit_code in [0, 1]
 
     def test_no_fix_test_calls_without_auto_fix(
-        self, runner: CliRunner
+        self,
+        runner: CliRunner,
+        mock_git_commands: None,
     ) -> None:
         """Test that --fix-test-calls has no effect without --auto-fix."""
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -550,7 +560,11 @@ jobs:
             # Should mention it's a test reference somewhere
             assert "test" in clean_output.lower() or result.exit_code == 0
 
-    def test_test_references_shown_in_output(self, runner: CliRunner) -> None:
+    def test_test_references_shown_in_output(
+        self,
+        runner: CliRunner,
+        mock_git_commands: None,
+    ) -> None:
         """Test that test references are shown in output."""
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

@@ -1062,7 +1062,10 @@ class TestCLIIntegration:
     @patch("gha_workflow_linter.cli.ConfigManager")
     @patch("gha_workflow_linter.cli.run_linter")
     def test_lint_command_github_token(
-        self, mock_run_linter: Mock, mock_config_manager: Mock
+        self,
+        mock_run_linter: Mock,
+        mock_config_manager: Mock,
+        no_rate_limit_preflight: None,
     ) -> None:
         """Test lint command with GitHub token."""
         mock_config = Config()

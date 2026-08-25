@@ -27,18 +27,6 @@ from gha_workflow_linter.models import (
 )
 
 
-@pytest.fixture(autouse=True)
-def quiet_client_startup() -> None:
-    """Override the suite-wide stub of the startup rate-limit refresh.
-
-    ``conftest`` neutralises ``_update_rate_limit_info`` so that opening
-    a client does not reach GitHub incidentally. This module tests that
-    method, so the stub would replace the code under test.
-
-    The tests here supply their own HTTP doubles, so nothing leaves.
-    """
-
-
 class TestGitHubGraphQLClient:
     """Test GitHub GraphQL API client."""
 
@@ -547,7 +535,9 @@ class TestGitHubGraphQLClient:
                 assert mock_post.call_count == 1 + self.config.max_retries
 
     @pytest.mark.asyncio
-    async def test_update_rate_limit_info(self) -> None:
+    async def test_update_rate_limit_info(
+        self, real_client_startup: None
+    ) -> None:
         """Test updating rate limit information."""
         mock_response = Mock()
         mock_response.status_code = 200

@@ -219,8 +219,46 @@ async def _run_fixer(
         sha = shas.get((repo_key, ref))
         return {"sha": sha} if sha else None
 
+    async def no_releases(_repo_keys: list[str]) -> dict[str, tuple[str, str]]:
+        """Answer the batch network arm of the latest-version lookup.
+
+        Args:
+            _repo_keys: Repositories asked about, unused.
+
+        Returns:
+            No releases.
+        """
+        return {}
+
+    async def no_single_release(_repo_key: str) -> tuple[str, str] | None:
+        """Answer the per-repository fallback the batch leaves behind.
+
+        ``_get_latest_versions_batch`` stays real, since the cache
+        consultation is what these tests are about, but a repository it
+        cannot answer falls through to a single REST lookup as well as
+        the GraphQL batch. Stubbing only the batch leaves that open --
+        and its refusal was previously absorbed by ``gather``.
+
+        Args:
+            _repo_key: Repository asked about, unused.
+
+        Returns:
+            No release.
+        """
+        return None
+
     with (
         mock.patch.object(AutoFixer, "_get_shas_batch") as batch_shas,
+        mock.patch.object(
+            AutoFixer,
+            "_get_latest_versions_graphql_batch",
+            side_effect=no_releases,
+        ),
+        mock.patch.object(
+            AutoFixer,
+            "_get_latest_version_single",
+            side_effect=no_single_release,
+        ),
         mock.patch.object(AutoFixer, "_detect_repository_redirect") as redirect,
         mock.patch.object(
             AutoFixer, "_get_commit_sha_for_reference", side_effect=one_sha

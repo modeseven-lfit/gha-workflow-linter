@@ -55,6 +55,7 @@ jobs:
         self,
         temp_dir: Path,
         mock_git_commands: None,
+        no_repository_redirect: None,
     ) -> None:
         """Test that CLI flags are accepted without error."""
         # Use a valid SHA-pinned workflow
