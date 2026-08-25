@@ -698,7 +698,10 @@ class TestOutputContract:
         assert document["rate_limited"] is True
 
     def test_a_normal_run_says_so_explicitly(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        no_repository_redirect: None,
     ) -> None:
         """The inverse, and the reason the key is never omitted.
 
@@ -720,7 +723,10 @@ class TestOutputContract:
         assert document["rate_limited"] is False
 
     def test_the_marker_is_what_separates_the_two_documents(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        no_repository_redirect: None,
     ) -> None:
         """Both runs report zero errors; only the marker distinguishes them.
 
@@ -970,7 +976,10 @@ class TestSweepOutputContract:
         assert document["summary"]["exit_code"] == code
 
     def test_a_healthy_sweep_says_so(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        no_repository_redirect: None,
     ) -> None:
         """The inverse: an ordinary sweep must not claim it was throttled.
 
@@ -1015,7 +1024,10 @@ class TestTextOutput:
         assert "rate-limited" in output.lower()
 
     def test_a_healthy_run_still_reports_success(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        no_repository_redirect: None,
     ) -> None:
         """The inverse: a clean run must still say so.
 
@@ -1234,6 +1246,11 @@ class TestCommandHandoff:
                     "json",
                     "--validation-method",
                     "github-api",
+                    # Neither stage is what this asserts, and both reach
+                    # the API on a healthy run: the fixer resolves
+                    # versions, the allow-list check resolves its host.
+                    "--no-auto-fix",
+                    "--no-allow-list",
                     "--github-token",
                     "x" * 40,
                     "--no-cache",

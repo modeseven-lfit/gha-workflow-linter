@@ -298,6 +298,7 @@ class TestCLICommands:
         mock_validator: Mock,
         mock_scanner: Mock,
         mock_config_manager: Mock,
+        no_rate_limit_preflight: None,
     ) -> None:
         """Test lint command with GitHub token from environment."""
         mock_config_manager.return_value.load_config.return_value = Config()
@@ -335,6 +336,7 @@ class TestCLICommands:
         mock_validator: Mock,
         mock_scanner: Mock,
         mock_config_manager: Mock,
+        no_rate_limit_preflight: None,
     ) -> None:
         """Test lint command with GitHub token from CLI flag."""
         mock_config_manager.return_value.load_config.return_value = Config()

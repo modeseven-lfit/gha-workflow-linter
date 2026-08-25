@@ -22,6 +22,7 @@ directly rather than simulating it.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 import shutil
 import subprocess
@@ -30,15 +31,23 @@ import httpx
 import pytest
 
 from gha_workflow_linter.git_refs import _parse_ls_remote_lines
+from gha_workflow_linter.github_api import GitHubGraphQLClient
+from gha_workflow_linter.models import GitHubAPIConfig
 from tests.conftest import (
     REAL_ASYNC_HTTP_TRANSPORT,
     REAL_HTTP_TRANSPORT,
     REAL_SUBPROCESS_RUN,
+    REAL_UPDATE_RATE_LIMIT_INFO,
     NetworkAccessError,
     _reaches_a_remote,
 )
 
+#: The checkout root, so a generated session can import this suite's
+#: conftest rather than a copy of it.
+REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 
+
+@pytest.mark.expects_network_refusal
 class TestOutwardRequestsAreRefused:
     """The two routes out of the process, both covered."""
 
@@ -363,6 +372,234 @@ class TestTheGitDoubleHonoursTextMode:
         assert all(len(sha) == 40 for sha, _ in pairs)
 
 
+@pytest.mark.expects_network_refusal
+class TestTheGuardCannotBeSwallowed:
+    """The application catches broadly; the guard must outlive that.
+
+    Git validation turns a failed lookup into an invalid-reference
+    finding, the rate-limit refresh carries on after any failure, and
+    the auto-fixer swallows a failed resolution. Each is reasonable, and
+    each absorbed a guard raised as an ``Exception``: the request was
+    refused, the test recorded the refusal as an ordinary result, and it
+    passed.
+
+    That is worse than no guard, because it looks like one. Ninety-two
+    tests were reaching for the network on that basis.
+    """
+
+    def test_it_is_not_an_exception(self) -> None:
+        """``except Exception`` must not be able to name it."""
+        assert issubclass(NetworkAccessError, BaseException)
+        assert not issubclass(NetworkAccessError, Exception)
+
+    def test_a_broad_handler_does_not_absorb_it(self) -> None:
+        """Written as the application writes it, to show it passes through."""
+        absorbed = False
+        try:
+            try:
+                httpx.get("https://api.github.com/rate_limit", timeout=5.0)
+            except Exception:  # noqa: BLE001 - mimics the application
+                absorbed = True
+        except NetworkAccessError:
+            pass
+
+        assert absorbed is False
+
+    def test_the_application_itself_does_not_absorb_it(self) -> None:
+        """The handler that hid it longest, exercised directly.
+
+        ``_update_rate_limit_info`` catches ``Exception`` and carries
+        on, which is why opening a client reached GitHub in fifty-nine
+        tests without any of them failing. Driving the real method is
+        what shows the guard now survives it.
+        """
+        client = GitHubGraphQLClient(GitHubAPIConfig(token=None))
+        http = httpx.AsyncClient()
+        client._http_client = http
+
+        try:
+            with pytest.raises(NetworkAccessError):
+                asyncio.run(REAL_UPDATE_RATE_LIMIT_INFO(client))
+        finally:
+            asyncio.run(http.aclose())
+
+    def test_gathering_it_as_a_result_does_not_hide_it(
+        self, request: pytest.FixtureRequest
+    ) -> None:
+        """The hole ``BaseException`` alone does not close.
+
+        ``asyncio.gather(..., return_exceptions=True)`` does not
+        propagate: it *returns* the exception as a result, whatever its
+        base class. The git validator then turns one into a
+        ``NETWORK_ERROR`` finding and the fixer skips it, so five gather
+        sites on exactly the guarded routes could still absorb a
+        refusal. Ten tests were passing that way.
+
+        Recording the attempt is what closes it. This provokes a
+        refusal, discards it exactly as ``gather`` would, and then
+        asserts the guard *noticed* -- which is what fails the test at
+        teardown for any case not marked as provoking one deliberately.
+
+        Args:
+            request: Used to read what the guard recorded.
+        """
+
+        async def attempt() -> object:
+            """Reach for the network and let gather capture the refusal.
+
+            Returns:
+                Whatever gather returns, exception or otherwise.
+            """
+
+            async def one() -> None:
+                async with httpx.AsyncClient() as client:
+                    await client.get("https://api.github.com/rate_limit")
+
+            results = await asyncio.gather(one(), return_exceptions=True)
+            return results[0]
+
+        captured = asyncio.run(attempt())
+
+        # Returned rather than raised, which is the whole problem.
+        assert isinstance(captured, NetworkAccessError)
+        # Recorded regardless, which is the answer to it.
+        assert any(
+            "api.github.com" in target
+            for target in request.node.network_attempts
+        )
+
+
+class TestTheTeardownCheckActuallyFails:
+    """The recording is only useful if it fails the test that triggered it.
+
+    Every other test of this mechanism runs inside a class marked
+    ``expects_network_refusal``, which by design bypasses the teardown
+    failure -- so none of them would notice if that branch were deleted.
+    This runs pytest on a test that is *not* exempt, and checks the
+    report.
+    """
+
+    def test_a_swallowed_attempt_fails_the_test(
+        self, pytester: pytest.Pytester
+    ) -> None:
+        """Swallowing the refusal must not save the test.
+
+        The inner test catches ``BaseException`` and passes its own
+        assertions, exactly as ``asyncio.gather`` and the application's
+        handlers do. It must still be reported as failing.
+
+        Args:
+            pytester: Runs a generated test file in a fresh session.
+        """
+        pytester.makeconftest(
+            f"import sys; sys.path.insert(0, {str(REPOSITORY_ROOT)!r})\n"
+            "from tests.conftest import *  # noqa: F401,F403\n"
+        )
+        pytester.makepyfile(
+            """
+            import httpx
+
+            def test_swallows_the_refusal():
+                try:
+                    httpx.get("https://api.github.com/rate_limit")
+                except BaseException:
+                    pass
+                assert True
+            """
+        )
+
+        result = pytester.runpytest("-p", "no:randomly", "--no-cov")
+
+        result.assert_outcomes(passed=1, errors=1)
+        result.stdout.fnmatch_lines(["*attempted to reach the network*"])
+
+    def test_a_test_that_stays_offline_is_untouched(
+        self, pytester: pytest.Pytester
+    ) -> None:
+        """The inverse: the teardown must not fail an innocent test.
+
+        Args:
+            pytester: Runs a generated test file in a fresh session.
+        """
+        pytester.makeconftest(
+            f"import sys; sys.path.insert(0, {str(REPOSITORY_ROOT)!r})\n"
+            "from tests.conftest import *  # noqa: F401,F403\n"
+        )
+        pytester.makepyfile(
+            """
+            def test_touches_nothing():
+                assert True
+            """
+        )
+
+        result = pytester.runpytest("-p", "no:randomly", "--no-cov")
+
+        result.assert_outcomes(passed=1, errors=0)
+
+
+class TestTheFailureDoublesClassifyLikeTheGuard:
+    """The failure doubles must recognise a command as the guard does.
+
+    ``unreachable_git`` and ``timing_out_git`` decide what to fail by
+    the same question the guard asks, so a second classifier written
+    beside them would drift from everything the first one learned --
+    global options, compound actions, resolved paths, argument types.
+    These hold the two together at the cases most easily got wrong.
+    """
+
+    def test_a_local_bytes_command_still_runs(
+        self, unreachable_git: None
+    ) -> None:
+        """Rendering a token with ``str()`` would fail this one.
+
+        ``str(b"--version")`` is ``"b'--version'"``, which reads as
+        neither a local subcommand nor an option, so a local command
+        would be failed as though it had reached out.
+
+        Args:
+            unreachable_git: The double under test.
+        """
+        result = subprocess.run(
+            [b"git", b"--version"], capture_output=True, check=False
+        )
+
+        assert result.returncode == 0
+
+    def test_a_tuple_vector_is_recognised(self, unreachable_git: None) -> None:
+        """``subprocess`` accepts tuples, so the double must fail them too.
+
+        Args:
+            unreachable_git: The double under test.
+        """
+        result = subprocess.run(
+            ("git", "ls-remote", "https://example.com/x"),
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.returncode == 128
+        assert b"Could not resolve host" in result.stderr
+
+    def test_the_timeout_double_agrees(self, timing_out_git: None) -> None:
+        """Both doubles share the classifier, so both must behave alike.
+
+        Args:
+            timing_out_git: The double under test.
+        """
+        assert (
+            subprocess.run(
+                [b"git", b"--version"], capture_output=True, check=False
+            ).returncode
+            == 0
+        )
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            subprocess.run(
+                ("git", "fetch", "origin"), capture_output=True, check=False
+            )
+
+
+@pytest.mark.expects_network_refusal
 class TestLegitimateTrafficIsUnaffected:
     """The inverses. A guard that blocks everything is unusable."""
 
