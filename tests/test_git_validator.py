@@ -9,14 +9,16 @@ import asyncio
 
 import pytest
 
-from gha_workflow_linter import git_validator
+from gha_workflow_linter import git_subpath, git_validator
 from gha_workflow_linter.exceptions import GitError
+from gha_workflow_linter.git_subpath import (
+    _run_git_subpath_exists,
+    _validate_repository_subpaths,
+)
 from gha_workflow_linter.git_validator import (
     GitValidationClient,
     _base_repository,
-    _run_git_subpath_exists,
     _validate_repository_exists,
-    _validate_repository_subpaths,
 )
 from gha_workflow_linter.models import GitConfig, ValidationResult
 
@@ -74,7 +76,7 @@ def test_validate_repository_subpaths_valid_and_invalid(
     does not.
     """
     monkeypatch.setattr(
-        git_validator, "_run_git_init", lambda _dir, _config: True
+        git_subpath, "_run_git_init", lambda _dir, _config: True
     )
 
     fetched_refs: list[str] = []
@@ -85,7 +87,7 @@ def test_validate_repository_subpaths_valid_and_invalid(
         fetched_refs.append(ref)
         return True
 
-    monkeypatch.setattr(git_validator, "_run_git_fetch_partial", fake_fetch)
+    monkeypatch.setattr(git_subpath, "_run_git_fetch_partial", fake_fetch)
 
     def fake_subpath_exists(
         _repo_dir: object, _treeish: str, subpath: str, _config: GitConfig
@@ -93,7 +95,7 @@ def test_validate_repository_subpaths_valid_and_invalid(
         return subpath == "init"
 
     monkeypatch.setattr(
-        git_validator, "_run_git_subpath_exists", fake_subpath_exists
+        git_subpath, "_run_git_subpath_exists", fake_subpath_exists
     )
 
     entries = [
@@ -123,10 +125,10 @@ def test_validate_repository_subpaths_fetch_failure_is_not_bogus(
     returns NETWORK_ERROR and never consults the tree.
     """
     monkeypatch.setattr(
-        git_validator, "_run_git_init", lambda _dir, _config: True
+        git_subpath, "_run_git_init", lambda _dir, _config: True
     )
     monkeypatch.setattr(
-        git_validator,
+        git_subpath,
         "_run_git_fetch_partial",
         lambda _repo_dir, _url, _ref, _config: False,
     )
@@ -135,7 +137,7 @@ def test_validate_repository_subpaths_fetch_failure_is_not_bogus(
         raise AssertionError("subpath check must not run when fetch fails")
 
     monkeypatch.setattr(
-        git_validator, "_run_git_subpath_exists", unexpected_subpath_check
+        git_subpath, "_run_git_subpath_exists", unexpected_subpath_check
     )
 
     entries = [("github/codeql-action/init", "v3")]
@@ -264,10 +266,10 @@ def test_validate_repository_subpaths_ls_tree_failure_is_inconclusive(
     a definitive INVALID_PATH.
     """
     monkeypatch.setattr(
-        git_validator, "_run_git_init", lambda _dir, _config: True
+        git_subpath, "_run_git_init", lambda _dir, _config: True
     )
     monkeypatch.setattr(
-        git_validator,
+        git_subpath,
         "_run_git_fetch_partial",
         lambda _repo_dir, _url, _ref, _config: True,
     )
@@ -275,7 +277,7 @@ def test_validate_repository_subpaths_ls_tree_failure_is_inconclusive(
     def boom(*_args: object, **_kwargs: object) -> bool:
         raise GitError("ls-tree exploded")
 
-    monkeypatch.setattr(git_validator, "_run_git_subpath_exists", boom)
+    monkeypatch.setattr(git_subpath, "_run_git_subpath_exists", boom)
 
     entries = [("github/codeql-action/init", "v3")]
     results = _validate_repository_subpaths(

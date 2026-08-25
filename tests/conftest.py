@@ -3,7 +3,7 @@
 
 """Pytest configuration and shared fixtures for gha-workflow-linter tests."""
 
-from collections.abc import Generator, Sequence
+from collections.abc import Generator, Mapping, Sequence
 import os
 from pathlib import Path
 import re
@@ -367,6 +367,50 @@ def unreachable_git(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
+def recorded_git_environments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[Mapping[str, str] | None]:
+    """Fail networked git as :func:`unreachable_git` does, and record it.
+
+    For asserting how git was invoked rather than what came back. The
+    failure keeps the run moving without a network.
+
+    Args:
+        monkeypatch: Used to replace ``subprocess.run``.
+
+    Returns:
+        The environment each remote invocation was given.
+    """
+    return _install_failing_git(
+        monkeypatch,
+        "fatal: unable to access 'https://github.com/': "
+        "Could not resolve host: github.com",
+    )
+
+
+@pytest.fixture
+def http_refusing_git(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make networked git commands fail as a refused HTTP request does.
+
+    The remote answered here -- with a refusal -- so the answer is worth
+    reporting. The message opens with ``unable to access``, which git
+    writes ahead of *any* HTTP failure, including a lost connection;
+    matching that prefix would call this reachable remote unreachable
+    and discard the finding. This fixture is what keeps the classifier
+    reading the reason rather than the prefix.
+
+    Args:
+        monkeypatch: Used to replace ``subprocess.run``.
+    """
+    _install_failing_git(
+        monkeypatch,
+        "fatal: unable to access "
+        "'https://github.com/nonexistent/action.git/': "
+        "The requested URL returned error: 404",
+    )
+
+
+@pytest.fixture
 def timing_out_git(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make networked git commands time out rather than fail outright.
 
@@ -424,14 +468,76 @@ def _is_networked_git(cmd: object) -> bool:
     return _reaches_a_remote(["git", *(_token_text(t) for t in cmd[1:])])
 
 
-def _install_failing_git(monkeypatch: pytest.MonkeyPatch, message: str) -> None:
+@pytest.fixture
+def unrunnable_git(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make networked git commands fail before they start.
+
+    An absent or unexecutable ``git`` raises out of ``subprocess.run``
+    rather than returning an exit status, so it reaches the linter as
+    neither a refusal nor a timeout and lands in each helper's last
+    resort. The remote was never asked, which is the same state of
+    knowledge as a connection that never opened.
+
+    Args:
+        monkeypatch: Used to replace ``subprocess.run``.
+    """
+    real_run = subprocess.run
+
+    def unrunnable(*args: Any, **kwargs: Any) -> Any:
+        """Refuse to start a networked git command, pass anything else on.
+
+        Args:
+            args: Positional arguments as ``subprocess.run`` takes them.
+            kwargs: Keyword arguments, passed through.
+
+        Returns:
+            The real result for a local command.
+
+        Raises:
+            FileNotFoundError: For a command reaching a remote.
+        """
+        cmd = args[0] if args else kwargs.get("args", [])
+        if _is_networked_git(cmd):
+            raise FileNotFoundError(2, "No such file or directory: 'git'")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", unrunnable)
+
+
+@pytest.fixture
+def signal_killed_git(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make networked git commands die the way a killed process does.
+
+    An out-of-memory kill or a cancelled CI job ends git part way
+    through: POSIX reports a negative status, and there is no message,
+    because the process never got to write one. That silence is not the
+    remote answering, but it is indistinguishable from it unless the
+    status is read.
+
+    Args:
+        monkeypatch: Used to replace ``subprocess.run``.
+    """
+    _install_failing_git(monkeypatch, "", returncode=-9)
+
+
+def _install_failing_git(
+    monkeypatch: pytest.MonkeyPatch, message: str, returncode: int = 128
+) -> list[Mapping[str, str] | None]:
     """Replace ``subprocess.run`` so networked git fails with ``message``.
 
     Args:
         monkeypatch: Used to install the replacement.
         message: The standard-error text to report.
+        returncode: Status to report. A negative value is how POSIX
+            reports termination by a signal.
+
+    Returns:
+        The environment each remote invocation was given, appended to as
+        the run proceeds. Only the commands that reach a remote are
+        recorded, since those are the ones whose output gets read.
     """
     real_run = subprocess.run
+    environments: list[Mapping[str, str] | None] = []
 
     def failing_run(
         *args: Any, **kwargs: Any
@@ -449,15 +555,25 @@ def _install_failing_git(monkeypatch: pytest.MonkeyPatch, message: str) -> None:
         if not _is_networked_git(cmd):
             return real_run(*args, **kwargs)
 
+        environments.append(kwargs.get("env"))
         text = bool(kwargs.get("text") or kwargs.get("universal_newlines"))
+        stdout: Any = "" if text else b""
+        stderr: Any = message if text else message.encode()
+        if kwargs.get("check"):
+            # ``subprocess.run`` raises on a non-zero exit when asked to,
+            # and callers rely on that: a double that returns the failure
+            # instead leaves them parsing empty output as a valid answer,
+            # which reads as "no such reference" rather than "could not
+            # ask".
+            raise subprocess.CalledProcessError(
+                returncode=returncode, cmd=cmd, output=stdout, stderr=stderr
+            )
         return subprocess.CompletedProcess(
-            args=cmd,
-            returncode=128,
-            stdout="" if text else b"",
-            stderr=message if text else message.encode(),
+            args=cmd, returncode=returncode, stdout=stdout, stderr=stderr
         )
 
     monkeypatch.setattr(subprocess, "run", failing_run)
+    return environments
 
 
 @pytest.fixture
