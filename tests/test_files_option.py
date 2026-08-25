@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import tempfile
 from unittest.mock import Mock, patch
 
@@ -81,7 +82,15 @@ runs:
         "gha_workflow_linter.validator.ActionCallValidator.validate_action_calls"
     )
     def test_scan_single_file(self, mock_validate: Mock) -> None:
-        """Test scanning a single specific file."""
+        """Test scanning a single specific file.
+
+        ``--no-allow-list`` keeps the run to the subject of the test.
+        The allow-list stage derives an organisation from the checkout,
+        which a bare temporary directory cannot supply, and its error
+        then displaces the scan summary this asserts on. That went
+        unnoticed while a developer's credentials happened to carry the
+        run past it.
+        """
         mock_validate.return_value = []
         temp_dir = self.create_test_workspace()
 
@@ -94,14 +103,23 @@ runs:
                     "--files",
                     ".github/workflows/ci.yml",
                     "--no-fail-on-error",
+                    "--no-allow-list",
                 ],
             )
 
             # Should succeed
             assert result.exit_code == 0
 
-            # Verify output mentions only ci.yml
-            assert "ci.yml" in result.stdout or "CI" in result.stdout
+            # The workspace holds ci.yml and deploy.yml, so scanning
+            # exactly one file is what proves --files selected rather
+            # than scanned everything. The previous assertion looked for
+            # the filename in the output, which only appeared in the
+            # outdated-action listing -- and that listing requires live
+            # API resolution, so the check silently depended on the
+            # network and on the developer holding credentials.
+            assert re.search(r"Workflow files\s*│\s*1\b", result.stdout), (
+                f"expected exactly one workflow file scanned:\n{result.stdout}"
+            )
         finally:
             import shutil
 
