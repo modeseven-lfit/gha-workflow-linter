@@ -470,10 +470,11 @@ class GitHubRateLimitInfo(BaseModel):
         is still open, because spending it would leave none for the work
         that follows. Once the window has passed the figure is stale and
         says nothing about what is available now, so it is not read as
-        exhaustion however low it is: a budget of none and a budget of
-        one describe the same spent window, and treating them
-        differently would report the more depleted of the two as the
-        more usable.
+        exhaustion however low it is. Applying that rule to one end of
+        the range and not the other is the defect this replaced: a spent
+        window reporting zero was called exhausted while the same window
+        reporting one was called healthy, so two figures describing
+        equally stale information disagreed about what they meant.
 
         A reset of zero means the API reported none, which is not
         evidence that the window passed. Combined with the field

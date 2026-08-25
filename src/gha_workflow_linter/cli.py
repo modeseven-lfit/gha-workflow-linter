@@ -583,6 +583,49 @@ def _resolve_update_actions(
     return auto_latest
 
 
+def _reject_conflicting_verbosity(
+    *,
+    verbose: bool,
+    quiet: bool,
+    output_format: str,
+    multi_repo: bool,
+    path: Path | None,
+) -> None:
+    """Refuse ``--verbose`` with ``--quiet``, in the requested format.
+
+    Checked before anything else, so the refusal predates the command's
+    own error handling and has to report itself. In JSON mode that means
+    the document, not a Rich message on the stream the document belongs
+    to.
+
+    Args:
+        verbose: Whether verbose output was asked for.
+        quiet: Whether quiet output was asked for.
+        output_format: The format the caller asked for.
+        multi_repo: Whether a sweep was requested, deciding the shape.
+        path: The path the run was pointed at, if given.
+
+    Raises:
+        typer.Exit: Always, when both were given.
+    """
+    if not (verbose and quiet):
+        return
+
+    reason = "--verbose and --quiet cannot be used together"
+    if output_format == "json":
+        _emit_setup_failure(
+            f"Configuration error: {reason}",
+            output_format=output_format,
+            multi_repo=multi_repo,
+            path=path or Path.cwd(),
+        )
+    else:
+        console.print(f"[red]Error: {reason}[/red]")
+    # Arguably a usage error (code 2), but this has always exited 1 and
+    # changing it would break callers; see exit_codes.RUNTIME_ERROR.
+    raise typer.Exit(exit_codes.RUNTIME_ERROR)
+
+
 @app.command()
 def lint(
     path: Path | None = typer.Argument(
@@ -892,13 +935,13 @@ def lint(
         # Auto-fix only specific files
         gha-workflow-linter lint --auto-fix --files .github/workflows/release.yml
     """
-    if verbose and quiet:
-        console.print(
-            "[red]Error: --verbose and --quiet cannot be used together[/red]"
-        )
-        # Arguably a usage error (code 2), but this has always exited 1 and
-        # changing it would break callers; see exit_codes.RUNTIME_ERROR.
-        raise typer.Exit(exit_codes.RUNTIME_ERROR)
+    _reject_conflicting_verbosity(
+        verbose=verbose,
+        quiet=quiet,
+        output_format=output_format,
+        multi_repo=multi_repo,
+        path=path,
+    )
 
     # JSON format implies quiet mode (suppress console output)
     if output_format == "json":
@@ -1004,6 +1047,14 @@ def lint(
         logger.error(f"Configuration error: {e}")
         if verbose:
             logger.exception("Full traceback:")
+        # Refused before any scanning, so nothing has been emitted yet
+        # and the promised document is still owed.
+        _emit_setup_failure(
+            f"Configuration error: {e}",
+            output_format=output_format,
+            multi_repo=multi_repo,
+            path=path,
+        )
         raise typer.Exit(exit_codes.RUNTIME_ERROR) from None
     except Exception as e:
         logger.error(f"Fatal error: {e}")
@@ -1258,6 +1309,41 @@ def _describe_exception(error: Exception) -> str:
     return str(error) or type(error).__name__
 
 
+def _emit_setup_failure(
+    reason: str, *, output_format: str, multi_repo: bool, path: Path
+) -> None:
+    """Emit the JSON document for a run that failed before it started.
+
+    A configuration error is refused before any scanning, so the run
+    produces no results of its own -- but it has already promised a
+    document, and returning without one leaves a ``--format json``
+    consumer an empty stream. The shape matches whichever mode was
+    requested, so the caller parses the failure with the same code it
+    would have used for the results.
+
+    Args:
+        reason: Why the run was refused.
+        output_format: The format the caller asked for.
+        multi_repo: Whether a sweep was requested, which decides the
+            document's shape.
+        path: The path the run was pointed at.
+    """
+    if output_format != "json":
+        return
+
+    if multi_repo:
+        _output_multi_repo_json(
+            [], path, exit_code=exit_codes.RUNTIME_ERROR, error=reason
+        )
+        return
+
+    print(
+        json.dumps(
+            build_json_results({}, {}, [], path, None, error=reason), indent=2
+        )
+    )
+
+
 def _reject_files_with_multi_repo(
     files: list[str] | None, *, multi_repo: bool
 ) -> None:
@@ -1313,14 +1399,10 @@ def _scan_and_validate(
         BarColumn(),
         TaskProgressColumn(),
         console=console,
-        # Progress renders to standard output, which in JSON mode carries
-        # the document. A spinner interleaved with it makes the stream
-        # unparsable, so the same derivation the auto-fix stage uses
-        # applies here: presentation is silenced by the format, not only
-        # by --quiet. The command layer coerces JSON mode to quiet, so
-        # this shows up only for a programmatic caller of run_linter --
-        # which is exactly who is parsing the output.
-        disable=options.quiet or options.output_format == "json",
+        # Progress renders to standard output, which in JSON mode
+        # carries the document. run_linter normalises that mode to
+        # quiet before anything runs, so this needs no separate test.
+        disable=options.quiet,
     ) as progress:
         # Scan for workflows
         scan_task = progress.add_task("Scanning workflows...", total=None)
@@ -1356,9 +1438,7 @@ def _scan_and_validate(
             )
 
         if not workflow_calls:
-            if not options.quiet and options.output_format != "json":
-                # Standard output carries the JSON document, so this
-                # note goes only to a reader who is not parsing one.
+            if not options.quiet:
                 console.print("[yellow]No workflows found to validate[/yellow]")
             # Not a failure: a repository with no workflows is a valid,
             # clean result rather than one that could not be scanned.
@@ -2076,6 +2156,17 @@ def run_linter(
     Returns:
         Exit code from :mod:`gha_workflow_linter.exit_codes`.
     """
+    # Standard output carries the document in JSON mode, so every
+    # presentational thing that would otherwise land there has to go
+    # quiet -- cache-prime banners before it, a stale-actions summary
+    # after it, allow-list notices around it. Gating each site
+    # separately left the ones nobody had thought of, so the mode is
+    # normalised once here instead, which is what the command layer
+    # already does before calling this. A direct caller gets no such
+    # coercion, and a direct caller is who parses the output.
+    if options.output_format == "json" and not options.quiet:
+        options = options.model_copy(update={"quiet": True})
+
     if options.multi_repo:
         return _run_multi_repo(config, options, rate_limited=rate_limited)
 
@@ -2187,6 +2278,14 @@ def _run_one_repository(
             exit_code=scan_result.exit_code,
             error=scan_result.error,
             json_payload=payload,
+            # Recorded even though the ordering in _scan_and_validate
+            # means a throttled run reaches its outcome before the
+            # empty-scan short circuit, so this is not observable today.
+            # An outcome that misdescribes its own run is a trap for the
+            # next reader of RunOutcome.rate_limited, and it is what
+            # would make a regression in that ordering show up as
+            # "clean" rather than as a wrong status.
+            rate_limited=rate_limited,
         )
     validation = scan_result
 
@@ -2404,9 +2503,21 @@ def _run_multi_repo(
     Returns:
         The most significant exit code across every repository.
     """
-    _reject_files_with_multi_repo(options.files, multi_repo=True)
-
     json_mode = options.output_format == "json"
+
+    try:
+        _reject_files_with_multi_repo(options.files, multi_repo=True)
+    except ConfigurationError as error:
+        # The command layer refuses this combination before reaching
+        # here, so only a library caller arrives with it -- and it is
+        # owed the document just the same.
+        _emit_setup_failure(
+            f"Configuration error: {error}",
+            output_format=options.output_format,
+            multi_repo=True,
+            path=options.path,
+        )
+        raise
     # Anything written to standard output would sit alongside the JSON
     # document, so the commentary goes quiet in JSON mode as well.
     silent = options.quiet or json_mode

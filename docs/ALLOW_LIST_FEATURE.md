@@ -945,11 +945,12 @@ both ends of the range: a budget whose reset has passed describes a
 window that has already refilled and is not read as exhausted however
 low it is, while a budget of one or none inside a live window is. An
 earlier version short-circuited at zero before consulting the window, so
-an expired budget of *none* reported exhausted while an expired budget of
-*one* reported healthy — the more depleted figure treated as the more
-usable. A reset of zero means the API reported none, which is not
-evidence the window passed, so it stays exhausted; that is the safe
-direction for an answer gating whether any API work runs.
+a spent window reporting *none* was called exhausted while the same
+window reporting *one* was called healthy — two figures carrying equally
+stale information, disagreeing about what that staleness meant. A reset
+of zero means the API reported none, which is not evidence the window
+passed, so it stays exhausted; that is the safe direction for an answer
+gating whether any API work runs.
 
 The status travels to the command, which decides:
 

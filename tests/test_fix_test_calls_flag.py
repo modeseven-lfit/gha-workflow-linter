@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import tempfile
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -124,20 +125,21 @@ jobs:
             f"Output:\n{clean_output}"
         )
 
-    @pytest.mark.network
     def test_fix_test_calls_flag_enables_fixing(
         self,
         temp_workflow_dir: Path,
         runner: CliRunner,
+        mock_git_commands: None,
     ) -> None:
         """Test that --fix-test-calls flag enables fixing of test actions.
 
-        Unlike its neighbours this one asserts a rewrite *happened*, so it
-        needs a real reference resolved to a real SHA. ``mock_git_commands``
-        stubs the git binary but not the API resolution path the fixer uses,
-        so the mocked run produces no replacement and the assertion fails.
-        Marked rather than stubbed, so the dependency is visible and can be
-        deselected, until the resolution layer has a seam to stub.
+        Two stages need stubbing, not one. Validation runs first and,
+        with credentials isolated, takes the Git backend --
+        ``mock_git_commands`` answers that. The fixer then resolves a
+        replacement through its own batch lookups, which the git double
+        does not cover, so those are stubbed too, as the auto-fix tests
+        do. Driving either from a live GitHub also made the assertion
+        depend on whichever release was newest that day.
         """
         workflow_file = (
             temp_workflow_dir / ".github" / "workflows" / "test.yaml"
@@ -152,16 +154,50 @@ jobs:
       - uses: actions/setup-python@v4
 """)
 
-        runner.invoke(
-            app,
-            [
-                "lint",
-                str(temp_workflow_dir),
-                "--no-cache",
-                "--fix-test-calls",
-                "--auto-fix",
-            ],
-        )
+        async def latest_versions(
+            repo_keys: list[str],
+        ) -> dict[str, tuple[str, str]]:
+            """Answer with a fixed newer release for every repository.
+
+            Args:
+                repo_keys: Repositories the fixer asked about.
+
+            Returns:
+                A version and SHA for each.
+            """
+            return dict.fromkeys(repo_keys, ("v9.9.9", "a" * 40))
+
+        async def shas(
+            refs: dict[str, str],
+        ) -> dict[str, str]:
+            """Resolve every reference to the same stand-in SHA.
+
+            Args:
+                refs: Mapping of repository to reference.
+
+            Returns:
+                A SHA for each key.
+            """
+            return dict.fromkeys(refs, "a" * 40)
+
+        with (
+            patch.object(
+                AutoFixer,
+                "_get_latest_versions_batch",
+                side_effect=latest_versions,
+            ),
+            patch.object(AutoFixer, "_get_shas_batch", side_effect=shas),
+        ):
+            runner.invoke(
+                app,
+                [
+                    "lint",
+                    str(temp_workflow_dir),
+                    "--no-cache",
+                    "--fix-test-calls",
+                    "--auto-fix",
+                ],
+            )
 
         # With --fix-test-calls, the action with test comment should be fixed
         updated_content = workflow_file.read_text()

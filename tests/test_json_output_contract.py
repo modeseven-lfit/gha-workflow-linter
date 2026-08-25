@@ -27,9 +27,11 @@ from typing import TYPE_CHECKING, Any
 from unittest import mock
 
 import pytest
+from typer.testing import CliRunner
 
 from gha_workflow_linter import exit_codes
-from gha_workflow_linter.cli import run_linter
+from gha_workflow_linter.cli import app, run_linter
+from gha_workflow_linter.exceptions import ConfigurationError
 from gha_workflow_linter.models import (
     CacheConfig,
     CLIOptions,
@@ -233,11 +235,17 @@ class TestScanFailure:
 class TestSweepDiscoveryFailure:
     """A sweep that never got as far as looking owes a document too.
 
-    The CLI's own argument validation catches the common shapes of this
-    first -- an unreadable ``path`` and a negative ``--repo-depth`` are
-    both refused by Typer with the reserved usage code ``2`` -- so these
-    guard the programmatic entry point, which the GitHub Action and the
-    tests both use.
+    These drive ``run_linter`` rather than the CLI, and deliberately.
+    The common shapes of this failure never reach the linter: an
+    unreadable ``path`` and an out-of-range ``--repo-depth`` are refused
+    by the argument parser, which exits ``2`` with usage text. That is
+    the code reserved for a usage error and never produced by the
+    linter's own logic, so a consumer seeing it knows the invocation was
+    wrong -- a different question from anything a document answers.
+
+    What remains is the programmatic entry point, which the GitHub
+    Action and the tests both use, and where the same failures arrive
+    with no parser in front of them.
     """
 
     @pytest.mark.parametrize(
@@ -272,6 +280,37 @@ class TestSweepDiscoveryFailure:
         assert expected in document["error"]
         assert document["summary"]["exit_code"] == code
 
+    def test_the_parser_refuses_a_bad_invocation_before_the_linter(
+        self, tmp_path: Path
+    ) -> None:
+        """The boundary of the every-path claim, stated as a test.
+
+        A depth the parser rejects never reaches ``_discover_or_report``,
+        so no document is emitted and none is owed: the run exits ``2``,
+        which the exit-code contract reserves for exactly this and which
+        the linter never produces itself. Pinned so that the claim in
+        the README stays true, and so that anyone tempted to route this
+        through the document has to change the test that says why not.
+
+        Args:
+            tmp_path: Directory to point the run at.
+        """
+        result = CliRunner().invoke(
+            app,
+            [
+                "lint",
+                str(tmp_path),
+                "--multi-repo",
+                "--repo-depth",
+                "-1",
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == exit_codes.CLI_USAGE_ERROR
+        assert result.stdout.strip() == "" or "--repo-depth" in result.stdout
+
     def test_an_empty_container_is_not_reported_as_a_failure(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -293,3 +332,92 @@ class TestSweepDiscoveryFailure:
         assert code == exit_codes.SUCCESS
         assert document["repositories"] == []
         assert document["error"] is None
+
+
+class TestRefusedInvocation:
+    """A run refused before it starts has still promised a document.
+
+    ``--files`` with ``--multi-repo`` is rejected outright, which is
+    right -- the two ask for different things -- but the rejection used
+    to reach the caller as an exit code and a log line, with nothing on
+    standard output.
+    """
+
+    def test_a_refused_sweep_emits_a_document(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Args:
+        tmp_path: Container directory.
+        capsys: Captures standard output.
+        """
+        options = _options(
+            tmp_path, multi_repo=True, files=[".github/workflows/ci.yaml"]
+        )
+
+        with pytest.raises(ConfigurationError):
+            run_linter(_config(tmp_path), options)
+
+        document = _document(capsys)
+        assert "Configuration error" in document["error"]
+        assert document["summary"]["exit_code"] == exit_codes.RUNTIME_ERROR
+
+    def test_the_command_reports_it_too(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The command refuses this earlier than the sweep does.
+
+        Both routes have to answer, since the command layer checks
+        before pre-flight while the sweep checks again for a library
+        caller. Only one document may be printed either way.
+
+        Args:
+            tmp_path: Container directory.
+            capsys: Captures standard output.
+        """
+        result = CliRunner().invoke(
+            app,
+            [
+                "lint",
+                str(tmp_path),
+                "--multi-repo",
+                "--files",
+                ".github/workflows/ci.yaml",
+                "--format",
+                "json",
+                "--validation-method",
+                "git",
+            ],
+        )
+
+        assert result.exit_code == exit_codes.RUNTIME_ERROR
+        document = json.loads(result.stdout)
+        assert "Configuration error" in document["error"]
+
+    def test_a_conflicting_flag_pair_reports_it_too(
+        self, tmp_path: Path
+    ) -> None:
+        """Refused earlier still than the others, and owed the same thing.
+
+        ``--verbose --quiet`` is rejected before the command reaches its
+        own error handling, so it needed the emitter wiring in
+        separately. The Rich message it used to print went to standard
+        output, which in this mode belongs to the document.
+
+        Args:
+            tmp_path: Directory to point the run at.
+        """
+        result = CliRunner().invoke(
+            app,
+            [
+                "lint",
+                str(tmp_path),
+                "--verbose",
+                "--quiet",
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == exit_codes.RUNTIME_ERROR
+        document = json.loads(result.stdout)
+        assert "verbose" in document["error"]

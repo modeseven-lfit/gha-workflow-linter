@@ -1041,8 +1041,16 @@ problem. Without the key those two documents would look identical.
 its input — an unreadable path, say. A run that completed reports `null`.
 Note the difference from the `errors` list beside it: `errors` holds
 findings *about* the workflows, while `error` says the run never got far
-enough to have any. Every path emits a document, so a consumer never has
-to treat an empty stream as meaningful.
+enough to have any. Every path the linter itself reaches emits a
+document, so a consumer never has to treat an empty stream as
+meaningful.
+
+Argument parsing sits outside that guarantee, by design. The argument
+parser rejects an unreadable path or an out-of-range `--repo-depth`
+before the linter starts, exiting `2` — the code reserved for a usage
+error, which the linter's own logic never produces. A consumer that sees
+`2` knows the invocation was wrong, which is a different question from
+anything a document could answer.
 
 ## GitHub Action Inputs
 

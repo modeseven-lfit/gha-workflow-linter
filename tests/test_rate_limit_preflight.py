@@ -307,9 +307,10 @@ class TestBudgetExhaustion:
 
         This combination was the one row of the table left untested, and
         the one that diverged: zero remaining short-circuited before the
-        window was consulted, so an expired budget of *none* read as
-        exhausted while an expired budget of *one* read as healthy. The
-        more depleted figure was reported as the more usable.
+        window was consulted, so a spent window reporting zero was called
+        exhausted while the same window reporting one was called healthy.
+        Two figures carrying equally stale information disagreed about
+        what that staleness meant.
         """
         stale = int(time.time()) - 3600
 
@@ -1102,6 +1103,40 @@ class TestAdvisorySweepSummary:
 
         output = capsys.readouterr().out
         assert code == exit_codes.SUCCESS
+        assert "rate-limited" in output
+        assert "clean" not in output
+
+    def test_a_repository_with_no_calls_is_not_reported_clean_either(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Defence in depth for the status of a call-free repository.
+
+        A throttled run reaches its outcome before the empty-scan short
+        circuit, so this repository takes the ordinary path and the
+        status is right for that reason alone. The short circuit still
+        records the rate-limit state on its own outcome, and this holds
+        the pair together: with the ordering regressed *and* that state
+        dropped, the sweep displays a repository it never examined as
+        ``clean``. Either one alone is survivable, which is the point of
+        keeping both.
+
+        Args:
+            tmp_path: Container directory.
+            capsys: Captures standard output.
+        """
+        repository = tmp_path / "alpha"
+        workflows = repository / ".github" / "workflows"
+        workflows.mkdir(parents=True)
+        (workflows / "ci.yaml").write_text(
+            "---\nname: CI\non: [push]\njobs:\n  a:\n"
+            "    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n"
+        )
+        (repository / ".git").mkdir()
+        options = _options(tmp_path, multi_repo=True, quiet=False)
+
+        run_linter(_config(tmp_path), options, rate_limited=True)
+
+        output = capsys.readouterr().out
         assert "rate-limited" in output
         assert "clean" not in output
 
