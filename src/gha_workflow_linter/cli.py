@@ -54,6 +54,8 @@ from .exceptions import (
     AuthenticationError,
     ConfigurationError,
     GitHubAPIError,
+    GitUnreachableError,
+    GitUnusableError,
     NetworkError,
     RateLimitError,
     TemporaryAPIError,
@@ -1250,13 +1252,27 @@ def _handle_validation_aborted(
         return 1
 
     # Provide specific guidance based on the error type
-    if isinstance(e.original_error, NetworkError):
+    # The Git backend reports an unreachable remote as a GitError
+    # subclass rather than a NetworkError, because the helpers that
+    # raise it are caught by type. It is the same condition, though,
+    # and the advice below is exactly what it calls for.
+    if isinstance(e.original_error, (NetworkError, GitUnreachableError)):
         console.print(
             "\n[yellow]❌ Network connectivity issue detected[/yellow]"
         )
         console.print("[dim]• Check your internet connection")
         console.print("[dim]• Verify DNS resolution is working")
         console.print("[dim]• Try again in a few moments[/dim]")
+    elif isinstance(e.original_error, GitUnusableError):
+        # Its sibling above, and just as inconclusive, but the network
+        # is not what to go and look at.
+        console.print("\n[yellow]❌ git could not be run[/yellow]")
+        console.print("[dim]• Check that git is installed and on PATH")
+        console.print(
+            "[dim]• The process may have been killed: check for an "
+            "out-of-memory kill or a cancelled job"
+        )
+        console.print("[dim]• Try again once git can run[/dim]")
     elif isinstance(e.original_error, AuthenticationError):
         console.print("\n[yellow]❌ GitHub API authentication failed[/yellow]")
         from .github_auth import get_github_cli_suggestions

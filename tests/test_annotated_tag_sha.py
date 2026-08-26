@@ -15,7 +15,7 @@ import subprocess
 
 import pytest
 
-from gha_workflow_linter.exceptions import GitError
+from gha_workflow_linter.exceptions import GitError, GitUnreachableError
 from gha_workflow_linter.git_refs import (
     AnnotatedTagPeel,
     get_all_remote_refs,
@@ -388,43 +388,41 @@ def test_ls_remote_failure_raises_git_error(
         get_remote_ref_shas(URL, GitConfig())
 
 
-def test_ls_remote_timeout_raises_git_error(
+def test_ls_remote_timeout_raises_unreachable_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A timeout surfaces as GitError, matching existing behaviour."""
+    """A timeout surfaces as the unreachable-remote GitError.
+
+    Nothing was heard back, so nothing is known about the refs. The
+    narrower type is asserted because the plain :class:`GitError` the
+    branch used to raise reads, one layer up, as a definitive answer.
+    """
 
     def fake_run(cmd: list[str], **_kwargs: object) -> FakeCompleted:
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    with pytest.raises(GitError):
+    with pytest.raises(GitUnreachableError):
         get_remote_tag_object_shas(URL, GitConfig())
-    with pytest.raises(GitError):
+    with pytest.raises(GitUnreachableError):
         get_remote_ref_shas(URL, GitConfig())
 
 
-@pytest.mark.parametrize(
-    "failure",
-    [
-        subprocess.CalledProcessError(
-            returncode=128, cmd=["git"], stderr="boom"
-        ),
-        subprocess.TimeoutExpired(cmd=["git"], timeout=1),
-    ],
-)
 def test_validate_commit_shas_git_falls_back_to_invalid(
-    monkeypatch: pytest.MonkeyPatch, failure: Exception
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Subprocess failure marks every SHA invalid, as it did before.
+    """An answered failure marks every SHA invalid, as it did before.
 
-    The tag-object split must not change how an unreachable remote is
-    handled: the caller retries with the SSH URL, and an unresolved SHA
-    ends up INVALID_REFERENCE rather than a misleading ANNOTATED_TAG_SHA.
+    The tag-object split must not change how a refusal is handled: the
+    caller retries with the SSH URL, and an unresolved SHA ends up
+    INVALID_REFERENCE rather than a misleading ANNOTATED_TAG_SHA.
     """
 
     def fake_run(_cmd: list[str], **_kwargs: object) -> FakeCompleted:
-        raise failure
+        raise subprocess.CalledProcessError(
+            returncode=128, cmd=["git"], stderr="boom"
+        )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
@@ -436,3 +434,24 @@ def test_validate_commit_shas_git_falls_back_to_invalid(
         V0_12_2_TAG_OBJECT: ValidationResult.INVALID_REFERENCE,
         V0_12_2_COMMIT: ValidationResult.INVALID_REFERENCE,
     }
+
+
+def test_validate_commit_shas_git_propagates_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed-out lookup is not an answer about the SHAs.
+
+    Falling back to INVALID_REFERENCE here blamed every SHA-pinned
+    workflow for a slow network -- and SHA pinning is the shape this
+    linter exists to encourage, so the blame landed on its own advice.
+    """
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> FakeCompleted:
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(GitUnreachableError):
+        _validate_commit_shas_git(
+            URL, [V0_12_2_TAG_OBJECT, V0_12_2_COMMIT], GitConfig()
+        )

@@ -92,6 +92,43 @@ class GitError(ValidationError):
         super().__init__(message)
 
 
+class GitInconclusiveError(GitError):
+    """Raised when git produced no answer about the repository.
+
+    Distinct from its parent because the two mean opposite things about
+    the workflow being checked. A remote that answers "no such
+    repository" has told us something; a lookup that produced no answer
+    has told us nothing, and reporting the second as a finding blames
+    the workflow for a problem elsewhere.
+
+    Every layer that turns a failure into a result must let this one
+    past, so it can surface as ``NETWORK_ERROR`` rather than as
+    ``INVALID_REPOSITORY`` or ``INVALID_REFERENCE``. Which of the two
+    subclasses it is does not matter there -- only to the user, who is
+    told what to do about it.
+    """
+
+
+class GitUnreachableError(GitInconclusiveError):
+    """Raised when git could not reach the remote at all.
+
+    The connection is the fault: a name that would not resolve, a route
+    that was not there, a session refused or dropped. This is the one
+    the user can act on by checking the network.
+    """
+
+
+class GitUnusableError(GitInconclusiveError):
+    """Raised when git itself could not produce an answer.
+
+    An absent or unexecutable ``git``, or one killed part way through by
+    the out-of-memory killer or a cancelled job. The remote is just as
+    unheard from as with its sibling, so the layers above treat the two
+    alike -- but the advice differs, and telling someone with no ``git``
+    to check their DNS would send them looking in the wrong place.
+    """
+
+
 class RepositoryNotFoundError(ValidationError):
     """Raised when a repository cannot be found or accessed."""
 

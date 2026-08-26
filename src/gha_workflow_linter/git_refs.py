@@ -25,10 +25,12 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
+import re
 import subprocess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
-from .exceptions import GitError
+from .exceptions import GitError, GitUnreachableError, GitUnusableError
 
 if TYPE_CHECKING:
     from .models import GitConfig
@@ -75,6 +77,238 @@ class RemoteRefShas:
 
     commit_shas: frozenset[str]
     tag_objects: dict[str, AnnotatedTagPeel]
+
+
+#: Fragments git writes to standard error when it could not reach the
+#: remote, as opposed to reaching it and being told no. The exit status
+#: does not distinguish them -- ``128`` covers both -- so the message is
+#: the only evidence available.
+#:
+#: These cover the failures git reports in its own or SSH's words. The
+#: HTTP transport is handled by rule instead, below, because the ways a
+#: connection can fail have no end and enumerating them was losing.
+#:
+#: SSH is not closed the same way, and the asymmetry is deliberate. Over
+#: HTTP the shape of an answer is fixed by the protocol and written by
+#: git, so excluding it is safe. Over SSH the answer comes from whatever
+#: the server chooses to print, and inverting the test there would mean
+#: that wording we had not anticipated silently suppressed a finding --
+#: the failure worth avoiding most, since it passes a workflow that is
+#: wrong.
+_TRANSPORT_FAILURE_MARKERS: Final = (
+    "could not resolve host",
+    "could not resolve proxy",
+    "temporary failure in name resolution",
+    "failed to connect",
+    "couldn't connect to server",
+    "connection refused",
+    "connection timed out",
+    "operation timed out",
+    "network is unreachable",
+    "no route to host",
+    "connection reset by peer",
+    "unable to look up",
+    # SSH speaks for itself, outside git's HTTP wording. A dropped
+    # handshake arrives before the git protocol has begun -- earlier
+    # than any answer about a repository could be given.
+    "ssh: connect to host",
+    "kex_exchange_identification:",
+    "connection closed by",
+    "unexpected disconnect while reading sideband packet",
+    # The SSH counterpart of a rejected certificate: the session is
+    # refused over how the host identified itself, so nothing was ever
+    # asked about the repository.
+    "host key verification failed",
+    "remote host identification has changed",
+    # git started, but could not start what it needs to reach the
+    # remote: no ssh on PATH, no memory to fork, or a missing transport
+    # helper. The lookup ends before the URL is ever opened.
+    "cannot run",
+    "unable to fork",
+    "unable to find remote helper",
+    "is not a git command",
+)
+
+#: git introduces every HTTP failure with ``unable to access '<url>':``
+#: and appends curl's reason for it.
+_HTTP_ATTEMPT_MARKER: Final = "unable to access"
+
+#: The one reason under that prefix that carries a reply from the
+#: server, since HTTP states a verdict in the status code and nowhere
+#: else.
+_HTTP_STATUS_PATTERN: Final = re.compile(
+    r"the requested url returned error:\s*(\d{3})"
+)
+
+
+#: 4xx statuses that carry no verdict about the repository. Everything
+#: from 500 up is the server failing and is caught by range; these are
+#: the client errors that mean something other than "no" -- 408 when the
+#: server gave up receiving the request, 429 when it will not take
+#: another yet, and 407 when a proxy in between refused to pass it on,
+#: so GitHub never saw it at all.
+_CLIENT_ERRORS_WITHOUT_AN_ANSWER: Final = frozenset({407, 408, 429})
+
+
+def git_environment() -> dict[str, str]:
+    """The environment every git command here runs in.
+
+    git translates its messages, and this module reads them: the
+    transport classifier looks for English. Under a translated locale it
+    would recognise nothing, so every failure would look like the remote
+    answering -- turning a broken network back into findings about the
+    workflow, for exactly the developers whose environment is not
+    English. The bug this change removes would have survived there.
+
+    ``LC_ALL=C`` settles it. ``LANGUAGE`` is cleared as well because
+    gettext consults it ahead of the locale; it is ignored once the
+    locale is ``C``, but not relying on that costs nothing.
+
+    Returns:
+        A copy of the current environment with the locale pinned, so
+        that credentials, ``PATH`` and the SSH agent still reach git.
+    """
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    env.pop("LANGUAGE", None)
+    return env
+
+
+def _status_withholds_an_answer(status: int) -> bool:
+    """Whether an HTTP status declined to answer about the repository.
+
+    A 5xx is the server failing; 408 or 429 is it declining to be asked
+    just now; 407 is a proxy in between refusing to pass the request on,
+    so GitHub never saw it. None says anything about whether the
+    repository exists, so reporting one as a finding would blame a
+    workflow for an outage elsewhere. Other 4xx codes do answer: 404 for
+    absent, 403 for present but not ours to see.
+
+    The API backend treats the same transient codes that way, raising
+    ``TemporaryAPIError`` and ``RateLimitError``. It does not report the
+    remaining 4xx as findings either -- 403 becomes an
+    ``AuthenticationError`` and the rest a ``GitHubAPIError``, both of
+    which abort -- so the two backends agree on what is transient
+    without agreeing on what to do with an answer.
+
+    Args:
+        status: The HTTP status git reported.
+
+    Returns:
+        ``True`` when the status is no verdict about the repository.
+    """
+    return status >= 500 or status in _CLIENT_ERRORS_WITHOUT_AN_ANSWER
+
+
+def is_transport_failure(stderr: str | None) -> bool:
+    """Whether git failed because it could not reach the remote.
+
+    Over HTTP the question is settled by rule rather than by a list, and
+    that rule is applied first. Reading git's generic ``unable to
+    access`` prefix as a transport fault is wrong on its own -- it
+    introduces a 404 as readily as a lost connection, and calling that
+    unreachable would discard a real finding. But the remote's answer
+    can only arrive as a status code, so *any other* reason under that
+    prefix is curl reporting that it never got one. Naming those reasons
+    individually meant a fragment per way a connection can fail, which
+    has no end; excluding the shapes an answer takes closes the set
+    instead.
+
+    A status is present but not always an answer: see
+    :func:`_status_withholds_an_answer`.
+
+    The fragments are consulted only when that prefix is absent, because
+    they are matched against the whole message -- which includes the URL
+    git was asked for, and therefore the repository's own name. A
+    repository called ``kex_exchange_identification`` would otherwise
+    answer 404 and have its finding discarded on the strength of its
+    name.
+
+    Args:
+        stderr: Standard error from the failed invocation, if captured.
+
+    Returns:
+        ``True`` when the failure was in reaching the remote rather than
+        in what the remote said.
+    """
+    if not stderr:
+        return False
+    lowered = stderr.lower()
+    if _HTTP_ATTEMPT_MARKER in lowered:
+        reported = _HTTP_STATUS_PATTERN.search(lowered)
+        if reported is None:
+            # curl gave a reason other than a status, so it never got one.
+            return True
+        return _status_withholds_an_answer(int(reported.group(1)))
+    return any(marker in lowered for marker in _TRANSPORT_FAILURE_MARKERS)
+
+
+def was_killed_by_signal(returncode: int | None) -> bool:
+    """Whether the process was terminated rather than allowed to exit.
+
+    POSIX reports this as a negative return code. A git killed part way
+    through -- by the out-of-memory killer, or by a CI job being
+    cancelled -- never reached the point of having anything to say, so
+    its silence carries no verdict. Without this the empty output of a
+    killed process reads as the remote answering no.
+
+    Args:
+        returncode: Status the process finished with, if known.
+
+    Returns:
+        ``True`` when a signal ended the process.
+    """
+    return returncode is not None and returncode < 0
+
+
+def ls_remote_failure(
+    summary: str, stderr: str | None, original: Exception
+) -> GitError:
+    """Build the right error for a failed ``ls-remote``.
+
+    Args:
+        summary: What was being attempted.
+        stderr: Standard error from the invocation.
+        original: The underlying exception.
+
+    Returns:
+        A :class:`GitUnusableError` when a signal ended the process, a
+        :class:`GitUnreachableError` when the remote was never reached,
+        otherwise a plain :class:`GitError`.
+    """
+    detail = f"{summary}: {stderr}"
+    if isinstance(
+        original, subprocess.CalledProcessError
+    ) and was_killed_by_signal(original.returncode):
+        return GitUnusableError(detail, original)
+    if is_transport_failure(stderr):
+        return GitUnreachableError(detail, original)
+    return GitError(detail, original)
+
+
+def git_invocation_failure(summary: str, original: Exception) -> GitError:
+    """Build the right error for a git command that would not run.
+
+    This is the last resort of each remote helper, reached when the
+    failure was neither a non-zero exit nor a timeout. An
+    :class:`OSError` here means the command never started -- ``git`` is
+    absent, or not executable -- so the remote was never asked, and its
+    silence says nothing about the repository. Anything else is a fault
+    in handling the reply, which is a defect in this code rather than a
+    verdict about the network, and keeps the plain type.
+
+    Args:
+        summary: What was being attempted.
+        original: The underlying exception.
+
+    Returns:
+        A :class:`GitUnusableError` when the command never ran,
+        otherwise a plain :class:`GitError`.
+    """
+    detail = f"{summary}: {original}"
+    if isinstance(original, OSError):
+        return GitUnusableError(detail, original)
+    return GitError(detail, original)
 
 
 def _parse_ls_remote_lines(stdout: str) -> list[tuple[str, str]]:
@@ -196,19 +430,24 @@ def _run_ls_remote_tags(url: str, config: GitConfig) -> list[tuple[str, str]]:
             capture_output=True,
             text=True,
             timeout=config.timeout_seconds,
+            env=git_environment(),
             check=True,
         )
 
         return _parse_ls_remote_lines(result.stdout)
 
     except subprocess.TimeoutExpired:
-        raise GitError(f"Git ls-remote (tags) timed out for {url}") from None
+        raise GitUnreachableError(
+            f"Git ls-remote (tags) timed out for {url}"
+        ) from None
     except subprocess.CalledProcessError as e:
-        raise GitError(
-            f"Git ls-remote (tags) failed for {url}: {e.stderr}"
+        raise ls_remote_failure(
+            f"Git ls-remote (tags) failed for {url}", e.stderr, e
         ) from e
     except Exception as e:
-        raise GitError(f"Git ls-remote (tags) failed for {url}: {e}") from e
+        raise git_invocation_failure(
+            f"Git ls-remote (tags) failed for {url}", e
+        ) from e
 
 
 def get_remote_tag_shas(url: str, config: GitConfig) -> dict[str, str]:
@@ -311,6 +550,7 @@ def get_remote_ref_shas(url: str, config: GitConfig) -> RemoteRefShas:
             capture_output=True,
             text=True,
             timeout=config.timeout_seconds,
+            env=git_environment(),
             check=True,
         )
 
@@ -322,11 +562,17 @@ def get_remote_ref_shas(url: str, config: GitConfig) -> RemoteRefShas:
         return RemoteRefShas(commit_shas=commit_shas, tag_objects=tag_objects)
 
     except subprocess.TimeoutExpired:
-        raise GitError(f"Git ls-remote timed out for {url}") from None
+        raise GitUnreachableError(
+            f"Git ls-remote timed out for {url}"
+        ) from None
     except subprocess.CalledProcessError as e:
-        raise GitError(f"Git ls-remote failed for {url}: {e.stderr}") from e
+        raise ls_remote_failure(
+            f"Git ls-remote failed for {url}", e.stderr, e
+        ) from e
     except Exception as e:
-        raise GitError(f"Git ls-remote failed for {url}: {e}") from e
+        raise git_invocation_failure(
+            f"Git ls-remote failed for {url}", e
+        ) from e
 
 
 def get_all_remote_refs(url: str, config: GitConfig) -> set[str]:

@@ -10,19 +10,26 @@ from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
 import re
-import tempfile
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from .exceptions import (
     GitError,
+    GitInconclusiveError,
+    GitUnreachableError,
+    GitUnusableError,
 )
 from .git_refs import (
     AnnotatedTagPeel,
     get_remote_ref_shas,
+    git_environment,
+    git_invocation_failure,
+    is_transport_failure,
+    ls_remote_failure,
+    was_killed_by_signal,
 )
+from .git_subpath import _validate_repository_subpaths
 from .models import APICallStats, GitConfig, ReferenceType, ValidationResult
-from .paths import action_subpath, action_subpath_candidates
 from .paths import base_repository as _shared_base_repository
 
 if TYPE_CHECKING:
@@ -64,6 +71,7 @@ class GitValidationClient:
         self.logger = logging.getLogger(__name__)
         self.api_stats = APICallStats()
         self._annotated_tag_peels: dict[tuple[str, str], AnnotatedTagPeel] = {}
+        self._inconclusive: GitInconclusiveError | None = None
 
         # Determine optimal worker count
         if config.max_parallel_operations:
@@ -76,6 +84,32 @@ class GitValidationClient:
         self.logger.debug(
             f"Git client initialized with {self._max_workers} max workers"
         )
+
+    @property
+    def inconclusive_cause(self) -> GitInconclusiveError | None:
+        """Why a lookup produced no answer, if one did not.
+
+        Batch results are ``ValidationResult`` values, which carry no
+        room for a reason, so the failure behind a ``NETWORK_ERROR`` is
+        otherwise lost by the time anything can act on it. Keeping it
+        here lets the run be reported for what it was: advising someone
+        with no ``git`` to check their DNS would send them looking in
+        the wrong place.
+
+        Returns:
+            The most recent inconclusive failure, or ``None`` if every
+            lookup was answered.
+        """
+        return self._inconclusive
+
+    def _record_inconclusive(self, error: Exception) -> None:
+        """Remember a failure that produced no answer.
+
+        Args:
+            error: What a worker raised.
+        """
+        if isinstance(error, GitInconclusiveError):
+            self._inconclusive = error
 
     @property
     def annotated_tag_peels(
@@ -152,6 +186,7 @@ class GitValidationClient:
                     self.logger.warning(
                         f"Failed to validate repository {repo}: {result}"
                     )
+                    self._record_inconclusive(result)
                     results[repo] = ValidationResult.NETWORK_ERROR
                     self.api_stats.increment_failed_call()
                 elif isinstance(result, ValidationResult):
@@ -237,6 +272,7 @@ class GitValidationClient:
                     self.logger.warning(
                         f"Failed to validate references for {repo}: {repo_results}"
                     )
+                    self._record_inconclusive(repo_results)
                     # Mark all references for this repo as having network errors
                     for ref in refs:
                         results[(repo, ref)] = ValidationResult.NETWORK_ERROR
@@ -400,6 +436,12 @@ def _validate_repository_exists(
 
     Returns:
         ValidationResult indicating if repository exists
+
+    Raises:
+        GitError: If no attempt reached the remote. The caller maps that
+            to ``NETWORK_ERROR``; returning ``INVALID_REPOSITORY``
+            instead would report a network problem as a finding about
+            the repository.
     """
     # Try both HTTPS and SSH URLs
     # Strip any action subpath (e.g. anchore/scan-action/download-grype)
@@ -408,14 +450,26 @@ def _validate_repository_exists(
     https_url = f"https://github.com/{base_repo}.git"
     ssh_url = f"git@github.com:{base_repo}.git"
 
+    answered = False
+    unreachable: GitInconclusiveError | None = None
+
     # Try HTTPS first (more likely to work without auth for public repos)
     for url in [https_url, ssh_url]:
         try:
-            result = _run_git_ls_remote(url, config)
-            if result:
+            if _run_git_ls_remote(url, config):
                 return ValidationResult.VALID
-        except Exception:
-            continue  # Try next URL format
+            # The remote answered, and its answer was no.
+            answered = True
+        except GitInconclusiveError as error:
+            unreachable = error
+        except Exception:  # noqa: BLE001 - try the next URL format
+            continue
+
+    if not answered and unreachable is not None:
+        # Nothing reached the remote, so nothing was learned about the
+        # repository. One definitive "not found" from either URL is
+        # enough to outrank this.
+        raise unreachable
 
     return ValidationResult.INVALID_REPOSITORY
 
@@ -437,8 +491,14 @@ def _validate_repository_references(
         Tuple of (results, peels): results maps each reference to its
         validation result, and peels maps each reference reported as
         ``ANNOTATED_TAG_SHA`` to the tag and commit behind it.
+
+    Raises:
+        GitError: If no attempt reached the remote. The caller maps that
+            to ``NETWORK_ERROR`` for every reference; filling them in as
+            ``INVALID_REFERENCE`` instead would report a network problem
+            as findings about the workflow.
     """
-    results = {}
+    results: dict[str, ValidationResult] = {}
     peels: dict[str, AnnotatedTagPeel] = {}
 
     # Try both HTTPS and SSH URLs
@@ -466,37 +526,50 @@ def _validate_repository_references(
             unknown_refs.append(ref)
 
     # Try HTTPS first, then SSH
+    reached = False
+    unreachable: GitInconclusiveError | None = None
     for url in [https_url, ssh_url]:
         try:
             if commit_shas:
                 sha_results, sha_peels = _validate_commit_shas_with_peels(
                     url, commit_shas, config
                 )
-                results.update(sha_results)
-                peels.update(sha_peels)
+                _keep_the_better_answer(results, peels, sha_results, sha_peels)
 
             if branches:
                 branch_results = _validate_branches_git(url, branches, config)
-                results.update(branch_results)
+                _keep_the_better_answer(results, peels, branch_results)
 
             if tags:
                 tag_results = _validate_tags_git(url, tags, config)
-                results.update(tag_results)
+                _keep_the_better_answer(results, peels, tag_results)
 
             if unknown_refs:
                 unknown_results = _validate_unknown_refs_git(
                     url, unknown_refs, config
                 )
-                results.update(unknown_results)
+                _keep_the_better_answer(results, peels, unknown_results)
 
             # If we got here without errors, we're done
+            reached = True
             break
 
-        except Exception as e:
+        except GitInconclusiveError as e:
+            logger.debug(f"Could not reach {url} for {repository}: {e}")
+            unreachable = e
+            continue  # Try next URL format
+        except Exception as e:  # noqa: BLE001 - try the next URL format
             logger.debug(
                 f"Failed to validate references for {repository} with {url}: {e}"
             )
-            continue  # Try next URL format
+            reached = True
+            continue
+
+    if not reached and unreachable is not None:
+        # Nothing reached the remote, so nothing was learned about these
+        # references. Reporting them as invalid would blame the workflow
+        # for a network problem.
+        raise unreachable
 
     # Fill in any missing results as invalid
     for ref in references:
@@ -504,6 +577,69 @@ def _validate_repository_references(
             results[ref] = ValidationResult.INVALID_REFERENCE
 
     return results, peels
+
+
+def _upgrades(known: ValidationResult, found: ValidationResult) -> bool:
+    """Whether a later answer improves on one already established.
+
+    Only one direction counts: a reference an earlier attempt could not
+    find, that a later one did. Two positive classifications are not
+    interchangeable -- ``VALID`` and ``ANNOTATED_TAG_SHA`` disagree
+    about whether the workflow is correct -- so a retry may not swap one
+    for the other in either direction. Allowing it would let an SSH
+    fallback erase an annotated-tag finding that HTTPS had established,
+    which passes a workflow that is wrong.
+
+    Args:
+        known: What an earlier attempt established.
+        found: What this attempt says.
+
+    Returns:
+        ``True`` when the later answer should replace the earlier one.
+    """
+    return (
+        known is ValidationResult.INVALID_REFERENCE
+        and found is not ValidationResult.INVALID_REFERENCE
+    )
+
+
+def _keep_the_better_answer(
+    results: dict[str, ValidationResult],
+    peels: dict[str, AnnotatedTagPeel],
+    found: dict[str, ValidationResult],
+    found_peels: dict[str, AnnotatedTagPeel] | None = None,
+) -> None:
+    """Fold one attempt's answers into what earlier attempts established.
+
+    The retry exists to fill gaps left by an attempt that could not
+    finish, not to revise the answers it did get. Overwriting them turns
+    a working HTTPS lookup into a finding whenever the SSH fallback has
+    no key: the SHA lookup succeeds, a later branch lookup fails, and
+    the retry then reports every reference the first attempt had proved
+    as ``INVALID_REFERENCE``.
+
+    Existence is not symmetric, though, so a later answer that *finds* a
+    reference does outrank an earlier one that did not. A remote which
+    finds it has settled the question; one which does not may simply be
+    seeing less. That is the only revision allowed -- see
+    :func:`_upgrades`.
+
+    Args:
+        results: What is known so far, updated in place.
+        peels: Tag peels known so far, kept in step with ``results``.
+        found: What this attempt established.
+        found_peels: Tag peels from this attempt, where it produced any.
+    """
+    for ref, result in found.items():
+        known = results.get(ref)
+        if known is not None and not _upgrades(known, result):
+            continue
+        results[ref] = result
+        peel = (found_peels or {}).get(ref)
+        if peel is None:
+            peels.pop(ref, None)
+        else:
+            peels[ref] = peel
 
 
 def _run_git_ls_remote(url: str, config: GitConfig) -> bool:
@@ -515,10 +651,11 @@ def _run_git_ls_remote(url: str, config: GitConfig) -> bool:
         config: Git configuration
 
     Returns:
-        True if repository is accessible, False otherwise
+        True if repository exists and is accessible
 
     Raises:
-        GitError: If git command fails
+        GitError: If git could not reach the remote, so its answer says
+            nothing about whether the repository exists.
     """
     import subprocess
 
@@ -530,16 +667,36 @@ def _run_git_ls_remote(url: str, config: GitConfig) -> bool:
             capture_output=True,
             text=True,
             timeout=config.timeout_seconds,
+            env=git_environment(),
             check=False,
         )
 
-        # Return True if command succeeded (exit code 0)
-        return result.returncode == 0
+        if result.returncode == 0:
+            return True
+
+        if was_killed_by_signal(result.returncode):
+            raise GitUnusableError(
+                f"Git ls-remote was killed before it could ask {url}"
+            )
+
+        if is_transport_failure(result.stderr):
+            raise GitUnreachableError(
+                f"Git ls-remote could not reach {url}: {result.stderr.strip()}"
+            )
+
+        # The remote answered and said no.
+        return False
 
     except subprocess.TimeoutExpired:
-        raise GitError(f"Git ls-remote timed out for {url}") from None
+        raise GitUnreachableError(
+            f"Git ls-remote timed out for {url}"
+        ) from None
+    except GitError:
+        raise
     except Exception as e:
-        raise GitError(f"Git ls-remote failed for {url}: {e}") from e
+        raise git_invocation_failure(
+            f"Git ls-remote failed for {url}", e
+        ) from e
 
 
 def _validate_commit_shas_git(
@@ -604,6 +761,10 @@ def _validate_commit_shas_with_peels(
             else:
                 results[sha] = ValidationResult.INVALID_REFERENCE
 
+    except GitInconclusiveError:
+        # Nothing was learned about these references, so reporting them
+        # as invalid would blame the workflow for a broken network.
+        raise
     except Exception as e:
         logger.debug(f"Failed to validate commit SHAs for {url}: {e}")
         # Mark all SHAs as invalid
@@ -639,6 +800,10 @@ def _validate_branches_git(
             else:
                 results[branch] = ValidationResult.INVALID_REFERENCE
 
+    except GitInconclusiveError:
+        # Nothing was learned about these references, so reporting them
+        # as invalid would blame the workflow for a broken network.
+        raise
     except Exception as e:
         logger.debug(f"Failed to validate branches for {url}: {e}")
         # Mark all branches as invalid
@@ -673,6 +838,10 @@ def _validate_tags_git(
             else:
                 results[tag] = ValidationResult.INVALID_REFERENCE
 
+    except GitInconclusiveError:
+        # Nothing was learned about these references, so reporting them
+        # as invalid would blame the workflow for a broken network.
+        raise
     except Exception as e:
         logger.debug(f"Failed to validate tags for {url}: {e}")
         # Mark all tags as invalid
@@ -713,9 +882,20 @@ def _validate_unknown_refs_git(
                     results[ref] = sha_results.get(
                         ref, ValidationResult.INVALID_REFERENCE
                     )
+                except GitInconclusiveError:
+                    # The enumeration above reached the remote, but this
+                    # lookup did not, so the ref is unresolved rather
+                    # than absent. Left to the fallback below, it would
+                    # be reported as a finding on the strength of a
+                    # question that was never answered.
+                    raise
                 except Exception:
                     results[ref] = ValidationResult.INVALID_REFERENCE
 
+    except GitInconclusiveError:
+        # Nothing was learned about these references, so reporting them
+        # as invalid would blame the workflow for a broken network.
+        raise
     except Exception as e:
         logger.debug(f"Failed to validate unknown refs for {url}: {e}")
         # Mark all refs as invalid
@@ -759,15 +939,18 @@ def _run_git_clone(
             capture_output=True,
             text=True,
             timeout=config.timeout_seconds,
+            env=git_environment(),
             check=True,
         )
 
     except subprocess.TimeoutExpired:
-        raise GitError(f"Git clone timed out for {url}") from None
+        raise GitUnreachableError(f"Git clone timed out for {url}") from None
     except subprocess.CalledProcessError as e:
-        raise GitError(f"Git clone failed for {url}: {e.stderr}") from e
+        raise ls_remote_failure(
+            f"Git clone failed for {url}", e.stderr, e
+        ) from e
     except Exception as e:
-        raise GitError(f"Git clone failed for {url}: {e}") from e
+        raise git_invocation_failure(f"Git clone failed for {url}", e) from e
 
 
 def _commit_exists_in_repo(
@@ -794,6 +977,7 @@ def _commit_exists_in_repo(
             capture_output=True,
             text=True,
             timeout=config.timeout_seconds,
+            env=git_environment(),
             check=False,
         )
 
@@ -827,6 +1011,7 @@ def _get_remote_branches(url: str, config: GitConfig) -> set[str]:
             capture_output=True,
             text=True,
             timeout=config.timeout_seconds,
+            env=git_environment(),
             check=True,
         )
 
@@ -842,11 +1027,17 @@ def _get_remote_branches(url: str, config: GitConfig) -> set[str]:
         return branches
 
     except subprocess.TimeoutExpired:
-        raise GitError(f"Git ls-remote timed out for {url}") from None
+        raise GitUnreachableError(
+            f"Git ls-remote timed out for {url}"
+        ) from None
     except subprocess.CalledProcessError as e:
-        raise GitError(f"Git ls-remote failed for {url}: {e.stderr}") from e
+        raise ls_remote_failure(
+            f"Git ls-remote failed for {url}", e.stderr, e
+        ) from e
     except Exception as e:
-        raise GitError(f"Git ls-remote failed for {url}: {e}") from e
+        raise git_invocation_failure(
+            f"Git ls-remote failed for {url}", e
+        ) from e
 
 
 def _get_remote_tags(url: str, config: GitConfig) -> set[str]:
@@ -873,6 +1064,7 @@ def _get_remote_tags(url: str, config: GitConfig) -> set[str]:
             capture_output=True,
             text=True,
             timeout=config.timeout_seconds,
+            env=git_environment(),
             check=True,
         )
 
@@ -891,13 +1083,17 @@ def _get_remote_tags(url: str, config: GitConfig) -> set[str]:
         return tags
 
     except subprocess.TimeoutExpired:
-        raise GitError(f"Git ls-remote (tags) timed out for {url}") from None
+        raise GitUnreachableError(
+            f"Git ls-remote (tags) timed out for {url}"
+        ) from None
     except subprocess.CalledProcessError as e:
-        raise GitError(
-            f"Git ls-remote (tags) failed for {url}: {e.stderr}"
+        raise ls_remote_failure(
+            f"Git ls-remote (tags) failed for {url}", e.stderr, e
         ) from e
     except Exception as e:
-        raise GitError(f"Git ls-remote (tags) failed for {url}: {e}") from e
+        raise git_invocation_failure(
+            f"Git ls-remote (tags) failed for {url}", e
+        ) from e
 
 
 def _determine_reference_type(reference: str) -> ReferenceType:
@@ -926,240 +1122,3 @@ def _determine_reference_type(reference: str) -> ReferenceType:
 
     # Default to branch for everything else
     return ReferenceType.BRANCH
-
-
-def _validate_repository_subpaths(
-    base_repository_key: str,
-    entries: list[tuple[str, str]],
-    config: GitConfig,
-) -> dict[tuple[str, str], ValidationResult]:
-    """
-    Validate that subdirectory subpaths exist at their referenced ref.
-
-    Runs in a worker thread. Performs one partial (``--filter=blob:none``)
-    shallow fetch per unique ref into a throwaway repository, then checks the
-    candidate paths with ``git ls-tree``. ``blob:none`` keeps file *contents*
-    off the wire while still downloading the tree objects ``ls-tree`` needs, so
-    the path-existence check works entirely offline after the fetch.
-
-    Args:
-        base_repository_key: ``owner/repo`` base (no subpath).
-        entries: List of ``(repo_key, ref)`` tuples sharing this base repo,
-            where each ``repo_key`` includes a subdirectory subpath.
-        config: Git configuration.
-
-    Returns:
-        Dictionary mapping ``(repo_key, ref)`` to a ``ValidationResult``
-        (``VALID``, ``INVALID_PATH`` or ``NETWORK_ERROR``).
-    """
-    import pathlib
-
-    results: dict[tuple[str, str], ValidationResult] = {}
-
-    https_url = f"https://github.com/{base_repository_key}.git"
-    ssh_url = f"git@github.com:{base_repository_key}.git"
-
-    # Group entries by ref so each ref is fetched only once.
-    ref_to_repo_keys: dict[str, list[str]] = {}
-    for repo_key, ref in entries:
-        ref_to_repo_keys.setdefault(ref, []).append(repo_key)
-
-    with tempfile.TemporaryDirectory(prefix="gha-subpath-") as tmpdir:
-        repo_dir = pathlib.Path(tmpdir)
-        if not _run_git_init(repo_dir, config):
-            for repo_key, ref in entries:
-                results[(repo_key, ref)] = ValidationResult.NETWORK_ERROR
-            return results
-
-        for ref, repo_keys in ref_to_repo_keys.items():
-            fetched = False
-            for url in (https_url, ssh_url):
-                if _run_git_fetch_partial(repo_dir, url, ref, config):
-                    fetched = True
-                    break
-
-            for repo_key in repo_keys:
-                entry = (repo_key, ref)
-                if not fetched:
-                    # The ref was already validated to exist, so a fetch
-                    # failure here is treated as a transient/network problem
-                    # rather than a bogus subpath.
-                    results[entry] = ValidationResult.NETWORK_ERROR
-                    continue
-
-                subpath = action_subpath(repo_key)
-                if subpath is None:
-                    results[entry] = ValidationResult.VALID
-                    continue
-
-                try:
-                    exists = _run_git_subpath_exists(
-                        repo_dir, "FETCH_HEAD", subpath, config
-                    )
-                except GitError as e:
-                    # The ls-tree check could not be completed (a local or
-                    # transient Git failure, distinct from the subpath being
-                    # absent). Treat as inconclusive so the caller does not
-                    # report or cache it as a bogus path.
-                    logger.debug(
-                        f"Inconclusive subpath check for {repo_key}@{ref}: {e}"
-                    )
-                    results[entry] = ValidationResult.NETWORK_ERROR
-                    continue
-
-                results[entry] = (
-                    ValidationResult.VALID
-                    if exists
-                    else ValidationResult.INVALID_PATH
-                )
-
-    return results
-
-
-def _run_git_init(repo_dir: Path, config: GitConfig) -> bool:
-    """Initialise an empty Git repository for partial fetches.
-
-    Args:
-        repo_dir: Directory in which to initialise the repository.
-        config: Git configuration.
-
-    Returns:
-        True if initialisation succeeded, False otherwise.
-    """
-    import subprocess
-
-    cmd = ["git", "init", "--quiet", str(repo_dir)]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=config.timeout_seconds,
-            check=False,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
-def _run_git_fetch_partial(
-    repo_dir: Path, url: str, ref: str, config: GitConfig
-) -> bool:
-    """Shallow, blobless fetch of a single ref into ``repo_dir``.
-
-    ``--filter=blob:none`` omits file contents while still fetching the tree
-    objects required to enumerate paths. ``--depth=1`` keeps history minimal.
-    Fetching by branch, tag, or (server permitting) commit SHA all resolve to
-    ``FETCH_HEAD``.
-
-    Args:
-        repo_dir: Initialised repository directory.
-        url: Git remote URL for the base ``owner/repo``.
-        ref: The branch, tag, or commit SHA to fetch.
-        config: Git configuration.
-
-    Returns:
-        True if the fetch succeeded, False otherwise.
-    """
-    import subprocess
-
-    cmd = [
-        "git",
-        "-C",
-        str(repo_dir),
-        "-c",
-        "protocol.version=2",
-        "fetch",
-        "--depth=1",
-        "--filter=blob:none",
-        "--no-tags",
-        "--quiet",
-        # End option parsing so a ref beginning with "-" (REF_PATTERN allows
-        # it) cannot be misread by git as an option (argument injection).
-        "--",
-        url,
-        ref,
-    ]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=config.timeout_seconds,
-            check=False,
-        )
-        return result.returncode == 0
-    except subprocess.TimeoutExpired:
-        return False
-    except Exception:
-        return False
-
-
-def _run_git_subpath_exists(
-    repo_dir: Path, treeish: str, subpath: str, config: GitConfig
-) -> bool:
-    """Check whether a subdirectory action path exists at ``treeish``.
-
-    Probes the candidate paths from :func:`action_subpath_candidates` (the
-    action metadata files first, then the directory itself) in a single
-    ``git ls-tree`` call. Non-empty output means at least one candidate exists.
-
-    A definitive absence (``ls-tree`` succeeds with no matching entry) is
-    distinguished from a failure to run the check at all (non-zero exit,
-    timeout, or other error). The former returns ``False``; the latter raises
-    ``GitError`` so callers can treat it as inconclusive rather than a bogus
-    path.
-
-    Args:
-        repo_dir: Repository directory containing the fetched objects.
-        treeish: Tree-ish to inspect (typically ``FETCH_HEAD``).
-        subpath: The subdirectory path to verify.
-        config: Git configuration.
-
-    Returns:
-        True if the subpath exists at the ref, False if it is definitively
-        absent.
-
-    Raises:
-        GitError: If the ``ls-tree`` check could not be completed.
-    """
-    import subprocess
-
-    candidates = action_subpath_candidates(subpath)
-    cmd = [
-        "git",
-        "-C",
-        str(repo_dir),
-        "ls-tree",
-        treeish,
-        "--",
-        *candidates,
-    ]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=config.timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        raise GitError(
-            f"Git ls-tree timed out for {treeish} in {repo_dir}"
-        ) from None
-    except Exception as e:
-        raise GitError(
-            f"Git ls-tree failed for {treeish} in {repo_dir}: {e}"
-        ) from e
-
-    if result.returncode != 0:
-        # A non-zero exit means the command itself failed (e.g. a missing
-        # object or a local Git problem), which is distinct from the subpath
-        # being absent. Surface it as inconclusive rather than bogus.
-        raise GitError(
-            f"Git ls-tree failed (exit {result.returncode}) for {treeish} "
-            f"in {repo_dir}: {result.stderr.strip()}"
-        )
-
-    # Exit 0: the subpath exists iff ls-tree listed a matching entry.
-    return bool(result.stdout.strip())

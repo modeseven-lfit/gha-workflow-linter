@@ -12,6 +12,7 @@ import logging
 from typing import TYPE_CHECKING, Any, NoReturn
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     from rich.progress import Progress, TaskID
@@ -20,6 +21,8 @@ from .cache import ValidationCache
 from .exceptions import (
     AuthenticationError,
     GitHubAPIError,
+    GitInconclusiveError,
+    GitUnreachableError,
     NetworkError,
     RateLimitError,
     TemporaryAPIError,
@@ -71,6 +74,51 @@ class _StageResults:
     ref_findings: dict[tuple[str, str], ReferenceFinding]
     subpath_results: dict[tuple[str, str], bool]
     inconclusive_subpaths: set[tuple[str, str]]
+
+
+def _abort_if_unreachable(
+    results: Mapping[Any, ValidationResult],
+    cause: GitInconclusiveError | None = None,
+) -> None:
+    """Stop the run when the Git backend established nothing.
+
+    The caller reduces each result to ``result == VALID``, which is the
+    right shape for a verdict but destroys the difference between "the
+    remote said no" and "no answer was obtained". Flattened, a lost
+    connection became ``INVALID_REPOSITORY`` -- the linter telling the
+    user their workflow was wrong because the network was.
+
+    Raising here matches what the API backend already does, and yields
+    the same observable: the run fails, and reports no findings, because
+    it established none.
+
+    The kind of ``cause`` is carried into the error raised, since a
+    ``NETWORK_ERROR`` result has no room for a reason and the advice
+    given to the user turns on it.
+
+    Args:
+        results: What the Git backend reported.
+        cause: The failure behind those results, where the backend
+            kept one.
+
+    Raises:
+        GitInconclusiveError: If any result reports a failure to
+            establish anything.
+    """
+    unreachable = [
+        str(key)
+        for key, result in results.items()
+        if result is ValidationResult.NETWORK_ERROR
+    ]
+    if not unreachable:
+        return
+    summary = (
+        f"Could not complete {len(unreachable)} of "
+        f"{len(results)} lookups: {', '.join(sorted(unreachable)[:3])}"
+    )
+    if cause is None:
+        raise GitUnreachableError(summary)
+    raise type(cause)(summary, cause)
 
 
 class ActionCallValidator:
@@ -783,6 +831,7 @@ class ActionCallValidator:
                 )
 
     _ABORT_ERRORS: tuple[type[Exception], ...] = (
+        GitInconclusiveError,
         NetworkError,
         GitHubAPIError,
         AuthenticationError,
@@ -835,6 +884,9 @@ class ActionCallValidator:
                     await self._git_client.validate_repositories_batch(
                         list(repos_to_validate)
                     )
+                )
+                _abort_if_unreachable(
+                    git_repo_results, self._git_client.inconclusive_cause
                 )
                 repo_results = {
                     repo: result == ValidationResult.VALID
@@ -891,6 +943,9 @@ class ActionCallValidator:
                     await self._git_client.validate_references_batch(
                         valid_repo_refs_to_validate
                     )
+                )
+                _abort_if_unreachable(
+                    git_ref_results, self._git_client.inconclusive_cause
                 )
                 ref_results = {
                     repo_ref: result == ValidationResult.VALID
