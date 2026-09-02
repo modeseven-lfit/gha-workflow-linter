@@ -302,12 +302,19 @@ class TestOutwardRequestsAreRefused:
         to do about it, or the next person meets an assertion with no
         route forward.
         """
+        url = "https://github.com"
         with pytest.raises(NetworkAccessError) as caught:
-            httpx.get("https://github.com", timeout=5.0)
+            httpx.get(url, timeout=5.0)
 
         message = str(caught.value)
         assert "test_the_refusal_names_the_test_and_the_remedy" in message
-        assert "github.com" in message
+        # Anchored past the delimiter, not merely up to it. The guard
+        # refuses with str(req.url), so the exact target is available to
+        # assert on -- but "github.com", "https://github.com" and even
+        # "https://github.com." are all prefixes of a message naming
+        # https://github.com.evil.example, so none of them pins what was
+        # actually reached. Including the following word does.
+        assert f"attempted to reach {url}. Tests" in message
         assert "@pytest.mark.network" in message
 
 
@@ -444,6 +451,8 @@ class TestTheGuardCannotBeSwallowed:
             request: Used to read what the guard recorded.
         """
 
+        url = "https://api.github.com/rate_limit"
+
         async def attempt() -> object:
             """Reach for the network and let gather capture the refusal.
 
@@ -453,7 +462,7 @@ class TestTheGuardCannotBeSwallowed:
 
             async def one() -> None:
                 async with httpx.AsyncClient() as client:
-                    await client.get("https://api.github.com/rate_limit")
+                    await client.get(url)
 
             results = await asyncio.gather(one(), return_exceptions=True)
             return results[0]
@@ -462,11 +471,12 @@ class TestTheGuardCannotBeSwallowed:
 
         # Returned rather than raised, which is the whole problem.
         assert isinstance(captured, NetworkAccessError)
-        # Recorded regardless, which is the answer to it.
-        assert any(
-            "api.github.com" in target
-            for target in request.node.network_attempts
-        )
+        # Recorded regardless, which is the answer to it. Membership of
+        # the exact URL rather than a host substring: the guard records
+        # str(req.url), so nothing is lost by being precise, and a
+        # substring test would accept a target that merely contained the
+        # host somewhere.
+        assert url in request.node.network_attempts
 
 
 class TestTheTeardownCheckActuallyFails:
