@@ -3,8 +3,8 @@
 
 """Unit tests for pattern matching functionality."""
 
+from gha_workflow_linter.action_call_scanner import ActionCallPatterns
 from gha_workflow_linter.models import ActionCallType, ReferenceType
-from gha_workflow_linter.patterns import ActionCallPatterns
 
 
 class TestActionCallPatterns:

@@ -480,7 +480,7 @@ class TestStandaloneCacheConsumers:
 
     def test_autofixer_primes_own_cache_on_construct(self) -> None:
         from gha_workflow_linter import __version__
-        from gha_workflow_linter.auto_fix import AutoFixer
+        from gha_workflow_linter.action_call_fix import AutoFixer
         from gha_workflow_linter.models import Config
 
         self._seed_stale_cache()
@@ -509,8 +509,8 @@ class TestStandaloneCacheConsumers:
         import asyncio
 
         from gha_workflow_linter import __version__
+        from gha_workflow_linter.action_call_check import ActionCallValidator
         from gha_workflow_linter.models import Config, ValidationMethod
-        from gha_workflow_linter.validator import ActionCallValidator
 
         self._seed_stale_cache()
         config = Config(
@@ -557,7 +557,7 @@ class TestStandaloneCacheConsumers:
         constructor must not call prime() a second time (the shared
         cache is already primed by the CLI prepare phase). We assert
         that the existing _loaded state is preserved."""
-        from gha_workflow_linter.auto_fix import AutoFixer
+        from gha_workflow_linter.action_call_fix import AutoFixer
         from gha_workflow_linter.models import Config
 
         config = Config(

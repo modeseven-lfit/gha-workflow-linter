@@ -8,10 +8,10 @@ auto-fixer responsible for querying GitHub (via the GraphQL API or Git) to
 resolve action references: discovering tags and branches, mapping
 references to commit SHAs, and detecting repository redirects. Latest-
 version selection and cooldown enforcement live in
-:class:`auto_fix_versions._VersionResolutionMixin`, which builds on this
+:class:`action_call_versions._VersionResolutionMixin`, which builds on this
 mixin.
 
-It is split out of :mod:`auto_fix` so the network-facing resolution logic is
+It is split out of :mod:`action_call_fix` so the network-facing resolution logic is
 isolated from the orchestration and file-rewriting concerns of
 ``AutoFixer``. The mixin is combined into ``AutoFixer`` via inheritance, so
 the concrete instance supplies the attributes declared below in its
@@ -25,26 +25,26 @@ from collections import defaultdict
 import re
 from typing import TYPE_CHECKING, Any
 
-from .exceptions import GitError
-from .git_validator import (
+from .action_call_git import (
     _get_remote_branches,
     _get_remote_tags,
 )
+from .action_call_scanner import ActionCallPatterns
+from .exceptions import GitError
 from .models import (
     Config,
     ValidationMethod,
     ValidationResult,
 )
 from .paths import base_repository
-from .patterns import ActionCallPatterns
 
 if TYPE_CHECKING:
     import logging
 
     import httpx
 
+    from .action_call_git import GitValidationClient
     from .cache import ValidationCache
-    from .git_validator import GitValidationClient
     from .github_api import GitHubGraphQLClient
 
 

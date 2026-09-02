@@ -36,6 +36,8 @@ from rich.table import Table
 import typer
 
 from . import __version__, exit_codes
+from .action_call_check import ActionCallValidator
+from .action_call_fix import AutoFixer
 from .allow_list_check import AllowListChecker, AllowListOutcome
 from .allow_list_fix import AppliedFix
 from .allow_list_fix import apply_fixes as apply_allow_list_fixes
@@ -45,7 +47,6 @@ from .allow_list_report import (
 from .allow_list_report import (
     render_text as render_allow_list,
 )
-from .auto_fix import AutoFixer
 from .cache import CachePrimeReport, ValidationCache
 from .config import ConfigManager
 from .console import console, err_console
@@ -75,7 +76,6 @@ from .multi_repo import find_repositories, is_repository
 from .scanner import WorkflowScanner
 from .system_utils import get_default_workers
 from .utils import has_test_comment
-from .validator import ActionCallValidator
 
 
 def _get_relative_path(file_path: Path, base_path: Path) -> Path:

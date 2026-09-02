@@ -14,11 +14,11 @@ This module holds the whole of that concern: constructing findings from
 backend results and recorded tag peels, narrowing a failure to its most
 specific known :class:`~gha_workflow_linter.models.ValidationResult`, and
 rendering the human-readable message for a result. It is kept separate
-from :mod:`gha_workflow_linter.validator` because none of it needs the
+from :mod:`gha_workflow_linter.action_call_check` because none of it needs the
 validator's state — no clients, no cache, no configuration — and because
 messaging changes far more often than the orchestration around it.
 
-Nothing here imports :mod:`gha_workflow_linter.validator`; the dependency
+Nothing here imports :mod:`gha_workflow_linter.action_call_check`; the dependency
 runs one way only.
 """
 

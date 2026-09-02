@@ -3,7 +3,7 @@
 
 """Pure helpers for parsing and selecting action version tags.
 
-These functions are extracted from :mod:`auto_fix` so the version-parsing
+These functions are extracted from :mod:`action_call_fix` so the version-parsing
 and cooldown-selection logic can be reasoned about and tested in isolation,
 independently of the ``AutoFixer`` orchestration and its network clients.
 """

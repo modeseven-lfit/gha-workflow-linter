@@ -701,7 +701,7 @@ async def test_git_backend_declines_under_an_active_cooldown(
     """``git ls-remote`` exposes no dates, so a cooldown cannot be honoured.
 
     Rather than guess at a release's age the Git backend reports nothing,
-    matching ``auto_fix_versions._get_latest_version_via_git``.
+    matching ``action_call_versions._get_latest_version_via_git``.
     """
     calls: list[str] = []
     resolver = _git_resolver(

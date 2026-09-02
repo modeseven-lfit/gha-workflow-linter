@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
-from gha_workflow_linter.auto_fix import AutoFixer
+from gha_workflow_linter.action_call_fix import AutoFixer
 from gha_workflow_linter.cli import app
 from gha_workflow_linter.models import (
     ActionCall,
@@ -25,7 +25,7 @@ from gha_workflow_linter.models import (
     ValidationResult,
 )
 from gha_workflow_linter.utils import has_test_comment
-from tests.test_auto_fix import build_all_action_calls_from_errors
+from tests.test_action_call_fix import build_all_action_calls_from_errors
 
 if TYPE_CHECKING:
     from collections.abc import Generator

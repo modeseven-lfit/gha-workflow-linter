@@ -16,10 +16,10 @@ from unittest.mock import Mock, patch
 import httpx
 import pytest
 
+from gha_workflow_linter.action_call_check import ActionCallValidator
 from gha_workflow_linter.cli import run_linter
 from gha_workflow_linter.exceptions import NetworkError, ValidationAbortedError
 from gha_workflow_linter.models import CLIOptions, Config, GitHubAPIConfig
-from gha_workflow_linter.validator import ActionCallValidator
 
 
 class TestPreCommitCIScenario:

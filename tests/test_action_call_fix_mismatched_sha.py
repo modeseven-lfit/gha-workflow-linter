@@ -13,7 +13,7 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 
-from gha_workflow_linter.auto_fix import AutoFixer
+from gha_workflow_linter.action_call_fix import AutoFixer
 from gha_workflow_linter.models import (
     ActionCall,
     CacheConfig,

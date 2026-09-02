@@ -17,6 +17,17 @@ if TYPE_CHECKING:
 
     from rich.progress import Progress, TaskID
 
+from .action_call_git import GitValidationClient
+from .action_call_report import (
+    ReferenceFinding,
+    build_validation_errors,
+    cache_verdict,
+    client_peels,
+    get_error_message,
+    merge_cached_findings,
+    peel_findings,
+    specific_ref_result,
+)
 from .cache import ValidationCache
 from .exceptions import (
     AuthenticationError,
@@ -28,7 +39,6 @@ from .exceptions import (
     TemporaryAPIError,
     ValidationAbortedError,
 )
-from .git_validator import GitValidationClient
 from .github_api import GitHubGraphQLClient
 from .github_auth import get_github_token_with_fallback
 from .models import (
@@ -43,16 +53,6 @@ from .models import (
 )
 from .paths import has_action_subpath
 from .utils import has_test_comment
-from .validator_findings import (
-    ReferenceFinding,
-    build_validation_errors,
-    cache_verdict,
-    client_peels,
-    get_error_message,
-    merge_cached_findings,
-    peel_findings,
-    specific_ref_result,
-)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1206,7 +1206,7 @@ class ActionCallValidator:
         """Get human-readable error message for validation result.
 
         Thin delegation to
-        :func:`gha_workflow_linter.validator_findings.get_error_message`,
+        :func:`gha_workflow_linter.action_call_report.get_error_message`,
         kept as a method because callers already reach for it here.
 
         Args:

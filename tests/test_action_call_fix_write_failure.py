@@ -27,7 +27,7 @@ from unittest.mock import patch
 
 import pytest
 
-from gha_workflow_linter.auto_fix import AutoFixer
+from gha_workflow_linter.action_call_fix import AutoFixer
 from gha_workflow_linter.models import (
     ActionCall,
     CacheConfig,
@@ -235,7 +235,7 @@ class TestPerFileWriteFailure:
             stubbed_resolution(),
             patch(
                 # Patch where the name is looked up, not where it is defined.
-                "gha_workflow_linter.auto_fix.replace_lines",
+                "gha_workflow_linter.action_call_fix.replace_lines",
                 failing_writer(bad),
             ),
         ):
@@ -271,7 +271,7 @@ class TestPerFileWriteFailure:
         with (
             stubbed_resolution(),
             patch(
-                "gha_workflow_linter.auto_fix.replace_lines",
+                "gha_workflow_linter.action_call_fix.replace_lines",
                 failing_writer(bad),
             ),
         ):
@@ -324,7 +324,7 @@ class TestPerFileWriteFailure:
         with (
             stubbed_resolution(),
             patch(
-                "gha_workflow_linter.auto_fix.replace_lines",
+                "gha_workflow_linter.action_call_fix.replace_lines",
                 failing_writer(bad),
             ),
         ):
@@ -391,7 +391,10 @@ class TestPerFileWriteFailure:
 
         with (
             stubbed_resolution(),
-            patch("gha_workflow_linter.auto_fix.replace_lines", _always_fails),
+            patch(
+                "gha_workflow_linter.action_call_fix.replace_lines",
+                _always_fails,
+            ),
         ):
             async with AutoFixer(config, base_path=tmp_path) as fixer:
                 applied, _, _ = await fixer.fix_validation_errors(

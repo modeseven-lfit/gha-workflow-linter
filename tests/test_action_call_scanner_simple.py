@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 
+from gha_workflow_linter.action_call_scanner import ActionCallPatterns
 from gha_workflow_linter.models import ActionCall
-from gha_workflow_linter.patterns import ActionCallPatterns
 
 
 class TestActionCallPatterns:

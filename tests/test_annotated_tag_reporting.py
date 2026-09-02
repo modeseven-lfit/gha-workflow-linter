@@ -25,8 +25,13 @@ from unittest.mock import Mock
 
 import pytest
 
+from gha_workflow_linter.action_call_check import ActionCallValidator
+from gha_workflow_linter.action_call_git import GitValidationClient
+from gha_workflow_linter.action_call_report import (
+    ReferenceFinding,
+    specific_ref_result,
+)
 from gha_workflow_linter.git_refs import AnnotatedTagPeel
-from gha_workflow_linter.git_validator import GitValidationClient
 from gha_workflow_linter.github_api import GitHubGraphQLClient
 from gha_workflow_linter.models import (
     ActionCall,
@@ -38,11 +43,6 @@ from gha_workflow_linter.models import (
     ValidationError,
     ValidationMethod,
     ValidationResult,
-)
-from gha_workflow_linter.validator import ActionCallValidator
-from gha_workflow_linter.validator_findings import (
-    ReferenceFinding,
-    specific_ref_result,
 )
 
 # Real output from ``git ls-remote`` against

@@ -16,7 +16,7 @@ therefore produces a false pass on a broken reference, which is why this
 module keeps them apart.
 
 The helpers here are pure parsing plus thin ``git`` invocations, kept
-separate from :mod:`gha_workflow_linter.git_validator` so both the
+separate from :mod:`gha_workflow_linter.action_call_git` so both the
 validation path and the version-resolution path share one definition of
 how refs are read.
 """

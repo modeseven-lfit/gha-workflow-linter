@@ -30,7 +30,8 @@ if TYPE_CHECKING:
 import pytest
 from typer.testing import CliRunner
 
-from gha_workflow_linter.auto_fix import AutoFixer
+from gha_workflow_linter.action_call_check import ActionCallValidator
+from gha_workflow_linter.action_call_fix import AutoFixer
 from gha_workflow_linter.cli import app
 from gha_workflow_linter.models import (
     ActionCall,
@@ -44,7 +45,6 @@ from gha_workflow_linter.models import (
     ValidationMethod,
     ValidationResult,
 )
-from gha_workflow_linter.validator import ActionCallValidator
 from tests.conftest import strip_ansi
 
 
@@ -101,8 +101,8 @@ def stub_validator_class(
 ) -> type[ActionCallValidator]:
     """Build a validator class whose validation step is replaced.
 
-    ``cli.py`` does ``from .validator import ActionCallValidator`` at
-    import time, so patching ``gha_workflow_linter.validator``'s attribute
+    ``cli.py`` does ``from .action_call_check import ActionCallValidator`` at
+    import time, so patching ``gha_workflow_linter.action_call_check``'s attribute
     has no effect on the CLI: the name has to be replaced where it is
     looked up, ``gha_workflow_linter.cli.ActionCallValidator``.
 
@@ -145,8 +145,8 @@ def stub_auto_fixer_class(
 ) -> type[AutoFixer]:
     """Build an auto-fixer class whose fixing step is replaced.
 
-    ``cli.py`` does ``from .auto_fix import AutoFixer`` at import time,
-    so patching ``gha_workflow_linter.auto_fix``'s attribute has no
+    ``cli.py`` does ``from .action_call_fix import AutoFixer`` at import time,
+    so patching ``gha_workflow_linter.action_call_fix``'s attribute has no
     effect on the CLI: the name has to be replaced where it is looked
     up, ``gha_workflow_linter.cli.AutoFixer``. Left unpatched, the real
     fixer runs, queries github.com and rewrites the workflow files the
@@ -390,7 +390,7 @@ jobs:
         """Test auto-fix behavior when require_pinned_sha=True."""
         # Mock git operations to return realistic data
         with patch(
-            "gha_workflow_linter.validator.ActionCallValidator.validate_action_calls"
+            "gha_workflow_linter.action_call_check.ActionCallValidator.validate_action_calls"
         ):
             # Create validation errors for each problematic action
             validation_errors = [
@@ -630,7 +630,7 @@ jobs:
         """Test auto-fix behavior when require_pinned_sha=False."""
         # Mock git operations
         with patch(
-            "gha_workflow_linter.validator.ActionCallValidator.validate_action_calls"
+            "gha_workflow_linter.action_call_check.ActionCallValidator.validate_action_calls"
         ):
             # When require_pinned_sha=False, only invalid references should be flagged
             validation_errors = [

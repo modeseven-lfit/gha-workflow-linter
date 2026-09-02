@@ -9,16 +9,16 @@ import asyncio
 
 import pytest
 
-from gha_workflow_linter import git_subpath, git_validator
+from gha_workflow_linter import action_call_git, git_subpath
+from gha_workflow_linter.action_call_git import (
+    GitValidationClient,
+    _base_repository,
+    _validate_repository_exists,
+)
 from gha_workflow_linter.exceptions import GitError
 from gha_workflow_linter.git_subpath import (
     _run_git_subpath_exists,
     _validate_repository_subpaths,
-)
-from gha_workflow_linter.git_validator import (
-    GitValidationClient,
-    _base_repository,
-    _validate_repository_exists,
 )
 from gha_workflow_linter.models import GitConfig, ValidationResult
 
@@ -55,7 +55,7 @@ def test_validate_repository_exists_uses_base_repo_url(
         seen_urls.append(url)
         return True
 
-    monkeypatch.setattr(git_validator, "_run_git_ls_remote", fake_ls_remote)
+    monkeypatch.setattr(action_call_git, "_run_git_ls_remote", fake_ls_remote)
 
     result = _validate_repository_exists(
         "anchore/scan-action/download-grype", GitConfig()
@@ -322,12 +322,12 @@ async def test_validate_subpaths_batch_gather_failure_is_network_error(
             future.set_result({})
             return future
 
-    monkeypatch.setattr(git_validator, "ThreadPoolExecutor", _FakeExecutor)
+    monkeypatch.setattr(action_call_git, "ThreadPoolExecutor", _FakeExecutor)
 
     async def boom(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("gather exploded")
 
-    # Patch the shared asyncio module object (git_validator references the same
+    # Patch the shared asyncio module object (action_call_git references the same
     # singleton via ``import asyncio``); nothing between here and the awaited
     # call uses gather, so this only affects validate_subpaths_batch.
     monkeypatch.setattr(asyncio, "gather", boom)
@@ -386,7 +386,7 @@ async def test_validate_subpaths_batch_partial_result_is_network_error(
             future.set_result({present: ValidationResult.VALID})
             return future
 
-    monkeypatch.setattr(git_validator, "ThreadPoolExecutor", _FakeExecutor)
+    monkeypatch.setattr(action_call_git, "ThreadPoolExecutor", _FakeExecutor)
 
     client = GitValidationClient(GitConfig())
     results = await client.validate_subpaths_batch([present, missing])

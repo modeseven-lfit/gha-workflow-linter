@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
 
-from gha_workflow_linter.auto_fix import AutoFixer
+from gha_workflow_linter.action_call_fix import AutoFixer
 from gha_workflow_linter.models import Config
 
 if TYPE_CHECKING:

@@ -99,7 +99,7 @@ runs:
         return temp_dir
 
     @patch(
-        "gha_workflow_linter.validator.ActionCallValidator.validate_action_calls"
+        "gha_workflow_linter.action_call_check.ActionCallValidator.validate_action_calls"
     )
     def test_scan_single_file(self, mock_validate: Mock) -> None:
         """Test scanning a single specific file.
@@ -146,7 +146,7 @@ runs:
             shutil.rmtree(temp_dir)
 
     @patch(
-        "gha_workflow_linter.validator.ActionCallValidator.validate_action_calls"
+        "gha_workflow_linter.action_call_check.ActionCallValidator.validate_action_calls"
     )
     def test_scan_multiple_files(self, mock_validate: Mock) -> None:
         """Test scanning multiple specific files."""
@@ -175,7 +175,7 @@ runs:
             shutil.rmtree(temp_dir)
 
     @patch(
-        "gha_workflow_linter.validator.ActionCallValidator.validate_action_calls"
+        "gha_workflow_linter.action_call_check.ActionCallValidator.validate_action_calls"
     )
     def test_scan_files_with_wildcard(self, mock_validate: Mock) -> None:
         """Test scanning files matching wildcard pattern."""
@@ -202,7 +202,7 @@ runs:
             shutil.rmtree(temp_dir)
 
     @patch(
-        "gha_workflow_linter.validator.ActionCallValidator.validate_action_calls"
+        "gha_workflow_linter.action_call_check.ActionCallValidator.validate_action_calls"
     )
     def test_scan_action_file(self, mock_validate: Mock) -> None:
         """Test scanning an action.yml file."""
@@ -229,7 +229,7 @@ runs:
             shutil.rmtree(temp_dir)
 
     @patch(
-        "gha_workflow_linter.validator.ActionCallValidator.validate_action_calls"
+        "gha_workflow_linter.action_call_check.ActionCallValidator.validate_action_calls"
     )
     def test_no_files_found_warning(self, mock_validate: Mock) -> None:
         """Test warning when no files match the pattern."""
@@ -256,9 +256,11 @@ runs:
             shutil.rmtree(temp_dir)
 
     @patch(
-        "gha_workflow_linter.validator.ActionCallValidator.validate_action_calls"
+        "gha_workflow_linter.action_call_check.ActionCallValidator.validate_action_calls"
     )
-    @patch("gha_workflow_linter.auto_fix.AutoFixer.fix_validation_errors")
+    @patch(
+        "gha_workflow_linter.action_call_fix.AutoFixer.fix_validation_errors"
+    )
     def test_auto_fix_with_specific_files(
         self, mock_fix: Mock, mock_validate: Mock
     ) -> None:
@@ -325,7 +327,7 @@ runs:
             shutil.rmtree(temp_dir)
 
     @patch(
-        "gha_workflow_linter.validator.ActionCallValidator.validate_action_calls"
+        "gha_workflow_linter.action_call_check.ActionCallValidator.validate_action_calls"
     )
     def test_files_option_with_absolute_path(self, mock_validate: Mock) -> None:
         """Test --files option with absolute paths."""
@@ -353,7 +355,7 @@ runs:
             shutil.rmtree(temp_dir)
 
     @patch(
-        "gha_workflow_linter.validator.ActionCallValidator.validate_action_calls"
+        "gha_workflow_linter.action_call_check.ActionCallValidator.validate_action_calls"
     )
     def test_files_option_excludes_other_files(
         self, mock_validate: Mock
@@ -396,7 +398,7 @@ runs:
             shutil.rmtree(temp_dir)
 
     @patch(
-        "gha_workflow_linter.validator.ActionCallValidator.validate_action_calls"
+        "gha_workflow_linter.action_call_check.ActionCallValidator.validate_action_calls"
     )
     def test_files_option_with_mixed_patterns(
         self, mock_validate: Mock
@@ -451,9 +453,11 @@ runs:
         )
 
     @patch(
-        "gha_workflow_linter.validator.ActionCallValidator.validate_action_calls"
+        "gha_workflow_linter.action_call_check.ActionCallValidator.validate_action_calls"
     )
-    @patch("gha_workflow_linter.auto_fix.AutoFixer.fix_validation_errors")
+    @patch(
+        "gha_workflow_linter.action_call_fix.AutoFixer.fix_validation_errors"
+    )
     def test_auto_fix_validation_errors_without_auto_latest(
         self, mock_fix: Mock, mock_validate: Mock
     ) -> None:
