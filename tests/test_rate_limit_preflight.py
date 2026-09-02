@@ -40,6 +40,7 @@ import pytest
 from typer.testing import CliRunner
 
 from gha_workflow_linter import exit_codes
+from gha_workflow_linter.action_call_check import ActionCallValidator
 from gha_workflow_linter.cli import (
     RunOutcome,
     _apply_cli_overrides,
@@ -60,7 +61,6 @@ from gha_workflow_linter.models import (
     GitHubRateLimitInfo,
     ValidationMethod,
 )
-from gha_workflow_linter.validator import ActionCallValidator
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

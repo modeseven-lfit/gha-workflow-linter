@@ -20,6 +20,7 @@ from unittest import mock
 import pytest
 
 from gha_workflow_linter import exit_codes
+from gha_workflow_linter.action_call_check import ActionCallValidator
 from gha_workflow_linter.allow_list_scanner import CommentPosition, QuoteStyle
 from gha_workflow_linter.cache import ValidationCache
 from gha_workflow_linter.cli import (
@@ -41,7 +42,6 @@ from gha_workflow_linter.models import (
     ValidationResult,
     result_category,
 )
-from gha_workflow_linter.validator import ActionCallValidator
 
 if TYPE_CHECKING:
     from gha_workflow_linter.allow_list_check import AllowListOutcome

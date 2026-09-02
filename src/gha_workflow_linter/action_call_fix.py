@@ -17,11 +17,12 @@ import httpx
 from rich.live import Live
 from rich.text import Text
 
-from .auto_fix_versions import _VersionResolutionMixin
+from .action_call_git import GitValidationClient
+from .action_call_scanner import ActionCallPatterns
+from .action_call_versions import _VersionResolutionMixin
 from .cache import ValidationCache
 from .console import console as _shared_console
 from .file_edit import replace_lines
-from .git_validator import GitValidationClient
 from .github_api import GitHubGraphQLClient
 from .models import (
     ActionCall,
@@ -31,7 +32,6 @@ from .models import (
     ValidationMethod,
     ValidationResult,
 )
-from .patterns import ActionCallPatterns
 from .utils import has_test_comment, pinned_version
 
 

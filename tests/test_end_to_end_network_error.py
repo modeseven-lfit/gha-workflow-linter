@@ -22,7 +22,9 @@ from unittest.mock import Mock, patch
 import httpx
 import pytest
 
-from gha_workflow_linter import git_refs, git_subpath, git_validator
+from gha_workflow_linter import action_call_git, git_refs, git_subpath
+from gha_workflow_linter.action_call_check import _abort_if_unreachable
+from gha_workflow_linter.action_call_git import GitValidationClient
 from gha_workflow_linter.cli import _handle_validation_aborted, run_linter
 from gha_workflow_linter.exceptions import (
     GitUnreachableError,
@@ -30,7 +32,6 @@ from gha_workflow_linter.exceptions import (
     ValidationAbortedError,
 )
 from gha_workflow_linter.git_refs import AnnotatedTagPeel, is_transport_failure
-from gha_workflow_linter.git_validator import GitValidationClient
 from gha_workflow_linter.models import (
     CacheConfig,
     CLIOptions,
@@ -39,7 +40,6 @@ from gha_workflow_linter.models import (
     GitHubAPIConfig,
     ValidationResult,
 )
-from gha_workflow_linter.validator import _abort_if_unreachable
 
 #: The unpatched client class, captured at import. ``_install_api_responder``
 #: may run several times in one test, and taking the "original" from the
@@ -573,14 +573,14 @@ class TestTheGitBackendDistinguishesAnUnreachableHost:
             """
             raise GitUnreachableError("connection lost")
 
-        monkeypatch.setattr(git_validator, "_get_remote_branches", nothing)
-        monkeypatch.setattr(git_validator, "_get_remote_tags", nothing)
+        monkeypatch.setattr(action_call_git, "_get_remote_branches", nothing)
+        monkeypatch.setattr(action_call_git, "_get_remote_tags", nothing)
         monkeypatch.setattr(
-            git_validator, "_validate_commit_shas_git", unreachable
+            action_call_git, "_validate_commit_shas_git", unreachable
         )
 
         with pytest.raises(GitUnreachableError):
-            git_validator._validate_unknown_refs_git(
+            action_call_git._validate_unknown_refs_git(
                 "https://github.com/actions/checkout.git",
                 ["mystery"],
                 GitConfig(),
@@ -690,11 +690,11 @@ class TestARetryDoesNotOverwriteAnAnswer:
             return dict.fromkeys(refs, ValidationResult.INVALID_REFERENCE)
 
         monkeypatch.setattr(
-            git_validator, "_validate_commit_shas_with_peels", shas
+            action_call_git, "_validate_commit_shas_with_peels", shas
         )
-        monkeypatch.setattr(git_validator, "_validate_branches_git", branches)
+        monkeypatch.setattr(action_call_git, "_validate_branches_git", branches)
 
-        results, _ = git_validator._validate_repository_references(
+        results, _ = action_call_git._validate_repository_references(
             "actions/checkout", [sha, "main"], GitConfig()
         )
 
@@ -753,11 +753,11 @@ class TestARetryDoesNotOverwriteAnAnswer:
             return dict.fromkeys(refs, ValidationResult.VALID)
 
         monkeypatch.setattr(
-            git_validator, "_validate_commit_shas_with_peels", shas
+            action_call_git, "_validate_commit_shas_with_peels", shas
         )
-        monkeypatch.setattr(git_validator, "_validate_branches_git", branches)
+        monkeypatch.setattr(action_call_git, "_validate_branches_git", branches)
 
-        results, _ = git_validator._validate_repository_references(
+        results, _ = action_call_git._validate_repository_references(
             "actions/checkout", [sha, "main"], GitConfig()
         )
 
@@ -820,11 +820,11 @@ class TestARetryDoesNotOverwriteAnAnswer:
             return dict.fromkeys(refs, ValidationResult.VALID)
 
         monkeypatch.setattr(
-            git_validator, "_validate_commit_shas_with_peels", shas
+            action_call_git, "_validate_commit_shas_with_peels", shas
         )
-        monkeypatch.setattr(git_validator, "_validate_branches_git", branches)
+        monkeypatch.setattr(action_call_git, "_validate_branches_git", branches)
 
-        results, peels = git_validator._validate_repository_references(
+        results, peels = action_call_git._validate_repository_references(
             "actions/checkout", [sha, "main"], GitConfig()
         )
 
@@ -1045,7 +1045,7 @@ class TestRemoteGitCommandsPinTheLocale:
         and a helper added later would be reachable by neither. Reading
         the modules instead makes the claim hold by construction.
         """
-        for module in (git_refs, git_subpath, git_validator):
+        for module in (git_refs, git_subpath, action_call_git):
             source = Path(str(module.__file__)).read_text(encoding="utf-8")
             for node in ast.walk(ast.parse(source)):
                 if not isinstance(node, ast.Call) or not _is_subprocess_run(
@@ -1371,7 +1371,7 @@ jobs:
             )
 
         with patch(
-            "gha_workflow_linter.validator.ActionCallValidator.validate_action_calls"
+            "gha_workflow_linter.action_call_check.ActionCallValidator.validate_action_calls"
         ) as mock_validate:
             mock_validate.side_effect = capture_validation_errors
 

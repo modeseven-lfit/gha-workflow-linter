@@ -171,7 +171,11 @@ def monkey_patch_async_functions() -> AsyncTracer:
     tracer: AsyncTracer = AsyncTracer()
 
     # Import modules to patch
-    from gha_workflow_linter import auto_fix, github_api, validator
+    from gha_workflow_linter import (
+        action_call_check,
+        action_call_fix,
+        github_api,
+    )
 
     # Patch GitHubGraphQLClient methods
     for attr_name in dir(github_api.GitHubGraphQLClient):
@@ -193,29 +197,29 @@ def monkey_patch_async_functions() -> AsyncTracer:
             tracer.wrap_async_function(original),
         )
 
-    # Patch validator methods
-    for attr_name in dir(validator.ActionCallValidator):
+    # Patch action_call_check methods
+    for attr_name in dir(action_call_check.ActionCallValidator):
         if attr_name.startswith("_") or attr_name.startswith("validate"):
-            attr = getattr(validator.ActionCallValidator, attr_name)
+            attr = getattr(action_call_check.ActionCallValidator, attr_name)
             if asyncio.iscoroutinefunction(attr):
                 setattr(
-                    validator.ActionCallValidator,
+                    action_call_check.ActionCallValidator,
                     attr_name,
                     tracer.wrap_async_function(attr),
                 )
 
-    # Patch AutoFixer methods if auto_fix module exists
+    # Patch AutoFixer methods if action_call_fix module exists
     try:
-        for attr_name in dir(auto_fix.AutoFixer):
-            attr = getattr(auto_fix.AutoFixer, attr_name)
+        for attr_name in dir(action_call_fix.AutoFixer):
+            attr = getattr(action_call_fix.AutoFixer, attr_name)
             if asyncio.iscoroutinefunction(attr):
                 setattr(
-                    auto_fix.AutoFixer,
+                    action_call_fix.AutoFixer,
                     attr_name,
                     tracer.wrap_async_function(attr),
                 )
     except AttributeError:
-        # Expected - auto_fix module may not have all attributes during inspection
+        # Expected - action_call_fix module may not have all attributes during inspection
         pass
 
     return tracer

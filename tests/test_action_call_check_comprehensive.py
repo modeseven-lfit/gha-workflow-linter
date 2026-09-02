@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from rich.progress import Progress, TaskID
 
+from gha_workflow_linter.action_call_check import ActionCallValidator
 from gha_workflow_linter.exceptions import (
     AuthenticationError,
     NetworkError,
@@ -30,7 +31,6 @@ from gha_workflow_linter.models import (
     ValidationMethod,
     ValidationResult,
 )
-from gha_workflow_linter.validator import ActionCallValidator
 
 
 def _api_config(**overrides: Any) -> Config:
@@ -78,13 +78,13 @@ class TestActionCallValidator:
         """Test async context manager functionality."""
         with (
             patch(
-                "gha_workflow_linter.validator.GitHubGraphQLClient"
+                "gha_workflow_linter.action_call_check.GitHubGraphQLClient"
             ) as mock_client_class,
             patch(
-                "gha_workflow_linter.validator.ValidationCache"
+                "gha_workflow_linter.action_call_check.ValidationCache"
             ) as mock_cache_class,
             patch(
-                "gha_workflow_linter.validator.get_github_token_with_fallback"
+                "gha_workflow_linter.action_call_check.get_github_token_with_fallback"
             ) as mock_token_func,
         ):
             mock_client = AsyncMock()
@@ -114,8 +114,8 @@ class TestActionCallValidator:
         workflow_calls: dict[Path, dict[int, ActionCall]] = {}
 
         with (
-            patch("gha_workflow_linter.validator.GitHubGraphQLClient"),
-            patch("gha_workflow_linter.validator.ValidationCache"),
+            patch("gha_workflow_linter.action_call_check.GitHubGraphQLClient"),
+            patch("gha_workflow_linter.action_call_check.ValidationCache"),
         ):
             async with self.validator:
                 result = await self.validator.validate_action_calls_async(
@@ -375,7 +375,7 @@ class TestActionCallValidator:
 
         with (
             patch(
-                "gha_workflow_linter.validator.get_github_token_with_fallback"
+                "gha_workflow_linter.action_call_check.get_github_token_with_fallback"
             ) as mock_token,
             patch.object(
                 ActionCallValidator, "_validate_with_github_api"
@@ -417,7 +417,7 @@ class TestActionCallValidator:
 
         with (
             patch(
-                "gha_workflow_linter.validator.get_github_token_with_fallback"
+                "gha_workflow_linter.action_call_check.get_github_token_with_fallback"
             ) as mock_token,
             patch.object(
                 ActionCallValidator, "_validate_with_github_api"
@@ -461,7 +461,7 @@ class TestActionCallValidator:
 
         with (
             patch(
-                "gha_workflow_linter.validator.get_github_token_with_fallback"
+                "gha_workflow_linter.action_call_check.get_github_token_with_fallback"
             ) as mock_token,
             patch.object(
                 ActionCallValidator, "_validate_with_github_api"
@@ -508,7 +508,7 @@ class TestActionCallValidator:
 
         with (
             patch(
-                "gha_workflow_linter.validator.get_github_token_with_fallback"
+                "gha_workflow_linter.action_call_check.get_github_token_with_fallback"
             ) as mock_token,
             patch.object(
                 ActionCallValidator, "_validate_with_github_api"

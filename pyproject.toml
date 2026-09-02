@@ -122,8 +122,9 @@ ignore = [
 #     flags, never positionally from Python.  A keyword-only signature
 #     is not an option: it is how the framework works.  Note B008 is
 #     already ignored directly above for the same reason.
-#   - the remaining sites (auto_fix.py, cache.py, validator.py) are
-#     internal helpers whose breadth PLR0913 already tolerates.
+#   - the remaining sites (action_call_fix.py, cache.py,
+#     action_call_check.py) are internal helpers whose breadth PLR0913
+#     already tolerates.
 #
 # PLR0917 counts only those arguments that may be passed positionally,
 # so it is the narrower of the two; ignoring PLR0913 while enforcing
@@ -239,7 +240,7 @@ disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
 module = [
-    "tests.test_validator_comprehensive",
+    "tests.test_action_call_check_comprehensive",
     "tests.test_github_api_comprehensive",
     "tests.test_config_comprehensive",
     "tests.test_cli_comprehensive"

@@ -28,9 +28,9 @@ from unittest import mock
 
 import pytest
 
+from gha_workflow_linter.action_call_fix import AutoFixer
 from gha_workflow_linter.allow_list_check import AllowListChecker
 from gha_workflow_linter.allow_list_resolver import AllowListResolver
-from gha_workflow_linter.auto_fix import AutoFixer
 from gha_workflow_linter.cache import ValidationCache
 from gha_workflow_linter.latest_release import LatestRelease
 from gha_workflow_linter.models import (

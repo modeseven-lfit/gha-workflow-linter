@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+from gha_workflow_linter.action_call_check import ActionCallValidator
 from gha_workflow_linter.models import (
     ActionCall,
     ActionCallType,
@@ -22,7 +23,6 @@ from gha_workflow_linter.models import (
     ReferenceType,
     ValidationResult,
 )
-from gha_workflow_linter.validator import ActionCallValidator
 
 
 @pytest.fixture
@@ -110,10 +110,10 @@ class TestValidatorDeduplication:
         """Test that deduplication reduces the number API calls made."""
         with (
             patch(
-                "gha_workflow_linter.validator.GitHubGraphQLClient"
+                "gha_workflow_linter.action_call_check.GitHubGraphQLClient"
             ) as mock_client_class,
             patch(
-                "gha_workflow_linter.validator.get_github_token_with_fallback"
+                "gha_workflow_linter.action_call_check.get_github_token_with_fallback"
             ) as mock_token_func,
         ):
             # Create mock client with properly configured async methods
@@ -180,10 +180,10 @@ class TestValidatorDeduplication:
         """Test that validation errors are mapped back to all occurrences."""
         with (
             patch(
-                "gha_workflow_linter.validator.GitHubGraphQLClient"
+                "gha_workflow_linter.action_call_check.GitHubGraphQLClient"
             ) as mock_client_class,
             patch(
-                "gha_workflow_linter.validator.get_github_token_with_fallback"
+                "gha_workflow_linter.action_call_check.get_github_token_with_fallback"
             ) as mock_token_func,
         ):
             mock_github_client = AsyncMock()
@@ -287,10 +287,10 @@ class TestValidatorDeduplication:
         """Test that validation statistics correctly account for deduplication."""
         with (
             patch(
-                "gha_workflow_linter.validator.GitHubGraphQLClient"
+                "gha_workflow_linter.action_call_check.GitHubGraphQLClient"
             ) as mock_client_class,
             patch(
-                "gha_workflow_linter.validator.get_github_token_with_fallback"
+                "gha_workflow_linter.action_call_check.get_github_token_with_fallback"
             ) as mock_token_func,
         ):
             mock_github_client = AsyncMock()
@@ -404,10 +404,10 @@ class TestValidatorDeduplication:
 
         with (
             patch(
-                "gha_workflow_linter.validator.GitHubGraphQLClient"
+                "gha_workflow_linter.action_call_check.GitHubGraphQLClient"
             ) as mock_client_class,
             patch(
-                "gha_workflow_linter.validator.get_github_token_with_fallback"
+                "gha_workflow_linter.action_call_check.get_github_token_with_fallback"
             ) as mock_token_func,
         ):
             mock_github_client = AsyncMock()
@@ -495,10 +495,10 @@ class TestValidatorDeduplication:
 
         with (
             patch(
-                "gha_workflow_linter.validator.GitHubGraphQLClient"
+                "gha_workflow_linter.action_call_check.GitHubGraphQLClient"
             ) as mock_client_class,
             patch(
-                "gha_workflow_linter.validator.get_github_token_with_fallback"
+                "gha_workflow_linter.action_call_check.get_github_token_with_fallback"
             ) as mock_token_func,
         ):
             mock_client_class.return_value = mock_github_client

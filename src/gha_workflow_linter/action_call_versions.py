@@ -8,7 +8,7 @@ auto-fixer that discovers the *latest* eligible version for an action
 reference: batched GraphQL and REST/Git version lookups, session/disk
 caching of results, and cooldown-window enforcement.
 
-It builds on :class:`_ReferenceResolutionMixin` (from :mod:`auto_fix_resolution`)
+It builds on :class:`_ReferenceResolutionMixin` (from :mod:`action_call_resolver`)
 for the lower-level reference-to-SHA resolution it depends on, and is combined
 into ``AutoFixer`` via inheritance. Splitting version discovery from the
 reference-resolution primitives keeps each module focused and reviewable.
@@ -21,11 +21,11 @@ import re
 import time
 from typing import TYPE_CHECKING, Any
 
-from .auto_fix_resolution import _ReferenceResolutionMixin
+from .action_call_git import _get_remote_tags
+from .action_call_resolver import _ReferenceResolutionMixin
+from .action_call_scanner import ActionCallPatterns
 from .exceptions import GitError
-from .git_validator import _get_remote_tags
 from .models import ValidationMethod
-from .patterns import ActionCallPatterns
 from .utils import comment_text
 from .utils import version_or_none as _version_or_none
 from .version_utils import (

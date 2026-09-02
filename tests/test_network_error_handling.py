@@ -16,6 +16,7 @@ from unittest.mock import Mock, patch
 import httpx
 import pytest
 
+from gha_workflow_linter.action_call_check import ActionCallValidator
 from gha_workflow_linter.exceptions import (
     AuthenticationError,
     GitHubAPIError,
@@ -31,7 +32,6 @@ from gha_workflow_linter.models import (
     GitHubAPIConfig,
     ReferenceType,
 )
-from gha_workflow_linter.validator import ActionCallValidator
 
 
 class TestNetworkErrorHandling:

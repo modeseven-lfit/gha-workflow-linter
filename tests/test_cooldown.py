@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 
 from gha_workflow_linter import cli
-from gha_workflow_linter.auto_fix import (
+from gha_workflow_linter.action_call_fix import (
     AutoFixer,
 )
 from gha_workflow_linter.cache import ValidationCache

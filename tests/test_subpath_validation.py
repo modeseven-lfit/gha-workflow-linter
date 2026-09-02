@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+from gha_workflow_linter.action_call_check import ActionCallValidator
 from gha_workflow_linter.github_api import GitHubGraphQLClient
 from gha_workflow_linter.models import (
     ActionCall,
@@ -29,7 +30,6 @@ from gha_workflow_linter.models import (
     ValidationMethod,
     ValidationResult,
 )
-from gha_workflow_linter.validator import ActionCallValidator
 
 # ---------------------------------------------------------------------------
 # GitHub GraphQL API path

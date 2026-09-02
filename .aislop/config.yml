@@ -8,16 +8,17 @@
 # source tree into focused helper functions rather than suppressed.
 #
 # The original oversized auto-fix module was split into three cohesive
-# modules by responsibility: auto_fix.py (orchestration and file rewriting),
-# auto_fix_resolution.py (reference-to-SHA resolution primitives), and
-# auto_fix_versions.py (latest-version discovery and cooldown handling),
-# combined via mixin inheritance.
+# modules by responsibility: action_call_fix.py (orchestration and file
+# rewriting), action_call_resolver.py (reference-to-SHA resolution
+# primitives), and action_call_versions.py (latest-version discovery and
+# cooldown handling), combined via mixin inheritance.
 #
 # maxFileLoc is raised from the 400 default to 1200: the established core
-# modules (github_api, git_validator, validator, cache) sit around 1000
-# lines and splitting cohesive single-class modules further would fragment
-# them without improving reviewability. 1200 still flags any module that
-# grows egregiously large. cli.py exceeds this and carries an in-file
+# modules (github_api, action_call_git, action_call_check, cache) sit
+# around 1000 lines and splitting cohesive single-class modules further
+# would fragment them without improving reviewability. 1200 still flags
+# any module that grows egregiously large. cli.py exceeds this and
+# carries an in-file
 # `aislop-ignore-file` suppression: its symbols are referenced by name in
 # ~165 test mock-patch sites, so splitting it would break the test suite
 # for no reviewability gain.

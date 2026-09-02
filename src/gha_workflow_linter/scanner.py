@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 import yaml
 
-from .patterns import ActionCallPatterns
+from .action_call_scanner import ActionCallPatterns
 
 
 class _ComposeResult(NamedTuple):

@@ -416,7 +416,7 @@ class AllowListResolver:
         ``git ls-remote`` advertises tags but no release metadata, so this
         path can supply no publication dates. Rather than guess at a
         release's age it declines to answer while a cooldown is active,
-        matching ``auto_fix_versions._get_latest_version_via_git``.
+        matching ``action_call_versions._get_latest_version_via_git``.
 
         Args:
             repo_key: Host repository key.

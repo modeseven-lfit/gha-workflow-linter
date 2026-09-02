@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from .patterns import ActionCallPatterns
+from .action_call_scanner import ActionCallPatterns
 
 if TYPE_CHECKING:
     from .models import ActionCall

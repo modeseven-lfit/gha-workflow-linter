@@ -13,7 +13,7 @@ the ref, correct the version comment, and change nothing else.
 The rewrite is a **surgical substring replacement** on the pin's own
 source line, never a reconstruction of it from parsed fields. That
 distinction is the whole design (§10.1), and it is not fussiness:
-:meth:`~gha_workflow_linter.auto_fix.AutoFixer._build_fixed_line`
+:meth:`~gha_workflow_linter.action_call_fix.AutoFixer._build_fixed_line`
 rebuilds, and so normalises comment spacing to the ``two_space_comments``
 preference as a side effect of an unrelated repair. These edits become
 review-ready pull requests, where a reformatted neighbouring comment is

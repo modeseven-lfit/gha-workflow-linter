@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from gha_workflow_linter.action_call_check import ActionCallValidator
 from gha_workflow_linter.cache import ValidationCache
 from gha_workflow_linter.models import (
     ActionCall,
@@ -31,7 +32,6 @@ from gha_workflow_linter.models import (
     ValidationMethod,
     ValidationResult,
 )
-from gha_workflow_linter.validator import ActionCallValidator
 
 if TYPE_CHECKING:
     from pathlib import Path

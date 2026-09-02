@@ -31,7 +31,7 @@ tags, so ``refs/tags/v0.12.2`` names a *tag object*
 the commit. Comparing a pin against the tag-object SHA would report every
 correctly-pinned reference as stale, which is why the tag-ref selection
 here nests ``target { oid ... on Tag { target { oid } } }`` -- the same
-shape :meth:`~gha_workflow_linter.auto_fix_resolution._ReferenceResolutionMixin._extract_sha_from_ref_data`
+shape :meth:`~gha_workflow_linter.action_call_resolver._ReferenceResolutionMixin._extract_sha_from_ref_data`
 already relies on.
 
 Note that the GraphQL ``Tag`` type exposes ``name``, not ``tagName``;
@@ -39,7 +39,7 @@ Note that the GraphQL ``Tag`` type exposes ``name``, not ``tagName``;
 the whole query fail at run time.
 
 This module deliberately depends on nothing inside the package beyond
-:mod:`patterns` and :mod:`version_utils`, so it can sit underneath both
+:mod:`action_call_scanner` and :mod:`version_utils`, so it can sit underneath both
 :mod:`github_api` and :mod:`allow_list_resolver` without a cycle.
 """
 
@@ -50,7 +50,7 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
-from .patterns import ActionCallPatterns
+from .action_call_scanner import ActionCallPatterns
 from .version_utils import (
     _get_version_specificity,
     _parse_iso_datetime,
@@ -115,7 +115,7 @@ class LatestRelease:
         """Return the release tag a commit of this repository belongs to.
 
         Every tag this can return passed
-        :attr:`~gha_workflow_linter.patterns.ActionCallPatterns.VERSION_TAG_PATTERN`,
+        :attr:`~gha_workflow_linter.action_call_scanner.ActionCallPatterns.VERSION_TAG_PATTERN`,
         so it is safe to hand to
         :func:`~gha_workflow_linter.version_utils._parse_version`.
 
@@ -293,7 +293,7 @@ def _release_candidates(
     release whose tag has no ref (a draft, typically, since GitHub only
     creates the tag on publication) is dropped. A repository with no
     usable releases falls back to its bare tags, mirroring the preference
-    order in ``auto_fix_versions``.
+    order in ``action_call_versions``.
 
     Args:
         repo_data: The per-repository GraphQL response fragment.

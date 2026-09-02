@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 import pytest
 
-from gha_workflow_linter import auto_fix, github_api, github_auth
+from gha_workflow_linter import action_call_fix, github_api, github_auth
 from gha_workflow_linter.models import (
     Config,
     GitConfig,
@@ -195,7 +195,7 @@ SHA_ANSWERING_EVERY_LOOKUP = "a" * 40
 def mock_git_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     """Answer git commands locally, so validation needs no network.
 
-    The reply honours the caller's text mode. ``git_validator`` runs
+    The reply honours the caller's text mode. ``action_call_git`` runs
     ``subprocess.run(..., text=True)`` and hands the output to a parser
     annotated ``str``, so returning bytes made it raise ``TypeError`` --
     which validation catches and reports as an invalid reference. Tests
@@ -625,7 +625,7 @@ def no_repository_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     monkeypatch.setattr(
-        auto_fix.AutoFixer, "_detect_repository_redirect", no_redirect
+        action_call_fix.AutoFixer, "_detect_repository_redirect", no_redirect
     )
 
 

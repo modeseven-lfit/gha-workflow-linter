@@ -239,7 +239,7 @@ Relevant facts established by auditing the codebase:
 - **Config** is `models.Config` (pydantic v2), loaded from YAML by
   `config.ConfigManager`. CLI overrides use a tri-state (`None` = not
   specified) in `models.CLIOptions`, merged by `_apply_cli_overrides`.
-- **Scanning** is regex-per-line (`patterns.ActionCallPatterns`) over
+- **Scanning** is regex-per-line (`action_call_scanner.ActionCallPatterns`) over
   files found by `scanner.WorkflowScanner`. `scanner._is_valid_yaml`
   already parses each file with `yaml.safe_load` and **throws the result
   away** — a free hook for structural detection.
@@ -247,7 +247,7 @@ Relevant facts established by auditing the codebase:
   issue kind; every non-`VALID` result is an error.
 - **No tag → commit SHA resolution exists** in either backend.
   `github_api.py` only asks "does this ref exist?" and discards the OID.
-  `git_validator._get_remote_tags` runs `git ls-remote --tags`, already
+  `action_call_git._get_remote_tags` runs `git ls-remote --tags`, already
   handles the `^{}` peel suffix, and then **discards the SHA column**.
 - **`cache.ValidationCache` already has `get_latest_version` /
   `put_latest_version`** storing `(latest_tag, latest_sha)` per
@@ -411,7 +411,7 @@ resolve the **latest release** and peel its annotated tag to a commit:
 latest release tag  →  refs/tags/<tag>  →  peel to commit  →  target SHA
 ```
 
-Preference order, mirroring the existing `auto_fix_versions` logic:
+Preference order, mirroring the existing `action_call_versions` logic:
 
 1. `latestRelease` (excluding drafts; excluding prereleases unless
    `allow_prerelease`), when its tag matches `VERSION_TAG_PATTERN`.
@@ -440,10 +440,10 @@ The query selects `latestRelease { tagName, publishedAt }` and
 direction: DESC})` with
 `target { oid ... on Tag { target { oid } } }`, so annotated tags peel in
 a single round trip. `_extract_sha_from_ref_data` in
-`auto_fix_resolution.py` already implements exactly this peel and is
+`action_call_resolver.py` already implements exactly this peel and is
 reused verbatim.
 
-**Git** (`git_validator.py`) — add:
+**Git** (`action_call_git.py`) — add:
 
 ```python
 def _get_remote_tag_shas(url: str, config: GitConfig) -> dict[str, str]:
@@ -716,16 +716,16 @@ newer", and several distinct defects share one uninformative label.
 
 <!-- markdownlint-disable MD013 -->
 
-| Situation                                         | Today                                         | Problem                                                                                 |
-| ------------------------------------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------- |
-| Repository missing                                | `INVALID_REPOSITORY`                          | Fine                                                                                    |
-| Branch or tag does not exist                      | `INVALID_REFERENCE`                           | Fine                                                                                    |
-| **SHA does not resolve to a commit**              | `INVALID_REFERENCE`                           | Conflated with the above; message says "Invalid branch, tag, or commit SHA"             |
-| **SHA is an annotated tag object, not a commit**  | `INVALID_REFERENCE` (API) / **`VALID` (git)** | Backends disagree; see §8.2                                                             |
-| **Comment version disagrees with the pinned SHA** | *no result kind*                              | Silently repaired by `auto_fix` to the comment's version; never surfaced, never counted |
-| Not pinned to a SHA                               | `NOT_PINNED_TO_SHA`                           | Fine                                                                                    |
-| **Valid, pinned, but a newer release exists**     | *no result kind*                              | Reported out-of-band via `stale_actions_summary`; invisible to exit codes               |
-| Network/API failure                               | `ValidationAbortedError`                      | Fine — correctly aborts rather than mass-failing                                        |
+| Situation                                         | Today                                         | Problem                                                                                        |
+| ------------------------------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Repository missing                                | `INVALID_REPOSITORY`                          | Fine                                                                                           |
+| Branch or tag does not exist                      | `INVALID_REFERENCE`                           | Fine                                                                                           |
+| **SHA does not resolve to a commit**              | `INVALID_REFERENCE`                           | Conflated with the above; message says "Invalid branch, tag, or commit SHA"                    |
+| **SHA is an annotated tag object, not a commit**  | `INVALID_REFERENCE` (API) / **`VALID` (git)** | Backends disagree; see §8.2                                                                    |
+| **Comment version disagrees with the pinned SHA** | *no result kind*                              | Silently repaired by `action_call_fix` to the comment's version; never surfaced, never counted |
+| Not pinned to a SHA                               | `NOT_PINNED_TO_SHA`                           | Fine                                                                                           |
+| **Valid, pinned, but a newer release exists**     | *no result kind*                              | Reported out-of-band via `stale_actions_summary`; invisible to exit codes                      |
+| Network/API failure                               | `ValidationAbortedError`                      | Fine — correctly aborts rather than mass-failing                                               |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -771,7 +771,7 @@ OUTDATED_ACTION      # valid and correctly pinned, but a newer release exists
 
 `SHA_COMMENT_MISMATCH` and `OUTDATED_ACTION` are **deliberately not added
 until something emits them**. The condition behind each is already
-detected (`auto_fix` repairs comment mismatches; outdated actions travel
+detected (`action_call_fix` repairs comment mismatches; outdated actions travel
 via `stale_actions_summary`), but promoting them to first-class results
 means routing them through the validator, which belongs with the work
 that consumes them. Adding the enum members early would leave dead
@@ -1266,23 +1266,23 @@ without duplicating logic.
 
 ## 12. Module layout
 
-New modules, flat, following the existing `auto_fix*` prefix-grouping
-convention:
+New modules, flat, following the per-check `<check>_*` prefix-grouping
+convention (`action_call_*`, `allow_list_*`):
 
 <!-- markdownlint-disable MD013 -->
 
-| Module                   | Responsibility                                                                                                                                                                                   | Depends on                                              |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
-| `allow_list_spec.py`     | Pure parser/resolver for the config grammar. Port of `resolve_config_source.py` (parse/split/resolve only — no fetching, no sanitising). Also renders a spec back to source form.                | stdlib only                                             |
-| `directives.py`          | Suppression directive grammar (§7.4): preceding-line and inline forms, optional reason text, and which finding kinds each directive may suppress. Deliberately generic, not allow-list specific. | stdlib only                                             |
-| `allow_list_scanner.py`  | YAML-node-tree walk producing `AllowListPin` records with line/column anchors, plus the syntax-anchored recogniser predicate (no consumer registry).                                             | `allow_list_spec`, `yaml`, `scanner`                    |
-| `allow_list_resolver.py` | Latest-release → peeled commit SHA per host repo, across both backends, with caching and cooldown.                                                                                               | `github_api`, `git_validator`, `cache`, `version_utils` |
-| `allow_list_check.py`    | Orchestrator: pins + resolution + suppression → `AllowListFinding` list; severity assignment; summary construction.                                                                              | the four above                                          |
-| `allow_list_fix.py`      | Surgical line rewriting for fixable findings.                                                                                                                                                    | `file_edit`, `allow_list_spec`                          |
-| `allow_list_report.py`   | Rich text and JSON rendering.                                                                                                                                                                    | `console`, `models`                                     |
-| `file_edit.py`           | Shared atomic line-replacement writer.                                                                                                                                                           | stdlib                                                  |
-| `exit_codes.py`          | Centralised exit-code constants and the defect/currency decision (§8).                                                                                                                           | stdlib                                                  |
-| `multi_repo.py`          | Repository discovery and per-repo run aggregation.                                                                                                                                               | `paths`                                                 |
+| Module                   | Responsibility                                                                                                                                                                                   | Depends on                                                |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------- |
+| `allow_list_spec.py`     | Pure parser/resolver for the config grammar. Port of `resolve_config_source.py` (parse/split/resolve only — no fetching, no sanitising). Also renders a spec back to source form.                | stdlib only                                               |
+| `directives.py`          | Suppression directive grammar (§7.4): preceding-line and inline forms, optional reason text, and which finding kinds each directive may suppress. Deliberately generic, not allow-list specific. | stdlib only                                               |
+| `allow_list_scanner.py`  | YAML-node-tree walk producing `AllowListPin` records with line/column anchors, plus the syntax-anchored recogniser predicate (no consumer registry).                                             | `allow_list_spec`, `yaml`, `scanner`                      |
+| `allow_list_resolver.py` | Latest-release → peeled commit SHA per host repo, across both backends, with caching and cooldown.                                                                                               | `github_api`, `action_call_git`, `cache`, `version_utils` |
+| `allow_list_check.py`    | Orchestrator: pins + resolution + suppression → `AllowListFinding` list; severity assignment; summary construction.                                                                              | the four above                                            |
+| `allow_list_fix.py`      | Surgical line rewriting for fixable findings.                                                                                                                                                    | `file_edit`, `allow_list_spec`                            |
+| `allow_list_report.py`   | Rich text and JSON rendering.                                                                                                                                                                    | `console`, `models`                                       |
+| `file_edit.py`           | Shared atomic line-replacement writer.                                                                                                                                                           | stdlib                                                    |
+| `exit_codes.py`          | Centralised exit-code constants and the defect/currency decision (§8).                                                                                                                           | stdlib                                                    |
+| `multi_repo.py`          | Repository discovery and per-repo run aggregation.                                                                                                                                               | `paths`                                                   |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -1300,13 +1300,13 @@ Modified modules:
 - `config.py` — load/save the new keys; alias handling.
 - `github_api.py` — `resolve_latest_releases_batch`; distinguish tag
   objects from commits so `ANNOTATED_TAG_SHA` can be reported.
-- `git_validator.py` — `_get_remote_tag_shas`; **fix the annotated-tag
+- `action_call_git.py` — `_get_remote_tag_shas`; **fix the annotated-tag
   false pass in `_validate_commit_shas_git` (§8.2)**.
-- `validator.py` — classify results into `DEFECT` / `CURRENCY`; emit the
+- `action_call_check.py` — classify results into `DEFECT` / `CURRENCY`; emit the
   three new issue kinds.
 - `scanner.py` — expose the composed YAML node tree (currently discarded
   in `_is_valid_yaml`) so the file is parsed once, not twice.
-- `auto_fix.py` — migrate `_apply_fixes_to_file` onto `file_edit`.
+- `action_call_fix.py` — migrate `_apply_fixes_to_file` onto `file_edit`.
 - `action.yaml`, `README.md`, `.pre-commit-hooks.yaml` (unchanged args,
   but document that the hook never fails on allow-list findings).
 
@@ -1325,9 +1325,9 @@ graph TD
     FIX --> SPEC
     FIX --> EDIT[file_edit.py]
     RES --> API[github_api.py]
-    RES --> GIT[git_validator.py]
+    RES --> GIT[action_call_git.py]
     RES --> CACHE[cache.py]
-    AF[auto_fix.py] --> EDIT
+    AF[action_call_fix.py] --> EDIT
 ```
 
 `allow_list_spec.py` has no project dependencies at all, which keeps the
@@ -1342,9 +1342,9 @@ which removes an existing duplication rather than adding one:
    writer used by both fixers (§10.2).
 2. **`exit_codes`** — replaces scattered `typer.Exit(1)` literals with
    named constants; makes the documented contract enforceable in tests.
-3. **`git_validator._get_remote_tag_shas`** — one tag→commit map used by
+3. **`action_call_git._get_remote_tag_shas`** — one tag→commit map used by
    the allow-list resolver *and* available to
-   `auto_fix_versions._get_latest_version_via_git`, which currently
+   `action_call_versions._get_latest_version_via_git`, which currently
    re-derives the same information through a separate code path.
 4. **`version_utils`** — reused unchanged for version parsing,
    specificity ranking and cooldown selection. No new version logic.
@@ -1589,7 +1589,7 @@ User-visible only through corrected exit codes and better messages.
   exit-code-invariance regression test across text/quiet/JSON.
 - `Severity` and `Category` enums; classify existing results into
   `DEFECT` / `CURRENCY`.
-- `git_validator._get_remote_tag_shas`; **fix the annotated-tag false
+- `action_call_git._get_remote_tag_shas`; **fix the annotated-tag false
   pass (§8.2)** and add the `ANNOTATED_TAG_SHA` kind with its
   peeled-commit remediation message.
 - `SHA_COMMENT_MISMATCH` and `OUTDATED_ACTION` as first-class kinds.

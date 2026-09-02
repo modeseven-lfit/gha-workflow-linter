@@ -15,6 +15,7 @@ import subprocess
 
 import pytest
 
+from gha_workflow_linter.action_call_git import _validate_commit_shas_git
 from gha_workflow_linter.exceptions import GitError, GitUnreachableError
 from gha_workflow_linter.git_refs import (
     AnnotatedTagPeel,
@@ -24,7 +25,6 @@ from gha_workflow_linter.git_refs import (
     get_remote_tag_object_shas,
     get_remote_tag_shas,
 )
-from gha_workflow_linter.git_validator import _validate_commit_shas_git
 from gha_workflow_linter.models import GitConfig, ValidationResult
 
 URL = "https://github.com/lfreleng-actions/.github.git"

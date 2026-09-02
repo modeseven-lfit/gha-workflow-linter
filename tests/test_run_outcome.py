@@ -31,7 +31,8 @@ from unittest import mock
 import pytest
 
 from gha_workflow_linter import cli
-from gha_workflow_linter.auto_fix import AutoFixer
+from gha_workflow_linter.action_call_check import ActionCallValidator
+from gha_workflow_linter.action_call_fix import AutoFixer
 from gha_workflow_linter.cache import ValidationCache
 from gha_workflow_linter.cli import (
     _AutoFixOutcome,
@@ -52,7 +53,6 @@ from gha_workflow_linter.models import (
     ValidationResult,
 )
 from gha_workflow_linter.scanner import WorkflowScanner
-from gha_workflow_linter.validator import ActionCallValidator
 from tests.conftest import strip_ansi
 
 if TYPE_CHECKING:
@@ -62,7 +62,7 @@ if TYPE_CHECKING:
 WORKFLOW = Path(".github/workflows/build.yaml")
 
 #: The auto-fixer's own logger, whose level gates its live display.
-AUTO_FIX_LOGGER = "gha_workflow_linter.auto_fix"
+AUTO_FIX_LOGGER = "gha_workflow_linter.action_call_fix"
 
 
 def make_validation_error(
@@ -544,7 +544,7 @@ class TestAutoFixerSilence:
     """The auto-fixer's live display is a second route to standard output.
 
     ``CLIOptions.quiet`` silences the scanner and the reporting stages,
-    but :class:`~gha_workflow_linter.auto_fix.AutoFixer` decided whether
+    but :class:`~gha_workflow_linter.action_call_fix.AutoFixer` decided whether
     to open its Rich ``Live`` display from the logger level alone. The
     CLI sets that level, so the CLI was safe; a caller of ``run_linter``
     never does, and would have found progress output inside the
