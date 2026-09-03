@@ -18,6 +18,7 @@ from pydantic import (
     field_validator,
 )
 
+from .check_modes import CheckMode
 from .system_utils import get_default_workers
 
 
@@ -531,6 +532,20 @@ class AllowListConfig(BaseModel):
         default=True,
         description="Detect harden-runner allow-list pins",
     )
+    mode: CheckMode = Field(
+        default=CheckMode.REPORT,
+        # Excluded from serialisation, so the generated template does not
+        # advertise a setting the loader ignores: _apply_check_modes
+        # derives this from 'enabled' and 'update' whenever no CLI mode
+        # is given, which would silently discard an edit made here. It
+        # becomes a real configuration key when the nested 'checks:'
+        # block lands and the booleans retire.
+        exclude=True,
+        description=(
+            "Runtime view of what this check does, derived from 'enabled' "
+            "and 'update' or set by --allow-list. Not a configuration key"
+        ),
+    )
     verify: bool = Field(
         default=False,
         description=(
@@ -633,6 +648,21 @@ class Config(BaseModel):
     )
     auto_fix: bool = Field(
         default=True, description="Automatically fix broken/invalid references"
+    )
+    action_calls_mode: CheckMode = Field(
+        default=CheckMode.FIX,
+        # Excluded from serialisation for the same reason as
+        # AllowListConfig.mode: _apply_check_modes derives this from
+        # 'auto_fix' and 'update_actions' whenever no CLI mode is given,
+        # so a value edited here would be overwritten without a word.
+        exclude=True,
+        description=(
+            "Runtime view of what the action-call check does, derived "
+            "from 'auto_fix' and 'update_actions' or set by "
+            "--action-calls. Not a configuration key. Note that no mode "
+            "decides whether findings *fail* the run: that is the "
+            "separate --verify-action-calls axis"
+        ),
     )
     update_actions: bool = Field(
         default=False,
@@ -740,6 +770,38 @@ class CLIOptions(BaseModel):
     )
     auto_fix: bool | None = Field(
         default=None, description="Automatically fix broken/invalid references"
+    )
+    action_calls_mode: CheckMode | None = Field(
+        default=None,
+        description=(
+            "Mode given to --action-calls. Authoritative when present: "
+            "the deprecated boolean flags are derived from it rather than "
+            "combined with it"
+        ),
+    )
+    auto_latest: bool | None = Field(
+        default=None,
+        description=(
+            "Raw value of the deprecated --auto-latest, kept apart from "
+            "update_actions so a notice can name the spelling actually "
+            "used rather than the one it resolved to"
+        ),
+    )
+    update_actions_legacy: bool | None = Field(
+        default=None,
+        description=(
+            "Raw value of the deprecated --update-actions, for the same "
+            "reason: update_actions holds what the two spellings resolved "
+            "to, which is not what either of them said"
+        ),
+    )
+    verify_actions_legacy: bool = Field(
+        default=False,
+        description="Whether the deprecated --verify-actions was given",
+    )
+    allow_list_mode: CheckMode | None = Field(
+        default=None,
+        description="Mode given to --allow-list, authoritative when present",
     )
     update_actions: bool | None = Field(
         default=None,
