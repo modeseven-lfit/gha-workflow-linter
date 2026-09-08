@@ -140,6 +140,11 @@ def _model_lines(
 
     dumped = model.model_dump(mode="json")
     for name, field in type(model).model_fields.items():
+        if field.exclude:
+            # Excluded from serialisation, so absent from `dumped` and
+            # not a configuration key at all. Rendering it would
+            # advertise a setting the loader ignores.
+            continue
         field_path = f"{path}.{name}" if path else name
         value = getattr(model, name)
 

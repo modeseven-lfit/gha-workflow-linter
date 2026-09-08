@@ -227,8 +227,13 @@ jobs:
 class TestAutoFixHelp:
     """Test auto-fix related help text and documentation."""
 
-    def test_help_includes_auto_fix_options(self) -> None:
-        """Test that help output includes auto-fix related options."""
+    def test_help_includes_action_call_options(self) -> None:
+        """Help advertises the mode option and the tuning flags.
+
+        The superseded spellings stay listed until removal, each
+        naming its replacement, so an existing invocation can be
+        migrated from the help text alone.
+        """
         runner = CliRunner()
 
         result = runner.invoke(app, ["lint", "--help"])
@@ -237,8 +242,8 @@ class TestAutoFixHelp:
         # believes it is writing to a terminal, which CI does.
         help_text = strip_ansi(result.stdout).lower()
 
-        # Check for auto-fix related options in help
-        # Use partial matching to handle formatting differences
+        assert "action-calls" in help_text
+        assert "verify-action-calls" in help_text
         assert "auto-fix" in help_text
         assert "update-actions" in help_text
         # The deprecated spelling stays discoverable until removal.

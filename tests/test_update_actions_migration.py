@@ -17,7 +17,7 @@ from pathlib import Path  # noqa: TC003 - used at runtime by fixtures
 import pytest
 from typer.testing import CliRunner
 
-from gha_workflow_linter.cli import _resolve_update_actions
+from gha_workflow_linter.cli import _resolve_update_actions, app
 from gha_workflow_linter.config import ConfigManager
 from gha_workflow_linter.models import Config
 from tests.conftest import strip_ansi
@@ -46,40 +46,45 @@ class TestFlagResolution:
         auto_latest: bool | None,
         expected: bool | None,
     ) -> None:
-        assert (
-            _resolve_update_actions(update_actions, auto_latest, quiet=True)
-            is expected
+        assert _resolve_update_actions(update_actions, auto_latest) is expected
+
+    def test_deprecated_flag_resolves_without_a_notice(self) -> None:
+        """Resolution is pure; _warn_deprecated_check_flags reports.
+
+        Notices used to come from here as well, which meant a caller
+        writing --auto-latest was sent to --update-actions by one and
+        onwards to --action-calls update by the next. One owner, one
+        notice, naming the spelling actually used.
+        """
+        assert _resolve_update_actions(None, True) is True
+
+    def test_the_notice_names_the_spelling_used(self, tmp_path: Path) -> None:
+        """--auto-latest points straight at its replacement.
+
+        Args:
+            tmp_path: Scratch directory to lint.
+        """
+        result = CliRunner().invoke(
+            app,
+            ["lint", str(tmp_path), "--auto-latest", "--allow-list", "off"],
         )
 
-    def test_deprecated_flag_warns(
+        text = strip_ansi(result.output)
+        assert "--auto-latest is deprecated" in text
+        assert "--action-calls update" in text
+        # The spelling that was never given must not appear as one.
+        assert "--update-actions is deprecated" not in text
+
+    def test_resolution_is_always_silent(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        _resolve_update_actions(None, True, quiet=False)
+        """Both spellings, neither reporting: notices live elsewhere.
 
-        captured = capsys.readouterr()
-        assert "deprecated" in captured.err
-        assert "--update-actions" in captured.err
-
-    def test_warning_goes_to_stderr_not_stdout(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """--format json must stay machine-readable."""
-        _resolve_update_actions(None, True, quiet=False)
-
-        captured = capsys.readouterr()
-        assert captured.out == ""
-
-    def test_canonical_flag_is_silent(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        _resolve_update_actions(True, None, quiet=False)
-
-        assert capsys.readouterr().err == ""
-
-    def test_quiet_suppresses_the_notice(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        _resolve_update_actions(None, True, quiet=True)
+        Args:
+            capsys: Captures anything this would wrongly emit.
+        """
+        _resolve_update_actions(True, None)
+        _resolve_update_actions(None, True)
 
         assert capsys.readouterr().err == ""
 

@@ -42,6 +42,26 @@ NESTED_BLOCKS: list[tuple[str, type[BaseModel]]] = [
 ]
 
 
+def _settable(model: type[BaseModel]) -> dict[str, Any]:
+    """Return the model fields that are configuration keys.
+
+    Fields marked ``exclude=True`` are runtime state derived from other
+    settings rather than things a user may set, so the generated
+    template deliberately omits them.
+
+    Args:
+        model: The model to inspect.
+
+    Returns:
+        Field definitions by name, in declaration order.
+    """
+    return {
+        name: field
+        for name, field in model.model_fields.items()
+        if not field.exclude
+    }
+
+
 @pytest.fixture
 def generated_path(tmp_path: Path) -> Path:
     """Write the default configuration template to a temporary file.
@@ -116,9 +136,25 @@ class TestGeneratedTemplateCoverage:
         self, generated_data: dict[str, Any]
     ) -> None:
         """Each Config field appears as a top-level key."""
-        missing = set(Config.model_fields) - set(generated_data)
+        missing = set(_settable(Config)) - set(generated_data)
 
         assert not missing, f"template omits Config fields: {sorted(missing)}"
+
+    def test_excluded_fields_are_omitted(
+        self, generated_data: dict[str, Any]
+    ) -> None:
+        """Runtime-only fields are not offered as settings.
+
+        A field marked ``exclude=True`` is derived from other settings,
+        so writing it into the template would advertise a key the
+        loader ignores -- an edit that appears to work and does not.
+        """
+        excluded = {
+            name for name, field in Config.model_fields.items() if field.exclude
+        }
+
+        assert excluded, "expected at least one runtime-only field"
+        assert not (excluded & set(generated_data))
 
     def test_no_unexpected_top_level_keys(
         self, generated_data: dict[str, Any]
@@ -139,14 +175,14 @@ class TestGeneratedTemplateCoverage:
         nested: Any = generated_data[block]
 
         assert isinstance(nested, dict)
-        missing = set(model.model_fields) - set(nested)
+        missing = set(_settable(model)) - set(nested)
         assert not missing, f"{block} omits: {sorted(missing)}"
 
     def test_field_order_follows_model_declaration(
         self, generated_data: dict[str, Any]
     ) -> None:
         """Keys are not alphabetised; they follow the model's order."""
-        assert list(generated_data) == list(Config.model_fields)
+        assert list(generated_data) == list(_settable(Config))
 
     def test_previously_omitted_fields_present(
         self, generated_data: dict[str, Any]
@@ -166,7 +202,7 @@ class TestGeneratedTemplateCoverage:
         self, generated_text: str
     ) -> None:
         """Comments come from the model, so they cannot drift either."""
-        for name, field in Config.model_fields.items():
+        for name, field in _settable(Config).items():
             if field.description:
                 first_word = field.description.split()[0]
                 assert f"# {first_word}" in generated_text, name

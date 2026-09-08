@@ -167,14 +167,14 @@ gha-workflow-linter lint --exclude "**/test/**" --exclude "**/docs/**"
 # Disable SHA pinning policy (allow tags/branches)
 gha-workflow-linter lint --no-require-pinned-sha
 
-# Auto-fix invalid references and pin to SHAs
-gha-workflow-linter lint --auto-fix
+# Repair invalid references and pin to SHAs
+gha-workflow-linter lint --action-calls fix
 
-# Auto-fix including actions with 'test' in comments (default skips them)
-gha-workflow-linter lint --auto-fix --fix-test-calls
+# Repair including actions with 'test' in comments (default skips them)
+gha-workflow-linter lint --action-calls fix --fix-test-calls
 
-# Auto-fix without using latest versions (keeps current version)
-gha-workflow-linter lint --auto-fix --no-update-actions
+# Report without touching the working tree
+gha-workflow-linter lint --action-calls report
 
 # Run without any authentication (limited to 60 requests/hour)
 # This happens when GitHub CLI is not installed/authenticated AND no token exists
@@ -182,23 +182,124 @@ gha-workflow-linter lint --auto-fix --no-update-actions
 gha-workflow-linter lint
 ```
 
+### Check Modes
+
+The linter runs independent checks. Each takes one option saying what it
+should do:
+
+<!-- markdownlint-disable MD013 -->
+
+<!-- markdownlint-disable MD013 MD060 -->
+
+| Option           | Modes                      | Default  | Check                                  |
+| ---------------- | -------------------------- | -------- | -------------------------------------- |
+| `--action-calls` | `off｜report｜fix｜update` | `fix`    | Action and workflow `uses:` references |
+| `--allow-list`   | `off｜report｜update`      | `report` | `harden-runner` allow-list pins        |
+
+<!-- markdownlint-enable MD013 MD060 -->
+
+<!-- markdownlint-enable MD013 -->
+
+The modes form a ladder of escalating intervention:
+
+- **`off`** — the check does not run. It validates nothing, reports
+  nothing, writes nothing, and takes no part in the exit code. Every
+  check shares one workflow discovery pass rather than owning its own,
+  so the scan itself still happens: it reports an unreadable path, and
+  the allow-list check reads it.
+- **`report`** — the check runs and reports. It never writes.
+- **`fix`** — as `report`, and repairs what is wrong *without changing
+  which version a reference names*. Pinning `@v4` to the commit SHA of
+  v4 counts as a repair, as does peeling an annotated tag to its commit.
+  A reference that no longer resolves forms the exception, because it
+  cannot stay.
+- **`update`** — as `fix`, and also advances references to newer
+  releases.
+
+```bash
+# Report; never touch the working tree
+gha-workflow-linter lint --action-calls report
+
+# Run nothing but the allow-list check
+gha-workflow-linter lint --action-calls off
+
+# Repair and advance to the latest releases
+gha-workflow-linter lint --action-calls update
+```
+
+The linter refuses a mode a check does not offer, rather than
+downgrading it:
+
+```console
+$ gha-workflow-linter lint --allow-list fix
+Configuration error: --allow-list does not support mode 'fix': repairing
+an allow-list pin without advancing its version is not implemented yet
+[...]; use 'update'. Supported modes: off, report, update
+```
+
+#### Modes do not decide what fails the run
+
+The `--verify-*` flags carry a separate axis: whether a finding fails
+the run.
+
+```bash
+# Repair what the linter can, and fail if anything remains outdated
+gha-workflow-linter lint --action-calls fix --verify-action-calls
+```
+
+The two axes stay orthogonal on purpose. `--action-calls fix` answers
+*change my files*; `--verify-action-calls` answers *fail my build*.
+Neither implies the other, and you want both together. Defect
+findings — a reference that is wrong now — always count towards the
+exit code, whichever mode you choose.
+
+> **Known limitation.** `--action-calls report --verify-action-calls`
+> does not yet fail on outdated calls. The component that detects
+> staleness is the same one that writes repairs, so `report` — which
+> must not write — skips detection as well. Use
+> `--action-calls fix --verify-action-calls` until that split lands.
+> Defect findings still fail the run in `report`, as always.
+
+#### Superseded flags
+
+The older flags keep working and name their replacement once:
+
+<!-- markdownlint-disable MD013 -->
+
+| Deprecated             | Use instead              |
+| ---------------------- | ------------------------ |
+| `--auto-fix`           | `--action-calls fix`     |
+| `--no-auto-fix`        | `--action-calls report`  |
+| `--update-actions`     | `--action-calls update`  |
+| `--auto-latest`        | `--action-calls update`  |
+| `--no-allow-list`      | `--allow-list off`       |
+| `--update-allow-list`  | `--allow-list update`    |
+| `--verify-actions`     | `--verify-action-calls`  |
+
+<!-- markdownlint-enable MD013 -->
+
+When a mode option appears beside one of these, the mode wins, and the
+run reports the flag it ignored.
+
+One spelling does change. `--allow-list` was a boolean pair, so the bare
+form meant "enable"; it now requires a mode, because an option cannot
+both take a value and be usable without one. Write `--allow-list report`
+for the old meaning. `--no-allow-list` keeps working as before.
+
 ### Auto-Fix Feature
 
 The linter can automatically fix invalid action references and pin them to
 commit SHAs:
 
 ```bash
-# Enable auto-fix (default: enabled unless overridden in config)
-gha-workflow-linter lint --auto-fix
+# Repair broken references, keeping the version each one names (default)
+gha-workflow-linter lint --action-calls fix
 
-# Disable auto-fix
-gha-workflow-linter lint --no-auto-fix
+# Report findings; never write
+gha-workflow-linter lint --action-calls report
 
-# Auto-fix with latest versions (default: disabled unless overridden in config)
-gha-workflow-linter lint --auto-fix --update-actions
-
-# Auto-fix without using latest versions (keeps current version)
-gha-workflow-linter lint --auto-fix --no-update-actions
+# Repair and advance to the latest release
+gha-workflow-linter lint --action-calls update
 ```
 
 **Updates do not move a pin backwards.** A resolved "latest" release
@@ -257,7 +358,7 @@ Example output (default behavior, test actions skipped):
 | `2`  | Command-line usage error (reserved by the argument parser)            |
 | `3`  | `--verify-allow-list` and stale allow-list pins remain                |
 | `4`  | `--verify-allow-list` and the tool could not reach the latest release |
-| `5`  | `--verify-actions` and outdated action calls remain                   |
+| `5`  | `--verify-action-calls` and outdated action calls remain              |
 | `6`  | Rate-limited API, and the run asked it to verify or update            |
 
 <!-- markdownlint-enable MD013 -->
@@ -283,15 +384,16 @@ depends on whether you asked it for anything:
 - **Advisory runs exit `0`**, as they always have. A throttle at GitHub
   must not break every build that merely wanted advice.
 - **A run that asked exits `6`.** "Could not look" answers neither *is
-  this current?* nor *make this current*, so `--verify-actions`,
-  `--verify-allow-list`, `--update-actions` and `--update-allow-list` all
+  this current?* nor *make this current*, so `--verify-action-calls`,
+  `--verify-allow-list`, `--action-calls update` and `--allow-list
+  update` all
   produce `6`, as do the configuration-file settings behind them. This is
   the same distinction `4` draws for an unresolved allow-list check.
 
 Turning off a stage removes the demand with it, so
-`--no-allow-list --verify-allow-list` exits `0` throttled or not: the
+`--allow-list off --verify-allow-list` exits `0` throttled or not: the
 check that would have answered it never runs either way. The same holds
-for the action-call settings under `--no-auto-fix`.
+for the action-call settings under `--action-calls report`.
 
 Either way the run still scans, so a path it cannot read is still
 reported; it still emits its `--format json` document; and that document
@@ -307,15 +409,15 @@ either one leaves work the run cannot do.
 
 ### Verifying Action Currency
 
-`--verify-actions` treats outdated action calls as errors, mirroring
-`--verify-allow-list`:
+`--verify-action-calls` treats outdated action calls as errors,
+mirroring `--verify-allow-list`:
 
 ```bash
 # Report outdated actions but do not fail (the default)
 gha-workflow-linter lint
 
 # Fail when any action call has a newer release available
-gha-workflow-linter lint --verify-actions
+gha-workflow-linter lint --verify-action-calls
 ```
 
 This is useful in a scheduled compliance run, where you want to know
@@ -332,10 +434,10 @@ policy.
 
 ```bash
 # Update to releases at least 7 days old
-gha-workflow-linter lint --auto-fix --update-actions --cooldown 7
+gha-workflow-linter lint --action-calls update --cooldown 7
 
 # Disable the cooldown (the default behaviour)
-gha-workflow-linter lint --auto-fix --update-actions --cooldown 0
+gha-workflow-linter lint --action-calls update --cooldown 0
 ```
 
 When `--cooldown` is not supplied, the linter walks up from the scanned
@@ -403,16 +505,16 @@ gha-workflow-linter lint
 gha-workflow-linter lint --verify-allow-list
 
 # Skip the check entirely
-gha-workflow-linter lint --no-allow-list
+gha-workflow-linter lint --allow-list off
 
 # Show pins silenced by a suppression directive
 gha-workflow-linter lint --show-suppressed
 
 # Rewrite stale pins in place
-gha-workflow-linter lint --update-allow-list
+gha-workflow-linter lint --allow-list update
 ```
 
-`--update-allow-list` changes the reference and its version comment and
+`--allow-list update` changes the reference and its version comment and
 nothing else. Quoting style, the spacing before `#`, the comment's
 position (inside or outside the quotes) and any suppression directive
 all survive the edit, so the resulting diff stays reviewable. Writes are
@@ -453,7 +555,7 @@ any indentation. An optional reason may follow ` -- ` and appears in
 reports. Both forms stay inert at run time: the action never sees them.
 
 The linter excludes a suppressed pin from reporting, enforcement **and
-remediation**: `--update-allow-list` leaves it alone. It still lists it
+remediation**: `--allow-list update` leaves it alone. It still lists it
 under `--format json` with
 `"suppressed": true`, and every run prints a one-line count so
 suppressions stay visible.
@@ -500,7 +602,7 @@ gha-workflow-linter lint ~/Repositories/lfreleng-actions --multi-repo
 gha-workflow-linter lint ~/Repositories --multi-repo --verify-allow-list
 
 # Bulk remediation across the estate
-gha-workflow-linter lint ~/Repositories --multi-repo --update-allow-list
+gha-workflow-linter lint ~/Repositories --multi-repo --allow-list update
 ```
 
 A directory counts as a repository when it holds a `.git` entry, so
@@ -1119,10 +1221,10 @@ Options:
   -e, --exclude PATTERN      Patterns to exclude (multiples accepted)
   --require-pinned-sha       Require actions pinned to commit SHAs (default)
   --no-require-pinned-sha    Allow actions with tags/branches
-  --auto-fix                 Auto-fix broken/invalid references
-  --no-auto-fix              Disable auto-fixing
-  --update-actions           Update action calls to the latest release
-  --no-update-actions        Keep the current action versions
+  --action-calls MODE        off|report|fix|update (default: fix)
+  --verify-action-calls      Fail when an action call has fallen behind
+  --allow-list MODE          off|report|update (default: report)
+  --verify-allow-list        Fail when an allow-list pin is stale
   --allow-prerelease         Allow prerelease versions for latest
   --no-allow-prerelease      Disallow prerelease versions
   --two-space-comments       Use two spaces before inline comments
